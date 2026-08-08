@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from ransomeye.report import write_case_report
 from ransomeye.storage import EvidenceStore
 from ransomeye.timeline import (
     build_process_tree,
@@ -178,6 +179,29 @@ def main() -> None:
         help="Case identifier.",
     )
 
+    report_parser = subparsers.add_parser(
+        "report",
+        help="Write a case report to disk.",
+    )
+    report_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    report_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+    report_parser.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="Path to write the report text file.",
+    )
+
     args = parser.parse_args()
 
     if args.command == "timeline":
@@ -190,6 +214,13 @@ def main() -> None:
             database_path=args.database,
             case_id=args.case_id,
         )
+    elif args.command == "report":
+        output_path = write_case_report(
+            database_path=args.database,
+            case_id=args.case_id,
+            output_path=args.output,
+        )
+        print(f"Report written to {output_path}")
 
 
 if __name__ == "__main__":

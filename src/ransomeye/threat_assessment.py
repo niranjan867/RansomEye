@@ -61,6 +61,13 @@ def assess_threat(events: list[Any]) -> dict[str, Any]:
 
     total_score = min(base_result["score"] + behavior_score + correlation_bonus, 100)
 
+    if behavior_findings:
+        behavior_floor = 25
+        if len(behavior_findings) > 1:
+            behavior_floor = 50
+        if total_score < behavior_floor:
+            total_score = behavior_floor
+
     reasons = []
 
     if base_result["score"] > 0:
