@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from ransomeye.integrity import sha256_file, verify_manifest
 from ransomeye.report import write_case_report
 from ransomeye.storage import EvidenceStore
 from ransomeye.timeline import (
@@ -184,6 +185,23 @@ def print_case_history(database_path: str | Path, case_id: str) -> None:
         store.close()
 
 
+def write_integrity_manifest(input_path: str | Path, output_path: str | Path) -> Path:
+    input_file = Path(input_path)
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    digest = sha256_file(input_file)
+    output_file.write_text(
+        f"SHA256  {input_file.name}\n{digest}\n",
+        encoding="utf-8",
+    )
+    return output_file
+
+
+def verify_integrity_manifest(artifact_path: str | Path, manifest_path: str | Path) -> bool:
+    return verify_manifest(Path(artifact_path), Path(manifest_path))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="ransomeye",
@@ -319,6 +337,46 @@ def main() -> None:
         help="Case identifier.",
     )
 
+    integrity_parser = subparsers.add_parser(
+        "integrity",
+        help="Create integrity manifests for evidence and reports.",
+    )
+    integrity_subparsers = integrity_parser.add_subparsers(dest="integrity_command", required=True)
+
+    integrity_hash_parser = integrity_subparsers.add_parser(
+        "hash",
+        help="Write a SHA-256 manifest for a file.",
+    )
+    integrity_hash_parser.add_argument(
+        "--input",
+        required=True,
+        type=Path,
+        help="Path to the evidence or report file to hash.",
+    )
+    integrity_hash_parser.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="Path to write the SHA-256 manifest.",
+    )
+
+    verify_parser = integrity_subparsers.add_parser(
+        "verify",
+        help="Verify an artifact against a SHA-256 manifest.",
+    )
+    verify_parser.add_argument(
+        "--input",
+        required=True,
+        type=Path,
+        help="Artifact to verify.",
+    )
+    verify_parser.add_argument(
+        "--manifest",
+        required=True,
+        type=Path,
+        help="SHA-256 manifest file.",
+    )
+
     args = parser.parse_args()
 
     if args.command == "timeline":
@@ -356,6 +414,21 @@ def main() -> None:
                 database_path=args.database,
                 case_id=args.case_id,
             )
+    elif args.command == "integrity":
+        if args.integrity_command == "hash":
+            manifest_path = write_integrity_manifest(
+                input_path=args.input,
+                output_path=args.output,
+            )
+            print(f"Manifest written to {manifest_path}")
+        elif args.integrity_command == "verify":
+            verified = verify_integrity_manifest(
+                artifact_path=args.input,
+                manifest_path=args.manifest,
+            )
+            if not verified:
+                parser.exit(1, "Integrity verification failed\n")
+            print("Integrity verified")
 
 
 if __name__ == "__main__":
