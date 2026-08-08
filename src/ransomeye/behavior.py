@@ -6,6 +6,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Any
 
 SUSPICIOUS_POWERSHELL_SCORE = 10
+SUSPICIOUS_CERTUTIL_SCORE = 12
 RECOVERY_INHIBITION_SCORE = 15
 
 
@@ -76,6 +77,53 @@ def detect_suspicious_powershell(
     return findings
 
 
+def detect_suspicious_certutil(
+    events: list[Any],
+) -> list[dict[str, Any]]:
+    """Detect certutil download/decode indicators."""
+    findings = []
+
+    indicators = (
+        "-urlcache",
+        "-split",
+        "-f",
+        "-decode",
+        "-decodehex",
+        "-verifyctl",
+    )
+
+    for event in events:
+        item = _as_dict(event)
+        process_name = str(item.get("process_name", "")).lower()
+        command_line = str(item.get("command_line", "")).lower()
+
+        if "certutil" not in process_name:
+            continue
+
+        matched = [
+            indicator for indicator in indicators if indicator in command_line
+        ]
+
+        if matched:
+            findings.append(
+                {
+                    "type": "suspicious_certutil",
+                    "score": SUSPICIOUS_CERTUTIL_SCORE,
+                    "confidence": 0.80,
+                    "technique": "T1105",
+                    "process_name": item.get("process_name"),
+                    "pid": item.get("pid"),
+                    "event_id": item.get("event_id"),
+                    "reason": (
+                        "Suspicious certutil indicators detected: "
+                        + ", ".join(matched)
+                    ),
+                }
+            )
+
+    return findings
+
+
 def detect_recovery_inhibition(
     events: list[Any],
 ) -> list[dict[str, Any]]:
@@ -121,6 +169,7 @@ def analyze_behavior(events: list[Any]) -> list[dict[str, Any]]:
     findings = []
 
     findings.extend(detect_suspicious_powershell(events))
+    findings.extend(detect_suspicious_certutil(events))
     findings.extend(detect_recovery_inhibition(events))
 
     return findings

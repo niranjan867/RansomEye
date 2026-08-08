@@ -49,6 +49,7 @@ def test_process_name_is_extracted_from_full_path():
 
     assert event["process_name"] == "powershell.exe"
     assert event["image_path"].endswith("powershell.exe")
+    assert event["file_path"].endswith("powershell.exe")
 
 
 def test_access_denied_message_is_friendly(monkeypatch):

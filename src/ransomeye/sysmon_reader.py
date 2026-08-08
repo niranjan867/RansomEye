@@ -62,6 +62,7 @@ def parse_process_creation_event(xml_text: str) -> dict[str, Any]:
         "parent_pid": data.get("ParentProcessId", ""),
         "process_guid": data.get("ProcessGuid", ""),
         "command_line": data.get("CommandLine", ""),
+        "file_path": data.get("Image", ""),
         "image_path": data.get("Image", ""),
         "parent_image": data.get("ParentImage", ""),
         "hashes": data.get("Hashes", ""),
