@@ -6,6 +6,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+from ransomeye.storage import EvidenceStore
 from ransomeye.timeline import build_process_tree, get_case_timeline
 
 
@@ -60,6 +61,16 @@ def generate_case_report(
             FROM findings
             WHERE case_id = ?
             ORDER BY created_at ASC
+            """,
+            (case_id,),
+        ).fetchall()
+
+        history_rows = connection.execute(
+            """
+            SELECT old_status, new_status, note, changed_at
+            FROM case_history
+            WHERE case_id = ?
+            ORDER BY changed_at ASC
             """,
             (case_id,),
         ).fetchall()
@@ -123,7 +134,23 @@ def generate_case_report(
                     ]
                 )
 
-        lines.extend(["TIMELINE", "--------"])
+        lines.extend(["Case lifecycle", "--------------"])
+        lines.append(f"Current status: {case['status'] or 'OPEN'}")
+        lines.append("")
+
+        if not history_rows:
+            lines.append("No status changes recorded.")
+        else:
+            lines.append("History:")
+            for row in history_rows:
+                note = row["note"] or ""
+                status_text = f"{row['old_status'] or '-'} -> {row['new_status']}"
+                if note:
+                    lines.append(f"{row['changed_at']} {status_text} :: {note}")
+                else:
+                    lines.append(f"{row['changed_at']} {status_text}")
+
+        lines.extend(["", "TIMELINE", "--------"])
 
         if not timeline:
             lines.append("No events.")

@@ -1,4 +1,5 @@
-from ransomeye.report import generate_case_report
+from ransomeye.report import generate_case_report, write_case_report
+from ransomeye.storage import EvidenceStore
 
 
 def test_generate_case_report(tmp_path):
@@ -49,3 +50,51 @@ def test_generate_case_report(tmp_path):
     assert "Process GUID:" in report
     assert "Parent GUID:" in report
     assert "Parent image:" in report
+
+
+def test_case_report_includes_lifecycle_history(tmp_path):
+    database_path = tmp_path / "case.db"
+    output_path = tmp_path / "case-report.txt"
+
+    store = EvidenceStore(database_path)
+    store.create_case(case_id="RE-V2-LIVE-001", case_name="Lifecycle Report")
+    store.update_case_status(
+        case_id="RE-V2-LIVE-001",
+        status="TRIAGED",
+        note="Reviewed stored process timeline",
+    )
+    store.close()
+
+    write_case_report(
+        database_path=database_path,
+        case_id="RE-V2-LIVE-001",
+        output_path=output_path,
+    )
+
+    report = output_path.read_text(encoding="utf-8")
+
+    assert "Case lifecycle" in report
+    assert "Current status: TRIAGED" in report
+    assert "OPEN -> TRIAGED" in report
+    assert "Reviewed stored process timeline" in report
+
+
+def test_case_report_includes_current_status_without_history(tmp_path):
+    database_path = tmp_path / "case.db"
+    output_path = tmp_path / "case-report.txt"
+
+    store = EvidenceStore(database_path)
+    store.create_case(case_id="RE-OPEN-001", case_name="Lifecycle Report")
+    store.close()
+
+    write_case_report(
+        database_path=database_path,
+        case_id="RE-OPEN-001",
+        output_path=output_path,
+    )
+
+    report = output_path.read_text(encoding="utf-8")
+
+    assert "Current status: OPEN" in report
+    assert "Case lifecycle" in report
+    assert "No status changes recorded." in report
