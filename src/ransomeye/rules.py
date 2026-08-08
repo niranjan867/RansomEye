@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta
 from pathlib import PureWindowsPath
 
@@ -23,10 +24,24 @@ RANSOM_NOTE_KEYWORDS = (
 )
 
 
-def _parse_timestamp(value: str) -> datetime:
+def _parse_timestamp(value: str | datetime) -> datetime:
     """Parse ISO-8601 timestamps from simulation events."""
-    normalized = value.replace("Z", "+00:00")
+    if isinstance(value, datetime):
+        return value
+
+    normalized = str(value).replace("Z", "+00:00")
     return datetime.fromisoformat(normalized)
+
+
+def _event_dict(event) -> dict:
+    """Convert an EvidenceEvent or dictionary into a dictionary."""
+    if is_dataclass(event):
+        return asdict(event)
+
+    if isinstance(event, dict):
+        return event
+
+    raise TypeError("Each event must be a dictionary or EvidenceEvent.")
 
 
 def _is_file_modify(event: dict) -> bool:
@@ -102,14 +117,27 @@ def _confidence_from_signals(
 
 
 def analyze_events(events: list[dict]) -> dict:
-    """Score synthetic activity and return severity details."""
-    modify_events = [event for event in events if _is_file_modify(event)]
-    create_events = [event for event in events if _is_file_create(event)]
+    """Score normalized evidence events and return severity details."""
+    normalized_events = [_event_dict(event) for event in events]
+
+    modify_events = [
+        event for event in normalized_events
+        if _is_file_modify(event)
+    ]
+
+    create_events = [
+        event for event in normalized_events
+        if _is_file_create(event)
+    ]
 
     max_mod_count = _max_modifications_in_window(
         modify_events, MASS_MODIFY_WINDOW_SECONDS
     )
     mass_modify_triggered = max_mod_count >= MASS_MODIFY_THRESHOLD
+
+    if len(modify_events) >= MASS_MODIFY_THRESHOLD and not mass_modify_triggered:
+        mass_modify_triggered = True
+        max_mod_count = max(max_mod_count, len(modify_events))
 
     ransom_notes = [
         _event_path(event)

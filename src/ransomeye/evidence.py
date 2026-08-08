@@ -13,6 +13,7 @@ ALLOWED_EVENT_TYPES = frozenset(
         "file_delete",
         "file_rename",
         "process_create",
+        "process_creation",
         "process_terminate",
         "network_connect",
         "dns_query",
@@ -103,6 +104,9 @@ class EvidenceEvent:
     parent_pid: int | None = None
     process_guid: str | None = None
     command_line: str | None = None
+    image_path: str | None = None
+    parent_image: str | None = None
+    hashes: str | None = None
     file_path: str | None = None
     file_count: int | None = None
     network: dict[str, Any] | None = field(default=None)
@@ -132,6 +136,9 @@ class EvidenceEvent:
             parent_pid=data.get("parent_pid"),
             process_guid=data.get("process_guid"),
             command_line=data.get("command_line"),
+            image_path=data.get("image_path"),
+            parent_image=data.get("parent_image"),
+            hashes=data.get("hashes"),
             file_path=data.get("file_path"),
             file_count=data.get("file_count"),
             network=data.get("network"),
