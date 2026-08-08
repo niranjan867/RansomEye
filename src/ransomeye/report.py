@@ -129,11 +129,20 @@ def generate_case_report(
             lines.append("No events.")
         else:
             for event in timeline:
-                lines.append(
-                    f"{event.get('timestamp', '')}  "
-                    f"{event.get('process_name', '')}  "
-                    f"PID={event.get('pid', '')}  "
-                    f"ParentPID={event.get('parent_pid', '')}"
+                lines.extend(
+                    [
+                        f"Time:              {event.get('timestamp', '')}",
+                        f"Process:           {event.get('process_name', '')}",
+                        f"Image:             {event.get('file_path') or 'N/A'}",
+                        f"Command line:      {event.get('command_line') or 'N/A'}",
+                        f"PID:               {event.get('pid') or 'N/A'}",
+                        f"Parent PID:        {event.get('parent_pid') or 'N/A'}",
+                        f"Process GUID:      {event.get('process_guid') or 'N/A'}",
+                        f"Parent GUID:       {event.get('parent_process_guid') or 'N/A'}",
+                        f"Parent image:      {event.get('parent_image') or 'N/A'}",
+                        f"Parent command:    {event.get('parent_command_line') or 'N/A'}",
+                        "",
+                    ]
                 )
 
         lines.extend(["", "PROCESS TREE", "------------"])
