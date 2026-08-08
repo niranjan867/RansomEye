@@ -54,27 +54,31 @@ def test_events_are_filtered_by_case_id(tmp_path):
 def test_parent_child_relationships_use_process_guids():
     events = [
         {
-            "process_guid": "child-guid",
-            "parent_process_guid": "parent-guid",
+            "pid": "100",
+            "parent_pid": "50",
+            "process_name": "powershell.exe",
         },
         {
-            "process_guid": "child-guid-2",
-            "parent_process_guid": "parent-guid",
+            "pid": "200",
+            "parent_pid": "100",
+            "process_name": "conhost.exe",
         },
     ]
 
     tree = build_process_tree(events)
 
-    assert tree["parent-guid"] == ["child-guid", "child-guid-2"]
+    assert tree["roots"] == ["100"]
+    assert tree["children"]["100"] == ["200"]
 
 
 def test_missing_parent_processes_do_not_crash_tree_builder():
     tree = build_process_tree([
-        {"process_guid": "child-guid"},
-        {"process_guid": "child-guid-2", "parent_process_guid": None},
+        {"pid": "200", "parent_pid": "999", "process_name": "wevtutil.exe"},
+        {"pid": "300", "parent_pid": None, "process_name": "cmd.exe"},
     ])
 
-    assert tree["root"] == ["child-guid", "child-guid-2"]
+    assert tree["roots"] == ["200", "300"]
+    assert tree["children"] == {}
 
 
 def test_empty_cases_return_empty_timeline_and_tree(tmp_path):
@@ -87,4 +91,44 @@ def test_empty_cases_return_empty_timeline_and_tree(tmp_path):
     tree = build_process_tree([])
 
     assert timeline == []
-    assert tree == {}
+    assert tree["nodes"] == {}
+    assert tree["children"] == {}
+    assert tree["roots"] == []
+
+
+def test_build_process_tree_links_parent_and_child():
+    events = [
+        {
+            "pid": "100",
+            "parent_pid": "50",
+            "process_name": "powershell.exe",
+            "timestamp": "2026-08-08T21:48:01Z",
+        },
+        {
+            "pid": "200",
+            "parent_pid": "100",
+            "process_name": "conhost.exe",
+            "timestamp": "2026-08-08T21:48:02Z",
+        },
+    ]
+
+    tree = build_process_tree(events)
+
+    assert tree["roots"] == ["100"]
+    assert tree["children"]["100"] == ["200"]
+    assert tree["nodes"]["200"]["process_name"] == "conhost.exe"
+
+
+def test_build_process_tree_handles_missing_parent():
+    events = [
+        {
+            "pid": "200",
+            "parent_pid": "999",
+            "process_name": "wevtutil.exe",
+        }
+    ]
+
+    tree = build_process_tree(events)
+
+    assert tree["roots"] == ["200"]
+    assert tree["children"] == {}

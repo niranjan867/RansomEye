@@ -46,20 +46,41 @@ def get_case_timeline(
         connection.close()
 
 
-def build_process_tree(events: list[dict[str, Any]]) -> dict[str, list[str]]:
-    """Build a parent-child process tree keyed by parent process GUID."""
-    tree: dict[str, list[str]] = {}
+def build_process_tree(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a PID-based process tree from timeline events."""
+    nodes: dict[str, dict[str, Any]] = {}
+    children: dict[str, list[str]] = {}
+    roots: list[str] = []
 
     for event in events:
-        parent_guid = event.get("parent_process_guid")
-        child_guid = event.get("process_guid")
-
-        if not child_guid:
+        pid = event.get("pid")
+        if pid is None:
             continue
 
-        if parent_guid:
-            tree.setdefault(parent_guid, []).append(child_guid)
-        else:
-            tree.setdefault("root", []).append(child_guid)
+        pid = str(pid)
 
-    return tree
+        nodes[pid] = {
+            "pid": pid,
+            "process_name": event.get("process_name") or "",
+            "parent_pid": (
+                str(event["parent_pid"])
+                if event.get("parent_pid") is not None
+                else None
+            ),
+            "timestamp": event.get("timestamp") or "",
+            "command_line": event.get("command_line") or "",
+        }
+
+    for pid, node in nodes.items():
+        parent_pid = node["parent_pid"]
+
+        if parent_pid and parent_pid in nodes:
+            children.setdefault(parent_pid, []).append(pid)
+        else:
+            roots.append(pid)
+
+    return {
+        "nodes": nodes,
+        "children": children,
+        "roots": roots,
+    }
