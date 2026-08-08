@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -112,6 +112,9 @@ class EvidenceStore:
             self._create_base_schema()
             self._set_schema_version(CURRENT_SCHEMA_VERSION)
             version = CURRENT_SCHEMA_VERSION
+        elif version == 1:
+            self._upgrade_schema_v1_to_v2()
+            version = CURRENT_SCHEMA_VERSION
 
         if version != CURRENT_SCHEMA_VERSION:
             raise RuntimeError(
@@ -120,7 +123,9 @@ class EvidenceStore:
 
     def _create_base_schema(self) -> None:
         self.connection.executescript(SCHEMA)
+        self.connection.commit()
 
+    def _upgrade_schema_v1_to_v2(self) -> None:
         existing_columns = {
             row[1]
             for row in self.connection.execute("PRAGMA table_info(events)")
@@ -137,6 +142,7 @@ class EvidenceStore:
                 )
 
         self.connection.commit()
+        self._set_schema_version(CURRENT_SCHEMA_VERSION)
 
     def close(self) -> None:
         self.connection.close()
