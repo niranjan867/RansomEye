@@ -1,0 +1,1070 @@
+{
+  "dataset": "ransomware_like_activity",
+  "description": "Synthetic ransomware-like activity for safe RansomEye testing.",
+  "events": [
+    {
+      "event_id": "rw-001",
+      "timestamp": "2026-08-08T11:00:00",
+      "source": "simulation",
+      "event_type": "file_create",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Desktop\\README_DECRYPT.txt",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "ransom_note_create"
+      }
+    },
+    {
+      "event_id": "rw-002",
+      "timestamp": "2026-08-08T11:00:01",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_001.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-003",
+      "timestamp": "2026-08-08T11:00:01",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_002.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-004",
+      "timestamp": "2026-08-08T11:00:02",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_003.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-005",
+      "timestamp": "2026-08-08T11:00:02",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_004.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-006",
+      "timestamp": "2026-08-08T11:00:03",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_005.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-007",
+      "timestamp": "2026-08-08T11:00:03",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_006.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-008",
+      "timestamp": "2026-08-08T11:00:04",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_007.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-009",
+      "timestamp": "2026-08-08T11:00:04",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_008.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-010",
+      "timestamp": "2026-08-08T11:00:05",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_009.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-011",
+      "timestamp": "2026-08-08T11:00:05",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_010.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-012",
+      "timestamp": "2026-08-08T11:00:06",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_011.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-013",
+      "timestamp": "2026-08-08T11:00:06",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_012.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-014",
+      "timestamp": "2026-08-08T11:00:07",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_013.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-015",
+      "timestamp": "2026-08-08T11:00:07",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_014.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-016",
+      "timestamp": "2026-08-08T11:00:08",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_015.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-017",
+      "timestamp": "2026-08-08T11:00:08",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_016.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-018",
+      "timestamp": "2026-08-08T11:00:09",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_017.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-019",
+      "timestamp": "2026-08-08T11:00:09",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_018.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-020",
+      "timestamp": "2026-08-08T11:00:10",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_019.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-021",
+      "timestamp": "2026-08-08T11:00:10",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_020.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-022",
+      "timestamp": "2026-08-08T11:00:11",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_021.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-023",
+      "timestamp": "2026-08-08T11:00:11",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_022.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-024",
+      "timestamp": "2026-08-08T11:00:12",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_023.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-025",
+      "timestamp": "2026-08-08T11:00:12",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_024.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-026",
+      "timestamp": "2026-08-08T11:00:13",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_025.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-027",
+      "timestamp": "2026-08-08T11:00:13",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_026.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-028",
+      "timestamp": "2026-08-08T11:00:14",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_027.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-029",
+      "timestamp": "2026-08-08T11:00:14",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_028.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-030",
+      "timestamp": "2026-08-08T11:00:15",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_029.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-031",
+      "timestamp": "2026-08-08T11:00:15",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_030.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-032",
+      "timestamp": "2026-08-08T11:00:16",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_031.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-033",
+      "timestamp": "2026-08-08T11:00:16",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_032.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-034",
+      "timestamp": "2026-08-08T11:00:17",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_033.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-035",
+      "timestamp": "2026-08-08T11:00:17",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_034.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-036",
+      "timestamp": "2026-08-08T11:00:18",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_035.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-037",
+      "timestamp": "2026-08-08T11:00:18",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_036.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-038",
+      "timestamp": "2026-08-08T11:00:19",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_037.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-039",
+      "timestamp": "2026-08-08T11:00:19",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_038.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-040",
+      "timestamp": "2026-08-08T11:00:20",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_039.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-041",
+      "timestamp": "2026-08-08T11:00:20",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_040.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-042",
+      "timestamp": "2026-08-08T11:00:21",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_041.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-043",
+      "timestamp": "2026-08-08T11:00:21",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_042.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-044",
+      "timestamp": "2026-08-08T11:00:22",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_043.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-045",
+      "timestamp": "2026-08-08T11:00:22",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_044.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-046",
+      "timestamp": "2026-08-08T11:00:23",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_045.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-047",
+      "timestamp": "2026-08-08T11:00:23",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_046.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-048",
+      "timestamp": "2026-08-08T11:00:24",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_047.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-049",
+      "timestamp": "2026-08-08T11:00:24",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_048.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-050",
+      "timestamp": "2026-08-08T11:00:25",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_049.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-051",
+      "timestamp": "2026-08-08T11:00:25",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_050.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-052",
+      "timestamp": "2026-08-08T11:00:26",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_051.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-053",
+      "timestamp": "2026-08-08T11:00:26",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_052.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-054",
+      "timestamp": "2026-08-08T11:00:27",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_053.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-055",
+      "timestamp": "2026-08-08T11:00:27",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_054.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    },
+    {
+      "event_id": "rw-056",
+      "timestamp": "2026-08-08T11:00:28",
+      "source": "simulation",
+      "event_type": "file_modify",
+      "process_name": "simulated_encryptor.exe",
+      "pid": 7777,
+      "parent_pid": 1000,
+      "process_guid": "{11111111-2222-3333-4444-555555555555}",
+      "command_line": "simulated_encryptor.exe --simulate",
+      "file_path": "C:\\Users\\victim\\Documents\\file_055.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {
+        "scenario": "ransomware_like",
+        "action": "simulated_encryption"
+      }
+    }
+  ]
+}

@@ -1,29 +1,86 @@
 {
+  "dataset": "normal_activity",
+  "description": "Benign synthetic user activity for safe RansomEye testing.",
   "events": [
     {
+      "event_id": "norm-001",
       "timestamp": "2026-08-08T10:00:00",
+      "source": "simulation",
       "event_type": "file_modify",
-      "file_path": "C:\\Users\\alice\\Documents\\report.docx"
+      "process_name": "winword.exe",
+      "pid": 4321,
+      "parent_pid": 1000,
+      "process_guid": "{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}",
+      "command_line": "winword.exe C:\\Users\\alice\\Documents\\report.docx",
+      "file_path": "C:\\Users\\alice\\Documents\\report.docx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {"scenario": "normal", "action": "document_edit"}
     },
     {
+      "event_id": "norm-002",
       "timestamp": "2026-08-08T10:05:12",
+      "source": "simulation",
       "event_type": "file_modify",
-      "file_path": "C:\\Users\\alice\\Documents\\budget.xlsx"
+      "process_name": "excel.exe",
+      "pid": 4322,
+      "parent_pid": 1000,
+      "process_guid": "{bbbbbbbb-cccc-dddd-eeee-ffffffffffff}",
+      "command_line": "excel.exe C:\\Users\\alice\\Documents\\budget.xlsx",
+      "file_path": "C:\\Users\\alice\\Documents\\budget.xlsx",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {"scenario": "normal", "action": "spreadsheet_edit"}
     },
     {
+      "event_id": "norm-003",
       "timestamp": "2026-08-08T10:12:45",
+      "source": "simulation",
       "event_type": "file_create",
-      "file_path": "C:\\Users\\alice\\Documents\\meeting_notes.txt"
+      "process_name": "notepad.exe",
+      "pid": 4323,
+      "parent_pid": 1000,
+      "process_guid": "{cccccccc-dddd-eeee-ffff-000000000000}",
+      "command_line": "notepad.exe",
+      "file_path": "C:\\Users\\alice\\Documents\\meeting_notes.txt",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {"scenario": "normal", "action": "note_creation"}
     },
     {
+      "event_id": "norm-004",
       "timestamp": "2026-08-08T10:18:03",
+      "source": "simulation",
       "event_type": "file_modify",
-      "file_path": "C:\\Users\\alice\\Pictures\\vacation.jpg"
+      "process_name": "photos.exe",
+      "pid": 4324,
+      "parent_pid": 1000,
+      "process_guid": "{dddddddd-eeee-ffff-0000-111111111111}",
+      "command_line": "photos.exe",
+      "file_path": "C:\\Users\\alice\\Pictures\\vacation.jpg",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {"scenario": "normal", "action": "photo_edit"}
     },
     {
+      "event_id": "norm-005",
       "timestamp": "2026-08-08T10:25:30",
+      "source": "simulation",
       "event_type": "file_create",
-      "file_path": "C:\\Users\\alice\\Downloads\\invoice.pdf"
+      "process_name": "chrome.exe",
+      "pid": 4325,
+      "parent_pid": 1000,
+      "process_guid": "{eeeeeeee-ffff-0000-1111-222222222222}",
+      "command_line": "chrome.exe --download",
+      "file_path": "C:\\Users\\alice\\Downloads\\invoice.pdf",
+      "file_count": null,
+      "network": null,
+      "confidence": null,
+      "metadata": {"scenario": "normal", "action": "download_save"}
     }
   ]
 }
