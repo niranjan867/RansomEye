@@ -49,3 +49,25 @@ def test_process_name_is_extracted_from_full_path():
 
     assert event["process_name"] == "powershell.exe"
     assert event["image_path"].endswith("powershell.exe")
+
+
+def test_access_denied_message_is_friendly(monkeypatch):
+    import subprocess
+    from ransomeye import sysmon_reader
+
+    class FakeResult:
+        returncode = 1
+        stdout = ""
+        stderr = "Access is denied.\n\nFailed to open event query.\nAccess is denied."
+
+    def fake_run(*args, **kwargs):
+        return FakeResult()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    try:
+        sysmon_reader.read_process_creation_events(5)
+    except sysmon_reader.SysmonReaderError as error:
+        assert "Administrator permission is required" in str(error)
+    else:
+        raise AssertionError("Expected SysmonReaderError")

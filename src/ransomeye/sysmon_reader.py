@@ -115,6 +115,14 @@ def read_process_creation_events(limit: int = 20) -> list[dict[str, Any]]:
     )
 
     if result.returncode != 0:
+        stderr = result.stderr.strip().lower()
+
+        if "access is denied" in stderr:
+            raise SysmonReaderError(
+                "Administrator permission is required to read Sysmon events. "
+                "Restart RansomEye as an administrator and try again."
+            )
+
         message = result.stderr.strip() or "Sysmon event channel could not be read."
         raise SysmonReaderError(message)
 
