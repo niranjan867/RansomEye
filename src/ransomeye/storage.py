@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+CURRENT_SCHEMA_VERSION = 1
+
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 
@@ -93,6 +95,30 @@ class EvidenceStore:
         self.connection = sqlite3.connect(self.database_path)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
+        self._initialize_schema()
+
+    def _get_schema_version(self) -> int:
+        row = self.connection.execute("PRAGMA user_version").fetchone()
+        return int(row[0])
+
+    def _set_schema_version(self, version: int) -> None:
+        self.connection.execute(f"PRAGMA user_version = {version}")
+        self.connection.commit()
+
+    def _initialize_schema(self) -> None:
+        version = self._get_schema_version()
+
+        if version < 1:
+            self._create_base_schema()
+            self._set_schema_version(CURRENT_SCHEMA_VERSION)
+            version = CURRENT_SCHEMA_VERSION
+
+        if version != CURRENT_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Unsupported database schema version: {version}"
+            )
+
+    def _create_base_schema(self) -> None:
         self.connection.executescript(SCHEMA)
 
         existing_columns = {
