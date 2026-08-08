@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS events (
     pid TEXT,
     parent_pid TEXT,
     process_guid TEXT,
+    parent_process_guid TEXT,
+    parent_image TEXT,
+    parent_command_line TEXT,
     command_line TEXT,
     file_path TEXT,
     file_count INTEGER,
@@ -91,6 +94,22 @@ class EvidenceStore:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.executescript(SCHEMA)
+
+        existing_columns = {
+            row[1]
+            for row in self.connection.execute("PRAGMA table_info(events)")
+        }
+
+        for column in (
+            "parent_process_guid",
+            "parent_image",
+            "parent_command_line",
+        ):
+            if column not in existing_columns:
+                self.connection.execute(
+                    f"ALTER TABLE events ADD COLUMN {column} TEXT"
+                )
+
         self.connection.commit()
 
     def close(self) -> None:
@@ -131,6 +150,9 @@ class EvidenceStore:
                 pid,
                 parent_pid,
                 process_guid,
+                parent_process_guid,
+                parent_image,
+                parent_command_line,
                 command_line,
                 file_path,
                 file_count,
@@ -138,7 +160,7 @@ class EvidenceStore:
                 confidence,
                 metadata_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item.get("event_id"),
@@ -150,6 +172,9 @@ class EvidenceStore:
                 str(item.get("pid", "")),
                 str(item.get("parent_pid", "")),
                 item.get("process_guid"),
+                item.get("parent_process_guid"),
+                item.get("parent_image"),
+                item.get("parent_command_line"),
                 item.get("command_line"),
                 item.get("file_path"),
                 item.get("file_count"),

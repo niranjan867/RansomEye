@@ -45,14 +45,16 @@ def print_case_timeline(database_path: str | Path, case_id: str) -> None:
             process_name = str(entry.get("process_name") or "")
             parent_name = ""
 
-            parent_pid = entry.get("parent_pid")
-
-            if parent_pid is not None:
-                parent_pid_text = str(parent_pid)
+            if entry.get("parent_image"):
+                parent_name = str(entry["parent_image"]).split("\\")[-1]
+            elif entry.get("parent_pid") is not None:
+                parent_pid_text = str(entry["parent_pid"])
                 parent_name = process_names_by_pid.get(
                     parent_pid_text,
                     f"PID {parent_pid_text}",
                 )
+            else:
+                parent_name = ""
 
             print(f"{timestamp:<20} {process_name:<18} {parent_name}")
     finally:

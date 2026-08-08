@@ -28,6 +28,9 @@ def get_case_timeline(
                 pid,
                 parent_pid,
                 process_guid,
+                parent_process_guid,
+                parent_image,
+                parent_command_line,
                 command_line,
                 file_path,
                 confidence
