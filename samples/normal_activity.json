@@ -1,0 +1,29 @@
+{
+  "events": [
+    {
+      "timestamp": "2026-08-08T10:00:00",
+      "event_type": "file_modify",
+      "file_path": "C:\\Users\\alice\\Documents\\report.docx"
+    },
+    {
+      "timestamp": "2026-08-08T10:05:12",
+      "event_type": "file_modify",
+      "file_path": "C:\\Users\\alice\\Documents\\budget.xlsx"
+    },
+    {
+      "timestamp": "2026-08-08T10:12:45",
+      "event_type": "file_create",
+      "file_path": "C:\\Users\\alice\\Documents\\meeting_notes.txt"
+    },
+    {
+      "timestamp": "2026-08-08T10:18:03",
+      "event_type": "file_modify",
+      "file_path": "C:\\Users\\alice\\Pictures\\vacation.jpg"
+    },
+    {
+      "timestamp": "2026-08-08T10:25:30",
+      "event_type": "file_create",
+      "file_path": "C:\\Users\\alice\\Downloads\\invoice.pdf"
+    }
+  ]
+}
