@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
+
+CASE_STATUSES = {"OPEN", "TRIAGED", "CONTAINED", "CLOSED", "REOPENED"}
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -18,7 +20,7 @@ CREATE TABLE IF NOT EXISTS cases (
     case_id TEXT PRIMARY KEY,
     case_name TEXT NOT NULL,
     host TEXT,
-    status TEXT NOT NULL DEFAULT 'Open',
+    status TEXT NOT NULL DEFAULT 'OPEN',
     severity TEXT NOT NULL DEFAULT 'SAFE',
     created_at TEXT NOT NULL
 );
@@ -68,6 +70,19 @@ CREATE TABLE IF NOT EXISTS assessments (
     created_at TEXT NOT NULL,
     FOREIGN KEY (case_id) REFERENCES cases(case_id)
 );
+
+CREATE TABLE IF NOT EXISTS case_history (
+    history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id TEXT NOT NULL,
+    old_status TEXT,
+    new_status TEXT NOT NULL,
+    note TEXT,
+    changed_at TEXT NOT NULL,
+    FOREIGN KEY (case_id) REFERENCES cases(case_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_case_history_case_id
+ON case_history(case_id);
 """
 
 
@@ -114,6 +129,10 @@ class EvidenceStore:
             version = CURRENT_SCHEMA_VERSION
         elif version == 1:
             self._upgrade_schema_v1_to_v2()
+            version = 2
+
+        if version == 2:
+            self._upgrade_schema_v2_to_v3()
             version = CURRENT_SCHEMA_VERSION
 
         if version != CURRENT_SCHEMA_VERSION:
@@ -142,6 +161,29 @@ class EvidenceStore:
                 )
 
         self.connection.commit()
+        self._set_schema_version(2)
+
+    def _upgrade_schema_v2_to_v3(self) -> None:
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS case_history (
+                history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id TEXT NOT NULL,
+                old_status TEXT,
+                new_status TEXT NOT NULL,
+                note TEXT,
+                changed_at TEXT NOT NULL,
+                FOREIGN KEY (case_id) REFERENCES cases(case_id)
+            )
+            """
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_case_history_case_id ON case_history(case_id)"
+        )
+        self.connection.execute(
+            "UPDATE cases SET status = 'OPEN' WHERE status IS NULL OR status = '' OR status = 'Open' OR status = 'open'"
+        )
+        self.connection.commit()
         self._set_schema_version(CURRENT_SCHEMA_VERSION)
 
     def close(self) -> None:
@@ -157,11 +199,64 @@ class EvidenceStore:
             """
             INSERT INTO cases
                 (case_id, case_name, host, status, severity, created_at)
-            VALUES (?, ?, ?, 'Open', 'SAFE', ?)
+            VALUES (?, ?, ?, 'OPEN', 'SAFE', ?)
             """,
             (case_id, case_name, host, _now()),
         )
         self.connection.commit()
+
+    def update_case_status(
+        self,
+        case_id: str,
+        status: str,
+        note: str = "",
+    ) -> None:
+        normalized_status = status.upper()
+        if normalized_status not in CASE_STATUSES:
+            raise ValueError(
+                f"Unsupported case status: {status}. Expected one of {sorted(CASE_STATUSES)}"
+            )
+
+        case_row = self.connection.execute(
+            "SELECT status FROM cases WHERE case_id = ?",
+            (case_id,),
+        ).fetchone()
+        if case_row is None:
+            raise KeyError(f"Case not found: {case_id}")
+
+        old_status = case_row[0] or "OPEN"
+
+        with self.connection:
+            self.connection.execute(
+                "UPDATE cases SET status = ? WHERE case_id = ?",
+                (normalized_status, case_id),
+            )
+            self.connection.execute(
+                """
+                INSERT INTO case_history (
+                    case_id,
+                    old_status,
+                    new_status,
+                    note,
+                    changed_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (case_id, old_status, normalized_status, note, _now()),
+            )
+
+    def get_case_history(self, case_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT case_id, old_status, new_status, note, changed_at
+            FROM case_history
+            WHERE case_id = ?
+            ORDER BY changed_at ASC
+            """,
+            (case_id,),
+        ).fetchall()
+
+        return [dict(row) for row in rows]
 
     def save_event(self, case_id: str, event: Any) -> None:
         item = _event_dict(event)

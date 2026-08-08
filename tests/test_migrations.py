@@ -33,11 +33,11 @@ def table_columns(database_path):
     return columns
 
 
-def test_new_database_receives_schema_version_two(tmp_path):
+def test_new_database_receives_schema_version_three(tmp_path):
     database_path = tmp_path / "migrations.db"
     store = EvidenceStore(database_path)
 
-    assert store._get_schema_version() == 2
+    assert store._get_schema_version() == 3
 
     store.close()
 
@@ -63,7 +63,7 @@ def test_reopening_already_current_database_is_safe(tmp_path):
     store.close()
 
     reopened = EvidenceStore(database_path)
-    assert reopened._get_schema_version() == 2
+    assert reopened._get_schema_version() == 3
 
     reopened.close()
 
@@ -156,7 +156,7 @@ def test_reopening_v2_database_is_safe(tmp_path):
     version = connection.execute("PRAGMA user_version").fetchone()[0]
     connection.close()
 
-    assert version == 2
+    assert version == 3
 
 
 def test_unsupported_future_schema_version_fails_clearly(tmp_path):
