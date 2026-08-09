@@ -718,3 +718,85 @@ def backup_database(
             error=str(exc),
         )
         raise
+
+
+def restore_database(
+    backup_path: Path | str,
+    output_path: Path | str,
+) -> Path:
+    backup_path = Path(backup_path)
+    output_path = Path(output_path)
+    log_path = os.environ.get("RANSOMEYE_LOG_PATH", "logs/audit.jsonl")
+
+    if not backup_path.is_file():
+        try_write_audit_event(
+            log_path,
+            "database_restore",
+            "failure",
+            backup=str(backup_path),
+            output=str(output_path),
+            error=f"Backup not found: {backup_path}",
+        )
+        raise FileNotFoundError(
+            f"Backup not found: {backup_path}"
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        fd = os.open(
+            output_path,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        )
+        os.close(fd)
+    except FileExistsError as exc:
+        try_write_audit_event(
+            log_path,
+            "database_restore",
+            "rejected",
+            backup=str(backup_path),
+            output=str(output_path),
+            error=str(exc),
+        )
+        raise FileExistsError(
+            f"Restore destination already exists: {output_path}"
+        ) from exc
+
+    try:
+        source_uri = f"{backup_path.resolve().as_uri()}?mode=ro"
+
+        source = sqlite3.connect(source_uri, uri=True)
+        try:
+            destination = sqlite3.connect(output_path)
+            try:
+                source.backup(destination)
+            finally:
+                destination.close()
+        finally:
+            source.close()
+
+        if not check_database_integrity(output_path):
+            raise sqlite3.DatabaseError(
+                f"Restored database integrity check failed: {output_path}"
+            )
+
+        try_write_audit_event(
+            log_path,
+            "database_restore",
+            "success",
+            backup=str(backup_path),
+            output=str(output_path),
+        )
+        return output_path
+
+    except Exception as exc:
+        output_path.unlink(missing_ok=True)
+        try_write_audit_event(
+            log_path,
+            "database_restore",
+            "failure",
+            backup=str(backup_path),
+            output=str(output_path),
+            error=str(exc),
+        )
+        raise

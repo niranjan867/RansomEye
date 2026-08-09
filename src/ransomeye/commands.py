@@ -548,6 +548,24 @@ def main() -> None:
         help="Destination path for the backup.",
     )
 
+    db_restore_parser = database_subparsers.add_parser(
+        "restore",
+        help="Restore a SQLite database from a backup.",
+    )
+    db_restore_parser.add_argument(
+        "--backup",
+        required=True,
+        type=Path,
+        help="Path to the SQLite backup.",
+    )
+    db_restore_parser.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="Destination path for the restored database.",
+    )
+
+
 
     args = parser.parse_args()
 
@@ -786,6 +804,18 @@ def main() -> None:
                 print(f"Database backup created: {backup_path}")
             except (FileExistsError, FileNotFoundError, OSError, sqlite3.Error) as exc:
                 parser.exit(1, f"Database backup failed: {exc}\n")
+        elif args.database_command == "restore":
+            try:
+                from ransomeye.storage import restore_database
+
+                restored_path = restore_database(
+                    args.backup,
+                    args.output,
+                )
+                print(f"Database restored: {restored_path}")
+            except (FileExistsError, FileNotFoundError, OSError, sqlite3.Error) as exc:
+                parser.exit(1, f"Database restore failed: {exc}\n")
+
 
 
 
