@@ -58,21 +58,23 @@ def detect_suspicious_powershell(
         ]
 
         if matched:
-            findings.append(
-                {
-                    "type": "suspicious_powershell",
-                    "score": SUSPICIOUS_POWERSHELL_SCORE,
-                    "confidence": 0.80,
-                    "technique": "T1059.001",
-                    "process_name": item.get("process_name"),
-                    "pid": item.get("pid"),
-                    "event_id": item.get("event_id"),
-                    "reason": (
-                        "Suspicious PowerShell indicators detected: "
-                        + ", ".join(matched)
-                    ),
-                }
-            )
+            event_id = item.get("event_id")
+            finding = {
+                "type": "suspicious_powershell",
+                "score": SUSPICIOUS_POWERSHELL_SCORE,
+                "confidence": 0.80,
+                "technique": "T1059.001",
+                "process_name": item.get("process_name"),
+                "pid": item.get("pid"),
+                "event_id": event_id,
+                "reason": (
+                    "Suspicious PowerShell indicators detected: "
+                    + ", ".join(matched)
+                ),
+            }
+            if event_id is not None and str(event_id).strip():
+                finding["event_ids"] = [str(event_id).strip()]
+            findings.append(finding)
 
     return findings
 
@@ -105,21 +107,23 @@ def detect_suspicious_certutil(
         ]
 
         if matched:
-            findings.append(
-                {
-                    "type": "suspicious_certutil",
-                    "score": SUSPICIOUS_CERTUTIL_SCORE,
-                    "confidence": 0.80,
-                    "technique": "T1105",
-                    "process_name": item.get("process_name"),
-                    "pid": item.get("pid"),
-                    "event_id": item.get("event_id"),
-                    "reason": (
-                        "Suspicious certutil indicators detected: "
-                        + ", ".join(matched)
-                    ),
-                }
-            )
+            event_id = item.get("event_id")
+            finding = {
+                "type": "suspicious_certutil",
+                "score": SUSPICIOUS_CERTUTIL_SCORE,
+                "confidence": 0.80,
+                "technique": "T1105",
+                "process_name": item.get("process_name"),
+                "pid": item.get("pid"),
+                "event_id": event_id,
+                "reason": (
+                    "Suspicious certutil indicators detected: "
+                    + ", ".join(matched)
+                ),
+            }
+            if event_id is not None and str(event_id).strip():
+                finding["event_ids"] = [str(event_id).strip()]
+            findings.append(finding)
 
     return findings
 
@@ -145,21 +149,23 @@ def detect_recovery_inhibition(
         matched = [indicator for indicator in indicators if indicator in text]
 
         if matched:
-            findings.append(
-                {
-                    "type": "recovery_inhibition",
-                    "score": RECOVERY_INHIBITION_SCORE,
-                    "confidence": 0.85,
-                    "technique": "T1490",
-                    "process_name": item.get("process_name"),
-                    "pid": item.get("pid"),
-                    "event_id": item.get("event_id"),
-                    "reason": (
-                        "Recovery-inhibition indicator detected: "
-                        + ", ".join(matched)
-                    ),
-                }
-            )
+            event_id = item.get("event_id")
+            finding = {
+                "type": "recovery_inhibition",
+                "score": RECOVERY_INHIBITION_SCORE,
+                "confidence": 0.85,
+                "technique": "T1490",
+                "process_name": item.get("process_name"),
+                "pid": item.get("pid"),
+                "event_id": event_id,
+                "reason": (
+                    "Recovery-inhibition indicator detected: "
+                    + ", ".join(matched)
+                ),
+            }
+            if event_id is not None and str(event_id).strip():
+                finding["event_ids"] = [str(event_id).strip()]
+            findings.append(finding)
 
     return findings
 

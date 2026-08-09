@@ -39,7 +39,11 @@ def collect_and_store(
         findings = analyze_behavior(evidence_events)
 
         for finding in findings:
-            store.save_finding(case_id, finding)
+            event_ids = finding.get("event_ids")
+            if not event_ids and finding.get("event_id"):
+                event_ids = [str(finding["event_id"])]
+            store.save_finding(case_id, finding, event_ids=event_ids)
+
 
         assessment = assess_threat(evidence_events)
         store.save_assessment(case_id, assessment)
