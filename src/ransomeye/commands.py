@@ -448,26 +448,54 @@ def main() -> None:
         "export",
         help="Export case evidence package.",
     )
+    export_subparsers = export_parser.add_subparsers(dest="export_command")
+
+    # Standard export arguments when no subcommand (lock-info / unlock) is passed
     export_parser.add_argument(
         "--database",
-        required=True,
         type=Path,
         help="Path to the RansomEye SQLite database.",
     )
     export_parser.add_argument(
         "--case",
-        required=True,
         dest="case_id",
         help="Case identifier.",
     )
     export_parser.add_argument(
         "--output",
-        required=True,
         type=Path,
         help="Output directory path for the export package.",
     )
 
+    lock_info_parser = export_subparsers.add_parser(
+        "lock-info",
+        help="Inspect export lock file metadata.",
+    )
+    lock_info_parser.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="Output directory path of the export package.",
+    )
+
+    unlock_parser = export_subparsers.add_parser(
+        "unlock",
+        help="Remove export lock file.",
+    )
+    unlock_parser.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="Output directory path of the export package.",
+    )
+    unlock_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force removal of the lock file.",
+    )
+
     args = parser.parse_args()
+
 
     if args.command == "timeline":
 
@@ -571,19 +599,51 @@ def main() -> None:
                 parser.exit(1, "Integrity verification failed\n")
             print("Integrity verified")
     elif args.command == "export":
-        try:
-            from ransomeye.export import export_case
+        from ransomeye.export import (
+            export_case,
+            read_export_lock,
+            remove_export_lock,
+        )
 
-            exported_path = export_case(
-                database_path=args.database,
-                case_id=args.case_id,
-                output_path=args.output,
-            )
-            print(f"Exported case package to {exported_path}")
-        except FileExistsError as exc:
-            parser.exit(1, f"{exc}\n")
-        except (OSError, sqlite3.Error, ValueError) as exc:
-            parser.exit(1, f"Operation failed: {exc}\n")
+        if args.export_command == "lock-info":
+            try:
+                metadata = read_export_lock(args.output)
+                print("Export lock:")
+                print(f"  PID: {metadata.get('pid')}")
+                print(f"  Created UTC: {metadata.get('created_utc')}")
+                print(f"  Case: {metadata.get('case_id')}")
+                print(f"  Database: {metadata.get('database')}")
+                print(f"  Output: {metadata.get('output')}")
+            except (FileNotFoundError, ValueError, OSError) as exc:
+                parser.exit(1, f"{exc}\n")
+        elif args.export_command == "unlock":
+            try:
+                metadata = read_export_lock(args.output)
+                print("Export lock:")
+                print(f"  PID: {metadata.get('pid')}")
+                print(f"  Created UTC: {metadata.get('created_utc')}")
+                print(f"  Case: {metadata.get('case_id')}")
+                print(f"  Database: {metadata.get('database')}")
+                print(f"  Output: {metadata.get('output')}")
+                removed_lock = remove_export_lock(args.output, force=args.force)
+                print(f"Removed export lock: {removed_lock}")
+            except (FileNotFoundError, ValueError, PermissionError, OSError) as exc:
+                parser.exit(1, f"{exc}\n")
+        else:
+            if not args.database or not args.case_id or not args.output:
+                parser.exit(2, "export requires --database, --case, and --output\n")
+            try:
+                exported_path = export_case(
+                    database_path=args.database,
+                    case_id=args.case_id,
+                    output_path=args.output,
+                )
+                print(f"Exported case package to {exported_path}")
+            except FileExistsError as exc:
+                parser.exit(1, f"{exc}\n")
+            except (OSError, sqlite3.Error, ValueError) as exc:
+                parser.exit(1, f"Operation failed: {exc}\n")
+
 
 
 

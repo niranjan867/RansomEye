@@ -9,10 +9,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 import pytest
 
-from ransomeye.export import export_case, verify_export_package
+from ransomeye.export import (
+    _reserve_output_path,
+    export_case,
+    read_export_lock,
+    remove_export_lock,
+    verify_export_package,
+)
 from ransomeye.storage import EvidenceStore
 
 
@@ -226,8 +231,6 @@ def test_duplicate_status_transition_is_handled(tmp_path: Path) -> None:
 
 
 def test_export_lock_contains_metadata(tmp_path: Path) -> None:
-    from ransomeye.export import _reserve_output_path
-
     output_path = tmp_path / "CASE-001"
     lock_path, lock_fd = _reserve_output_path(
         output_path,
@@ -270,3 +273,109 @@ def test_failed_export_removes_metadata_lock(
         export_case(db_path, "CASE-001", tmp_path / "CASE-001")
 
     assert not (tmp_path / ".CASE-001.lock").exists()
+
+
+def test_lock_info_reads_metadata(tmp_path: Path) -> None:
+    output_path = tmp_path / "CASE-001"
+    lock_path, lock_fd = _reserve_output_path(
+        output_path,
+        database_path=tmp_path / "test.db",
+        case_id="CASE-001",
+    )
+
+    try:
+        metadata = read_export_lock(output_path)
+        assert metadata["case_id"] == "CASE-001"
+        assert metadata["output"] == str(output_path)
+    finally:
+        os.close(lock_fd)
+        lock_path.unlink(missing_ok=True)
+
+
+def test_missing_lock_returns_failure(tmp_path: Path) -> None:
+    output_path = tmp_path / "NONEXISTENT"
+    with pytest.raises(FileNotFoundError, match="No export lock found"):
+        read_export_lock(output_path)
+
+    result = _run_cli(["export", "lock-info", "--output", str(output_path)], cwd=tmp_path)
+    assert result.returncode != 0
+    assert "No export lock found" in result.stderr
+
+
+def test_malformed_lock_returns_failure(tmp_path: Path) -> None:
+    output_path = tmp_path / "CASE-CORRUPT"
+    lock_path = tmp_path / ".CASE-CORRUPT.lock"
+    lock_path.write_text("invalid json content", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Export lock is invalid"):
+        read_export_lock(output_path)
+
+    result = _run_cli(["export", "lock-info", "--output", str(output_path)], cwd=tmp_path)
+    assert result.returncode != 0
+    assert "Export lock is invalid" in result.stderr
+
+
+def test_missing_metadata_fields_are_rejected(tmp_path: Path) -> None:
+    output_path = tmp_path / "CASE-INCOMPLETE"
+    lock_path = tmp_path / ".CASE-INCOMPLETE.lock"
+    lock_path.write_text(json.dumps({"pid": 1234}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Export lock is missing required metadata"):
+        read_export_lock(output_path)
+
+    result = _run_cli(["export", "lock-info", "--output", str(output_path)], cwd=tmp_path)
+    assert result.returncode != 0
+    assert "Export lock is missing required metadata" in result.stderr
+
+
+def test_unlock_without_force_is_rejected(tmp_path: Path) -> None:
+    output_path = tmp_path / "CASE-LOCKED"
+    lock_path, lock_fd = _reserve_output_path(
+        output_path,
+        database_path=tmp_path / "test.db",
+        case_id="CASE-LOCKED",
+    )
+    os.close(lock_fd)
+
+    try:
+        with pytest.raises(PermissionError, match="Lock removal requires --force"):
+            remove_export_lock(output_path, force=False)
+
+        result = _run_cli(["export", "unlock", "--output", str(output_path)], cwd=tmp_path)
+        assert result.returncode != 0
+        assert "Lock removal requires --force" in result.stderr
+        assert lock_path.exists()
+    finally:
+        lock_path.unlink(missing_ok=True)
+
+
+def test_unlock_with_force_removes_exact_lock(tmp_path: Path) -> None:
+    output_path = tmp_path / "CASE-UNLOCKED"
+    lock_path, lock_fd = _reserve_output_path(
+        output_path,
+        database_path=tmp_path / "test.db",
+        case_id="CASE-UNLOCKED",
+    )
+    os.close(lock_fd)
+
+    removed = remove_export_lock(output_path, force=True)
+    assert removed == lock_path
+    assert not lock_path.exists()
+
+
+def test_unlock_one_output_does_not_remove_another(tmp_path: Path) -> None:
+    path1 = tmp_path / "CASE-001"
+    path2 = tmp_path / "CASE-002"
+
+    lock_path1, lock_fd1 = _reserve_output_path(path1, database_path=tmp_path / "db.db", case_id="CASE-001")
+    lock_path2, lock_fd2 = _reserve_output_path(path2, database_path=tmp_path / "db.db", case_id="CASE-002")
+
+    os.close(lock_fd1)
+    os.close(lock_fd2)
+
+    try:
+        remove_export_lock(path1, force=True)
+        assert not lock_path1.exists()
+        assert lock_path2.exists()
+    finally:
+        lock_path2.unlink(missing_ok=True)

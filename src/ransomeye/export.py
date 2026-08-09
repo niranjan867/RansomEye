@@ -56,6 +56,56 @@ def verify_export_package(export_dir: Path) -> bool:
         return False
 
 
+def get_export_lock_path(output_path: Path) -> Path:
+    output_path = Path(output_path)
+    return output_path.parent / f".{output_path.name}.lock"
+
+
+def read_export_lock(output_path: Path) -> dict[str, Any]:
+    lock_path = get_export_lock_path(output_path)
+
+    if not lock_path.is_file():
+        raise FileNotFoundError(
+            f"No export lock found for: {output_path}"
+        )
+
+    try:
+        metadata = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Export lock is invalid: {lock_path}"
+        ) from exc
+
+    required = {
+        "pid",
+        "created_utc",
+        "database",
+        "case_id",
+        "output",
+    }
+
+    if not isinstance(metadata, dict) or not required.issubset(metadata):
+        raise ValueError(
+            f"Export lock is missing required metadata: {lock_path}"
+        )
+
+    return metadata
+
+
+def remove_export_lock(output_path: Path, *, force: bool = False) -> Path:
+    lock_path = get_export_lock_path(output_path)
+    metadata = read_export_lock(output_path)
+
+    if not force:
+        raise PermissionError(
+            "Lock removal requires --force"
+        )
+
+    lock_path.unlink()
+    return lock_path
+
+
+
 def _reserve_output_path(
     output_path: Path,
     *,
