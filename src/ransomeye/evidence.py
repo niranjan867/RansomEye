@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 ALLOWED_EVENT_TYPES = frozenset(
     {
@@ -21,6 +21,30 @@ ALLOWED_EVENT_TYPES = frozenset(
         "registry_modify",
         "registry_delete",
         "image_load",
+    }
+)
+
+KNOWN_FIELDS = frozenset(
+    {
+        "event_id",
+        "timestamp",
+        "source",
+        "event_type",
+        "process_name",
+        "pid",
+        "parent_pid",
+        "process_guid",
+        "parent_process_guid",
+        "command_line",
+        "image_path",
+        "parent_image",
+        "parent_command_line",
+        "hashes",
+        "file_path",
+        "file_count",
+        "network",
+        "confidence",
+        "metadata",
     }
 )
 
@@ -103,9 +127,11 @@ class EvidenceEvent:
     pid: int | None = None
     parent_pid: int | None = None
     process_guid: str | None = None
+    parent_process_guid: str | None = None
     command_line: str | None = None
     image_path: str | None = None
     parent_image: str | None = None
+    parent_command_line: str | None = None
     hashes: str | None = None
     file_path: str | None = None
     file_count: int | None = None
@@ -124,8 +150,26 @@ class EvidenceEvent:
         self.metadata = _validate_metadata(self.metadata)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> EvidenceEvent:
-        """Build an evidence event from a raw dictionary."""
+    def from_dict(cls, data: dict[str, Any] | Mapping[str, Any]) -> EvidenceEvent:
+        """Build an evidence event from a raw dictionary or mapping."""
+        if isinstance(data, EvidenceEvent):
+            return data
+
+        if not isinstance(data, Mapping):
+            raise EvidenceValidationError("Event must be a mapping or EvidenceEvent object.")
+
+        metadata = data.get("metadata")
+        extra_keys = {
+            k: v for k, v in data.items()
+            if k not in KNOWN_FIELDS
+        }
+        if extra_keys:
+            merged = dict(metadata) if isinstance(metadata, dict) else {}
+            for k, v in extra_keys.items():
+                if k not in merged:
+                    merged[k] = v
+            metadata = merged
+
         return cls(
             event_id=data.get("event_id"),
             timestamp=data.get("timestamp"),
@@ -135,16 +179,33 @@ class EvidenceEvent:
             pid=data.get("pid"),
             parent_pid=data.get("parent_pid"),
             process_guid=data.get("process_guid"),
+            parent_process_guid=data.get("parent_process_guid"),
             command_line=data.get("command_line"),
             image_path=data.get("image_path"),
             parent_image=data.get("parent_image"),
+            parent_command_line=data.get("parent_command_line"),
             hashes=data.get("hashes"),
             file_path=data.get("file_path"),
             file_count=data.get("file_count"),
             network=data.get("network"),
             confidence=data.get("confidence"),
-            metadata=data.get("metadata"),
+            metadata=metadata,
         )
+
+
+def normalize_event(raw_event: Mapping[str, object] | EvidenceEvent) -> EvidenceEvent:
+    """Normalize a raw evidence mapping into an EvidenceEvent."""
+    return EvidenceEvent.from_dict(raw_event)
+
+
+def normalize_events(
+    raw_events: Iterable[Mapping[str, object] | EvidenceEvent],
+) -> list[EvidenceEvent]:
+    """Normalize an iterable of raw evidence mappings into a list of EvidenceEvent objects."""
+    if raw_events is None:
+        raise EvidenceValidationError("raw_events cannot be None.")
+    return [normalize_event(event) for event in raw_events]
+
 
 
 def validate_event_dict(data: dict[str, Any], index: int | None = None) -> list[str]:

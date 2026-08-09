@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ransomeye.behavior import analyze_behavior
-from ransomeye.evidence import EvidenceEvent
+from ransomeye.evidence import normalize_events
 from ransomeye.storage import EvidenceStore
 from ransomeye.sysmon_reader import read_process_creation_events
 from ransomeye.threat_assessment import assess_threat
@@ -30,19 +30,20 @@ def collect_and_store(
         )
 
         raw_events = read_process_creation_events(limit)
-
-        evidence_events = [
-            EvidenceEvent.from_dict(event)
-            for event in raw_events
-        ]
+        evidence_events = normalize_events(raw_events)
 
         for event in evidence_events:
             store.save_event(case_id, event)
 
+
         findings = analyze_behavior(evidence_events)
 
         for finding in findings:
-            store.save_finding(case_id, finding)
+            event_ids = finding.get("event_ids")
+            if not event_ids and finding.get("event_id"):
+                event_ids = [str(finding["event_id"])]
+            store.save_finding(case_id, finding, event_ids=event_ids)
+
 
         assessment = assess_threat(evidence_events)
         store.save_assessment(case_id, assessment)

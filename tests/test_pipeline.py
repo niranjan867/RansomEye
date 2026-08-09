@@ -44,3 +44,36 @@ def test_collect_and_store(monkeypatch, tmp_path):
     assert result["findings_saved"] == 0
     assert result["assessment"]["score"] == 0
     assert result["assessment"]["severity"] == "SAFE"
+
+
+def test_pipeline_invokes_normalization(monkeypatch, tmp_path):
+    fake_events = [
+        {
+            "event_id": "sysmon-1-norm",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "sysmon",
+            "event_type": "process_creation",
+            "process_name": "cmd.exe",
+        }
+    ]
+
+    normalized_called = False
+    original_normalize = pipeline.normalize_events
+
+    def spy_normalize(events):
+        nonlocal normalized_called
+        normalized_called = True
+        return original_normalize(events)
+
+    monkeypatch.setattr(pipeline, "read_process_creation_events", lambda limit: fake_events)
+    monkeypatch.setattr(pipeline, "normalize_events", spy_normalize)
+
+    database_path = tmp_path / "ransomeye.db"
+    pipeline.collect_and_store(
+        database_path=database_path,
+        case_id="RE-NORM-001",
+        case_name="Normalization Test",
+        limit=1,
+    )
+
+    assert normalized_called is True

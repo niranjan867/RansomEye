@@ -45,8 +45,9 @@ def test_generate_case_report(tmp_path):
     assert "ASSESSMENT" in report
     assert "TIMELINE" in report
     assert "PROCESS TREE" in report
-    assert "Schema:     4" in report
+    assert "Schema:     5" in report
     assert "Command line:" in report
+
     assert "Process GUID:" in report
     assert "Parent GUID:" in report
     assert "Parent image:" in report
@@ -160,5 +161,169 @@ def test_case_report_shows_failed_verification(tmp_path):
     report = output_path.read_text(encoding="utf-8")
 
     assert "CHAIN OF CUSTODY" in report
+
     assert "Verification: FAILED" in report
     assert "Note: Manifest mismatch" in report
+
+
+def test_report_includes_evidence_traceability_for_linked_finding(tmp_path):
+    database_path = tmp_path / "trace_report.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-TR-REP", "Traceability Report Test")
+    store.save_event(
+        "CASE-TR-REP",
+        {
+            "event_id": "evt-tr-101",
+            "timestamp": "2026-08-08T20:00:00Z",
+            "source": "sysmon",
+            "event_type": "process_creation",
+            "process_name": "cmd.exe",
+            "pid": "3333",
+        },
+    )
+    store.save_finding(
+        "CASE-TR-REP",
+        {"type": "suspicious_cmd", "score": 15, "reason": "Suspicious cmd execution"},
+        event_ids=["evt-tr-101"],
+    )
+    store.close()
+
+    report = generate_case_report(database_path, "CASE-TR-REP")
+
+    assert "EVIDENCE TRACEABILITY" in report
+    assert "Finding #1: suspicious_cmd" in report
+    assert "Evidence Event ID: evt-tr-101" in report
+    assert "Time:              2026-08-08T20:00:00Z" in report
+    assert "Process:           cmd.exe" in report
+    assert "PID:               3333" in report
+
+
+def test_finding_linked_to_multiple_events_prints_all_evidence_ids(tmp_path):
+    database_path = tmp_path / "multi_ev_report.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-MEV-REP", "Multi Event Report Test")
+    store.save_event("CASE-MEV-REP", {"event_id": "evt-m1", "timestamp": "2026-08-08T20:00:00Z", "source": "sysmon", "event_type": "process_creation"})
+    store.save_event("CASE-MEV-REP", {"event_id": "evt-m2", "timestamp": "2026-08-08T20:00:01Z", "source": "sysmon", "event_type": "process_creation"})
+    store.save_finding(
+        "CASE-MEV-REP",
+        {"type": "multi_event_rule", "score": 25, "reason": "Multi event pattern"},
+        event_ids=["evt-m1", "evt-m2"],
+    )
+    store.close()
+
+    report = generate_case_report(database_path, "CASE-MEV-REP")
+
+    assert "EVIDENCE TRACEABILITY" in report
+    assert "Evidence Event ID: evt-m1" in report
+    assert "Evidence Event ID: evt-m2" in report
+
+
+def test_finding_without_evidence_remains_reportable(tmp_path):
+    database_path = tmp_path / "no_ev_report.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-NOEV-REP", "No Evidence Report Test")
+    store.save_finding("CASE-NOEV-REP", {"type": "manual_rule", "score": 5, "reason": "No evidence attached"})
+    store.close()
+
+    report = generate_case_report(database_path, "CASE-NOEV-REP")
+
+    assert "EVIDENCE TRACEABILITY" in report
+    assert "No evidence links." in report
+
+
+def test_report_renders_correlations_supplied_by_assessment(tmp_path):
+    database_path = tmp_path / "supplied_corr.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-SUPP", "Supplied Correlation Test")
+    store.close()
+
+    custom_assessment = {
+        "score": 50,
+        "severity": "LOW",
+        "confidence": 0.8,
+        "reasons": ["Test reason"],
+        "techniques": ["T1059"],
+        "correlation_count": 1,
+        "correlations": [
+            {
+                "incident_id": "INC-SUPP-001",
+                "process_key": "guid:{SUPP-GUID}",
+                "start_time": "2026-08-08T12:00:00Z",
+                "end_time": "2026-08-08T12:00:05Z",
+                "duration": 5.0,
+                "evidence_event_ids": ["evt-supp-1", "evt-supp-2"],
+            }
+        ],
+    }
+
+    report = generate_case_report(database_path, "CASE-SUPP", assessment=custom_assessment)
+
+    assert "CORRELATIONS" in report
+    assert "Incident:    INC-SUPP-001" in report
+    assert "Process Key: guid:{SUPP-GUID}" in report
+    assert "Events:      evt-supp-1, evt-supp-2" in report
+
+
+def test_report_module_contains_no_direct_correlate_events_import():
+    import ransomeye.report as report_mod
+
+    assert "correlate_events" not in report_mod.__dict__
+
+
+def test_report_renders_no_correlations_for_empty_list(tmp_path):
+    database_path = tmp_path / "empty_corr.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-EMP-CORR", "Empty Correlation Test")
+    store.close()
+
+    custom_assessment = {
+        "score": 0,
+        "severity": "SAFE",
+        "confidence": 0.95,
+        "reasons": [],
+        "techniques": [],
+        "correlation_count": 0,
+        "correlations": [],
+    }
+
+    report = generate_case_report(database_path, "CASE-EMP-CORR", assessment=custom_assessment)
+
+    assert "CORRELATIONS" in report
+    assert "No correlations." in report
+
+
+def test_assessment_path_computes_correlations_once_and_report_consumes_result(monkeypatch, tmp_path):
+    from ransomeye import threat_assessment
+
+    correlation_call_count = 0
+    original_correlate = threat_assessment.correlate_events
+
+    def spy_correlate(events):
+        nonlocal correlation_call_count
+        correlation_call_count += 1
+        return original_correlate(events)
+
+    monkeypatch.setattr(threat_assessment, "correlate_events", spy_correlate)
+
+    database_path = tmp_path / "single_corr_call.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-SINGLE-CALL", "Single Call Test")
+    store.save_event(
+        "CASE-SINGLE-CALL",
+        {
+            "event_id": "evt-sc-1",
+            "timestamp": "2026-08-08T15:00:00Z",
+            "source": "sysmon",
+            "event_type": "process_creation",
+            "process_name": "test.exe",
+            "process_guid": "{SC-GUID}",
+        },
+    )
+    store.close()
+
+    # Generate report without passing assessment -> report triggers assess_threat once
+    report = generate_case_report(database_path, "CASE-SINGLE-CALL")
+
+    assert correlation_call_count == 1
+    assert "CORRELATIONS" in report
+    assert "Incident:    INC-0001" in report

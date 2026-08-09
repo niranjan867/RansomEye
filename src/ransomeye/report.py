@@ -1,10 +1,8 @@
-"""Generate analyst-readable RansomEye case reports."""
-
-from __future__ import annotations
-
+from datetime import datetime
 import json
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from ransomeye.storage import EvidenceStore
 from ransomeye.timeline import build_process_tree, get_case_timeline
@@ -23,6 +21,7 @@ def _json_list(value: str | None) -> list:
 def generate_case_report(
     database_path: str | Path,
     case_id: str,
+    assessment: dict[str, Any] | None = None,
 ) -> str:
     connection = sqlite3.connect(database_path)
     connection.row_factory = sqlite3.Row
@@ -32,38 +31,12 @@ def generate_case_report(
             "PRAGMA user_version"
         ).fetchone()[0]
 
-        case = connection.execute(
-            """
-            SELECT case_id, case_name, host, status, severity, created_at
-            FROM cases
-            WHERE case_id = ?
-            """,
-            (case_id,),
-        ).fetchone()
+        from ransomeye.investigation import load_investigation
+        investigation = load_investigation(database_path, case_id)
 
-        if case is None:
-            raise ValueError(f"Case not found: {case_id}")
-
-        assessment = connection.execute(
-            """
-            SELECT score, severity, confidence, reasons_json, techniques_json
-            FROM assessments
-            WHERE case_id = ?
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            (case_id,),
-        ).fetchone()
-
-        findings = connection.execute(
-            """
-            SELECT finding_type, score, confidence, technique, reason
-            FROM findings
-            WHERE case_id = ?
-            ORDER BY created_at ASC
-            """,
-            (case_id,),
-        ).fetchall()
+        case = investigation.case
+        db_assessment = investigation.assessment
+        findings = investigation.findings
 
         history_rows = connection.execute(
             """
@@ -75,8 +48,13 @@ def generate_case_report(
             (case_id,),
         ).fetchall()
 
-        timeline = get_case_timeline(database_path, case_id)
-        tree = build_process_tree(timeline)
+        timeline = investigation.timeline
+        tree = investigation.processes
+
+        if assessment is None and timeline:
+            from ransomeye.threat_assessment import assess_threat
+
+            assessment = assess_threat(timeline)
 
         lines = [
             "RANSOMEYE CASE REPORT",
@@ -96,9 +74,7 @@ def generate_case_report(
             "----------",
         ]
 
-        if assessment is None:
-            lines.append("No assessment available.")
-        else:
+        if assessment is not None:
             lines.extend(
                 [
                     f"Score:      {assessment['score']}",
@@ -107,14 +83,30 @@ def generate_case_report(
                     "Reasons:",
                 ]
             )
+            reasons_list = assessment.get("reasons", [])
+            lines.extend(f"- {reason}" for reason in reasons_list)
+            lines.append("Techniques:")
+            tech_list = assessment.get("techniques", [])
+            lines.extend(f"- {technique}" for technique in tech_list)
+        elif db_assessment is None:
+            lines.append("No assessment available.")
+        else:
+            lines.extend(
+                [
+                    f"Score:      {db_assessment['score']}",
+                    f"Severity:   {db_assessment['severity']}",
+                    f"Confidence: {db_assessment['confidence']}",
+                    "Reasons:",
+                ]
+            )
             lines.extend(
                 f"- {reason}"
-                for reason in _json_list(assessment["reasons_json"])
+                for reason in db_assessment.get("reasons", [])
             )
             lines.append("Techniques:")
             lines.extend(
                 f"- {technique}"
-                for technique in _json_list(assessment["techniques_json"])
+                for technique in db_assessment.get("techniques", [])
             )
 
         lines.extend(["", "FINDINGS", "--------"])
@@ -133,6 +125,96 @@ def generate_case_report(
                         "",
                     ]
                 )
+
+        traceability_rows = connection.execute(
+            """
+            SELECT
+                fe.finding_id,
+                f.finding_type,
+                e.event_id,
+                e.timestamp,
+                e.source,
+                e.event_type,
+                e.process_name,
+                e.pid,
+                e.file_path,
+                e.command_line
+            FROM finding_evidence fe
+            JOIN findings f ON fe.finding_id = f.finding_id
+            JOIN events e ON fe.event_id = e.event_id
+            WHERE f.case_id = ?
+            ORDER BY fe.finding_id ASC, e.timestamp ASC, e.event_id ASC
+            """,
+            (case_id,),
+        ).fetchall()
+
+        lines.extend(["", "EVIDENCE TRACEABILITY", "---------------------"])
+
+        if not traceability_rows:
+            lines.append("No evidence links.")
+        else:
+            findings_by_id: dict[int, list[sqlite3.Row]] = {}
+            for row in traceability_rows:
+                findings_by_id.setdefault(row["finding_id"], []).append(row)
+
+            for finding_id, rows in findings_by_id.items():
+                finding_type = rows[0]["finding_type"]
+                lines.append(f"Finding #{finding_id}: {finding_type}")
+
+                seen_event_ids: set[str] = set()
+                for row in rows:
+                    eid = row["event_id"]
+                    if eid in seen_event_ids:
+                        continue
+                    seen_event_ids.add(eid)
+
+                    lines.extend(
+                        [
+                            f"  Evidence Event ID: {eid}",
+                            f"  Time:              {row['timestamp'] or 'N/A'}",
+                            f"  Source:            {row['source'] or 'N/A'}",
+                            f"  Event Type:        {row['event_type'] or 'N/A'}",
+                            f"  Process:           {row['process_name'] or 'N/A'}",
+                            f"  PID:               {row['pid'] or 'N/A'}",
+                            "",
+                        ]
+                    )
+
+        lines.extend(["", "CORRELATIONS", "------------"])
+
+        correlations = (
+            assessment.get("correlations", [])
+            if isinstance(assessment, dict)
+            else investigation.correlations
+        )
+
+        if not correlations:
+            lines.append("No correlations.")
+        else:
+            for corr in correlations:
+                incident_id = corr.get("incident_id", "N/A")
+                process_key = corr.get("process_key", "N/A")
+                start_time = corr.get("start_time", "N/A")
+                end_time = corr.get("end_time", "N/A")
+                duration = corr.get("duration", 0.0)
+                ev_ids = corr.get("evidence_event_ids", [])
+                events_str = (
+                    ", ".join(str(i) for i in ev_ids) if ev_ids else "N/A"
+                )
+
+                lines.extend(
+                    [
+                        f"Incident:    {incident_id}",
+                        f"Process Key: {process_key}",
+                        f"Start Time:  {start_time}",
+                        f"End Time:    {end_time}",
+                        f"Duration:    {duration}s",
+                        f"Events:      {events_str}",
+                        "",
+                    ]
+                )
+
+
 
         lines.extend(["Case lifecycle", "--------------"])
         lines.append(f"Current status: {case['status'] or 'OPEN'}")
@@ -268,11 +350,12 @@ def write_case_report(
     database_path: str | Path,
     case_id: str,
     output_path: str | Path,
+    assessment: dict[str, Any] | None = None,
 ) -> Path:
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
-        generate_case_report(database_path, case_id),
+        generate_case_report(database_path, case_id, assessment=assessment),
         encoding="utf-8",
     )
     return output
