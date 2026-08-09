@@ -1,0 +1,14 @@
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <EventID>8</EventID>
+    <TimeCreated SystemTime="2026-08-08T14:26:00.000Z"/>
+  </System>
+  <EventData>
+    <Data Name="SourceProcessGuid">{ABC-123}</Data>
+    <Data Name="SourceProcessId">4532</Data>
+    <Data Name="SourceImage">C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</Data>
+    <Data Name="TargetProcessGuid">{DEF-456}</Data>
+    <Data Name="TargetProcessId">1000</Data>
+    <Data Name="TargetImage">C:\Windows\explorer.exe</Data>
+  </EventData>
+</Event>

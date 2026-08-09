@@ -1,0 +1,12 @@
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <EventID>6</EventID>
+    <TimeCreated SystemTime="2026-08-08T14:24:00.000Z"/>
+  </System>
+  <EventData>
+    <Data Name="ImageLoaded">C:\Windows\System32\drivers\malicious.sys</Data>
+    <Data Name="Hashes">SHA256=BADHASH</Data>
+    <Data Name="Signature">Not signed</Data>
+    <Data Name="SignatureStatus">Unavailable</Data>
+  </EventData>
+</Event>

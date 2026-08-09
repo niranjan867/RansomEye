@@ -1,0 +1,14 @@
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <EventID>13</EventID>
+    <TimeCreated SystemTime="2026-08-08T14:30:00.000Z"/>
+  </System>
+  <EventData>
+    <Data Name="EventType">SetValue</Data>
+    <Data Name="ProcessGuid">{ABC-123}</Data>
+    <Data Name="ProcessId">4532</Data>
+    <Data Name="Image">C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</Data>
+    <Data Name="TargetObject">HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run\Malware</Data>
+    <Data Name="Details">C:\Users\Student\Documents\malware.exe</Data>
+  </EventData>
+</Event>

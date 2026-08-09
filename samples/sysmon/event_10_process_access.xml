@@ -1,0 +1,14 @@
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <EventID>10</EventID>
+    <TimeCreated SystemTime="2026-08-08T14:27:00.000Z"/>
+  </System>
+  <EventData>
+    <Data Name="SourceProcessGuid">{ABC-123}</Data>
+    <Data Name="SourceProcessId">4532</Data>
+    <Data Name="SourceImage">C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</Data>
+    <Data Name="TargetProcessGuid">{LSASS-123}</Data>
+    <Data Name="TargetProcessId">500</Data>
+    <Data Name="TargetImage">C:\Windows\System32\lsass.exe</Data>
+  </EventData>
+</Event>

@@ -1,0 +1,17 @@
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <EventID>1</EventID>
+    <TimeCreated SystemTime="2026-08-08T14:20:00.000Z"/>
+  </System>
+  <EventData>
+    <Data Name="ProcessGuid">{ABC-123}</Data>
+    <Data Name="ProcessId">4532</Data>
+    <Data Name="Image">C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</Data>
+    <Data Name="CommandLine">powershell.exe -NoProfile</Data>
+    <Data Name="ParentImage">C:\Windows\explorer.exe</Data>
+    <Data Name="ParentProcessId">1200</Data>
+    <Data Name="ParentProcessGuid">{DEF-456}</Data>
+    <Data Name="User">LAB\Student</Data>
+    <Data Name="Hashes">SHA256=TESTHASH</Data>
+  </EventData>
+</Event>

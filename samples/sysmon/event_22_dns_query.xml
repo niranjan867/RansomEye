@@ -1,0 +1,14 @@
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <EventID>22</EventID>
+    <TimeCreated SystemTime="2026-08-08T14:33:00.000Z"/>
+  </System>
+  <EventData>
+    <Data Name="ProcessGuid">{ABC-123}</Data>
+    <Data Name="ProcessId">4532</Data>
+    <Data Name="Image">C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</Data>
+    <Data Name="QueryName">malicious.com</Data>
+    <Data Name="QueryStatus">0</Data>
+    <Data Name="QueryResults">192.168.1.50</Data>
+  </EventData>
+</Event>

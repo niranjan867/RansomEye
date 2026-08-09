@@ -1,0 +1,13 @@
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <EventID>7</EventID>
+    <TimeCreated SystemTime="2026-08-08T14:25:00.000Z"/>
+  </System>
+  <EventData>
+    <Data Name="ProcessGuid">{ABC-123}</Data>
+    <Data Name="ProcessId">4532</Data>
+    <Data Name="Image">C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</Data>
+    <Data Name="ImageLoaded">C:\Windows\System32\kernel32.dll</Data>
+    <Data Name="Hashes">SHA256=DLLHASH</Data>
+  </EventData>
+</Event>
