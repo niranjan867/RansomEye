@@ -1,11 +1,9 @@
-"""Generate analyst-readable RansomEye case reports."""
-
 from datetime import datetime
 import json
 import sqlite3
 from pathlib import Path
+from typing import Any
 
-from ransomeye.correlation import correlate_events
 from ransomeye.storage import EvidenceStore
 from ransomeye.timeline import build_process_tree, get_case_timeline
 
@@ -23,6 +21,7 @@ def _json_list(value: str | None) -> list:
 def generate_case_report(
     database_path: str | Path,
     case_id: str,
+    assessment: dict[str, Any] | None = None,
 ) -> str:
     connection = sqlite3.connect(database_path)
     connection.row_factory = sqlite3.Row
@@ -44,7 +43,7 @@ def generate_case_report(
         if case is None:
             raise ValueError(f"Case not found: {case_id}")
 
-        assessment = connection.execute(
+        db_assessment = connection.execute(
             """
             SELECT score, severity, confidence, reasons_json, techniques_json
             FROM assessments
@@ -78,6 +77,11 @@ def generate_case_report(
         timeline = get_case_timeline(database_path, case_id)
         tree = build_process_tree(timeline)
 
+        if assessment is None and timeline:
+            from ransomeye.threat_assessment import assess_threat
+
+            assessment = assess_threat(timeline)
+
         lines = [
             "RANSOMEYE CASE REPORT",
             "=" * 72,
@@ -96,9 +100,7 @@ def generate_case_report(
             "----------",
         ]
 
-        if assessment is None:
-            lines.append("No assessment available.")
-        else:
+        if assessment is not None:
             lines.extend(
                 [
                     f"Score:      {assessment['score']}",
@@ -107,14 +109,30 @@ def generate_case_report(
                     "Reasons:",
                 ]
             )
+            reasons_list = assessment.get("reasons", [])
+            lines.extend(f"- {reason}" for reason in reasons_list)
+            lines.append("Techniques:")
+            tech_list = assessment.get("techniques", [])
+            lines.extend(f"- {technique}" for technique in tech_list)
+        elif db_assessment is None:
+            lines.append("No assessment available.")
+        else:
+            lines.extend(
+                [
+                    f"Score:      {db_assessment['score']}",
+                    f"Severity:   {db_assessment['severity']}",
+                    f"Confidence: {db_assessment['confidence']}",
+                    "Reasons:",
+                ]
+            )
             lines.extend(
                 f"- {reason}"
-                for reason in _json_list(assessment["reasons_json"])
+                for reason in _json_list(db_assessment["reasons_json"])
             )
             lines.append("Techniques:")
             lines.extend(
                 f"- {technique}"
-                for technique in _json_list(assessment["techniques_json"])
+                for technique in _json_list(db_assessment["techniques_json"])
             )
 
         lines.extend(["", "FINDINGS", "--------"])
@@ -190,39 +208,38 @@ def generate_case_report(
 
         lines.extend(["", "CORRELATIONS", "------------"])
 
-        incidents = correlate_events(timeline)
+        correlations = (
+            assessment.get("correlations", [])
+            if isinstance(assessment, dict)
+            else []
+        )
 
-        if not incidents:
+        if not correlations:
             lines.append("No correlations.")
         else:
-            for inc in incidents:
-                start_t = (
-                    inc.start_time.isoformat()
-                    if isinstance(inc.start_time, datetime)
-                    else str(inc.start_time)
+            for corr in correlations:
+                incident_id = corr.get("incident_id", "N/A")
+                process_key = corr.get("process_key", "N/A")
+                start_time = corr.get("start_time", "N/A")
+                end_time = corr.get("end_time", "N/A")
+                duration = corr.get("duration", 0.0)
+                ev_ids = corr.get("evidence_event_ids", [])
+                events_str = (
+                    ", ".join(str(i) for i in ev_ids) if ev_ids else "N/A"
                 )
-                end_t = (
-                    inc.end_time.isoformat()
-                    if isinstance(inc.end_time, datetime)
-                    else str(inc.end_time)
-                )
-                ev_ids = [
-                    str(evt["event_id"])
-                    for evt in inc.events
-                    if evt.get("event_id") is not None and str(evt.get("event_id")).strip()
-                ]
 
                 lines.extend(
                     [
-                        f"Incident:    {inc.incident_id}",
-                        f"Process Key: {inc.process_key}",
-                        f"Start Time:  {start_t}",
-                        f"End Time:    {end_t}",
-                        f"Duration:    {inc.duration_seconds}s",
-                        f"Events:      {', '.join(ev_ids) if ev_ids else 'N/A'}",
+                        f"Incident:    {incident_id}",
+                        f"Process Key: {process_key}",
+                        f"Start Time:  {start_time}",
+                        f"End Time:    {end_time}",
+                        f"Duration:    {duration}s",
+                        f"Events:      {events_str}",
                         "",
                     ]
                 )
+
 
 
         lines.extend(["Case lifecycle", "--------------"])
@@ -359,11 +376,12 @@ def write_case_report(
     database_path: str | Path,
     case_id: str,
     output_path: str | Path,
+    assessment: dict[str, Any] | None = None,
 ) -> Path:
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
-        generate_case_report(database_path, case_id),
+        generate_case_report(database_path, case_id, assessment=assessment),
         encoding="utf-8",
     )
     return output

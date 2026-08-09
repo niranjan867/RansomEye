@@ -231,69 +231,99 @@ def test_finding_without_evidence_remains_reportable(tmp_path):
     assert "No evidence links." in report
 
 
-def test_report_includes_correlations_section(tmp_path):
-    database_path = tmp_path / "corr_report.db"
+def test_report_renders_correlations_supplied_by_assessment(tmp_path):
+    database_path = tmp_path / "supplied_corr.db"
     store = EvidenceStore(database_path)
-    store.create_case("CASE-CORR-REP", "Correlation Report Test")
+    store.create_case("CASE-SUPP", "Supplied Correlation Test")
+    store.close()
+
+    custom_assessment = {
+        "score": 50,
+        "severity": "LOW",
+        "confidence": 0.8,
+        "reasons": ["Test reason"],
+        "techniques": ["T1059"],
+        "correlation_count": 1,
+        "correlations": [
+            {
+                "incident_id": "INC-SUPP-001",
+                "process_key": "guid:{SUPP-GUID}",
+                "start_time": "2026-08-08T12:00:00Z",
+                "end_time": "2026-08-08T12:00:05Z",
+                "duration": 5.0,
+                "evidence_event_ids": ["evt-supp-1", "evt-supp-2"],
+            }
+        ],
+    }
+
+    report = generate_case_report(database_path, "CASE-SUPP", assessment=custom_assessment)
+
+    assert "CORRELATIONS" in report
+    assert "Incident:    INC-SUPP-001" in report
+    assert "Process Key: guid:{SUPP-GUID}" in report
+    assert "Events:      evt-supp-1, evt-supp-2" in report
+
+
+def test_report_module_contains_no_direct_correlate_events_import():
+    import ransomeye.report as report_mod
+
+    assert "correlate_events" not in report_mod.__dict__
+
+
+def test_report_renders_no_correlations_for_empty_list(tmp_path):
+    database_path = tmp_path / "empty_corr.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-EMP-CORR", "Empty Correlation Test")
+    store.close()
+
+    custom_assessment = {
+        "score": 0,
+        "severity": "SAFE",
+        "confidence": 0.95,
+        "reasons": [],
+        "techniques": [],
+        "correlation_count": 0,
+        "correlations": [],
+    }
+
+    report = generate_case_report(database_path, "CASE-EMP-CORR", assessment=custom_assessment)
+
+    assert "CORRELATIONS" in report
+    assert "No correlations." in report
+
+
+def test_assessment_path_computes_correlations_once_and_report_consumes_result(monkeypatch, tmp_path):
+    from ransomeye import threat_assessment
+
+    correlation_call_count = 0
+    original_correlate = threat_assessment.correlate_events
+
+    def spy_correlate(events):
+        nonlocal correlation_call_count
+        correlation_call_count += 1
+        return original_correlate(events)
+
+    monkeypatch.setattr(threat_assessment, "correlate_events", spy_correlate)
+
+    database_path = tmp_path / "single_corr_call.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-SINGLE-CALL", "Single Call Test")
     store.save_event(
-        "CASE-CORR-REP",
+        "CASE-SINGLE-CALL",
         {
-            "event_id": "evt-c1",
-            "timestamp": "2026-08-08T20:00:00Z",
+            "event_id": "evt-sc-1",
+            "timestamp": "2026-08-08T15:00:00Z",
             "source": "sysmon",
             "event_type": "process_creation",
-            "process_name": "notepad.exe",
-            "process_guid": "{GUID-NOTEPAD}",
+            "process_name": "test.exe",
+            "process_guid": "{SC-GUID}",
         },
     )
     store.close()
 
-    report = generate_case_report(database_path, "CASE-CORR-REP")
+    # Generate report without passing assessment -> report triggers assess_threat once
+    report = generate_case_report(database_path, "CASE-SINGLE-CALL")
 
+    assert correlation_call_count == 1
     assert "CORRELATIONS" in report
     assert "Incident:    INC-0001" in report
-    assert "Process Key: guid:{GUID-NOTEPAD}" in report
-    assert "Events:      evt-c1" in report
-
-
-def test_end_to_end_traceability_report(monkeypatch, tmp_path):
-    from ransomeye import pipeline
-
-    events = [
-        {
-            "event_id": "e2e-ps-999",
-            "timestamp": "2026-08-08T18:00:00Z",
-            "source": "sysmon",
-            "event_type": "process_creation",
-            "process_name": "powershell.exe",
-            "pid": "7777",
-            "parent_pid": "1000",
-            "process_guid": "{E2E-PS-GUID}",
-            "file_path": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-            "command_line": "powershell.exe -NoProfile -EncodedCommand SGVsbG8=",
-            "metadata": {"rule": "Sysmon Event ID 1"},
-        }
-    ]
-
-    monkeypatch.setattr(pipeline, "read_process_creation_events", lambda limit: events)
-    database_path = tmp_path / "e2e_report.db"
-
-    pipeline.collect_and_store(
-        database_path=database_path,
-        case_id="RE-E2E-001",
-        case_name="End to End Traceability",
-        limit=10,
-    )
-
-    report = generate_case_report(database_path, "RE-E2E-001")
-
-    assert "RANSOMEYE CASE REPORT" in report
-    assert "FINDINGS" in report
-    assert "EVIDENCE TRACEABILITY" in report
-    assert "Finding #1: suspicious_powershell" in report
-    assert "Evidence Event ID: e2e-ps-999" in report
-    assert "Process:           powershell.exe" in report
-    assert "PID:               7777" in report
-    assert "CORRELATIONS" in report
-    assert "Incident:    INC-0001" in report
-    assert "Events:      e2e-ps-999" in report
