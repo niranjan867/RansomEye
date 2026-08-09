@@ -189,11 +189,13 @@ def test_correlation_and_assessment():
 
 
 def test_network_and_ransom_note():
+    ts = datetime(2026, 8, 8, 10, 30, 0, tzinfo=timezone.utc)
     ev_net = EvidenceEvent(
-        event_id="EVT-NET",
-        timestamp=datetime(2026, 8, 8, 10, 30, 0, tzinfo=timezone.utc),
+        event_id="EVT-NET-IPV6",
+        timestamp=ts,
         source="sysmon",
         event_type="network_connect",
+        process_guid="{PROC-123}",
         network={"destination_ip": "1.2.3.4", "destination_port": 443}
     )
     ev_note = EvidenceEvent(
@@ -224,7 +226,7 @@ def test_network_and_ransom_note():
 
     assert len(seq.stages) == 2
     assert seq.stages[0].stage_type == "NETWORK_ACTIVITY"
-    assert "1.2.3.4" in seq.stages[0].description
+    assert "1.2.3.4" in seq.stages[0].title or "1.2.3.4" in seq.stages[0].description
     assert seq.stages[1].stage_type == "RANSOM_NOTE"
     assert seq.stages[1].title == "Ransom note created"
 

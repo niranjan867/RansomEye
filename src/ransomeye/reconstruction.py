@@ -22,6 +22,7 @@ class AttackStage:
     finding_ids: tuple[str, ...] = field(default_factory=tuple)
     process_ids: tuple[str, ...] = field(default_factory=tuple)
     correlation_ids: tuple[str, ...] = field(default_factory=tuple)
+    attributes: dict[str, Any] = field(default_factory=dict)
 
     # Optional end time for ranges like Correlations
     end_time: datetime | None = None
@@ -183,6 +184,7 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
         stage_type = "UNKNOWN"
         title = ""
         desc = ""
+        attributes: dict[str, Any] = {}
 
         proc_id = _get_process_id(event)
         pids = (proc_id,) if proc_id else ()
@@ -204,11 +206,26 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
 
         elif ev_type == "network_connect":
             stage_type = "NETWORK_ACTIVITY"
-            title = "Network connection"
             if event.network:
-                dip = event.network.get("destination_ip", "")
-                dport = event.network.get("destination_port", "")
-                desc = f"Connected to {dip}:{dport}" if dport else f"Connected to {dip}"
+                attributes.update(event.network)
+
+            proc_name = event.process_name or "unknown process"
+            dip = attributes.get("destination_ip", "")
+            dport = attributes.get("destination_port", "")
+            dest_str = f"{dip}:{dport}" if dport else f"{dip}"
+            title = f"{proc_name} \u2192 {dest_str}"
+            desc = ""
+
+        elif ev_type == "dns_query":
+            stage_type = "NETWORK_ACTIVITY"
+            if event.network:
+                attributes.update(event.network)
+                qname = event.network.get("query_name", "")
+                qres = event.network.get("query_results", "")
+                title = f"DNS Query: {qname}" if qname else "DNS Query"
+                desc = f"Result: {qres}" if qres else ""
+            else:
+                title = "DNS Query"
         else:
             stage_type = ev_type.upper()
             title = ev_type
@@ -232,7 +249,8 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
             description=desc,
             evidence_ids=(event.event_id,),
             finding_ids=tuple(sorted(finding_ids)),
-            process_ids=pids
+            process_ids=pids,
+            attributes=attributes
         ))
 
     # 3. Process Correlations

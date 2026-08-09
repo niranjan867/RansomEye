@@ -26,6 +26,7 @@ class TimelineEntry:
     correlation_ids: tuple[str, ...] = field(default_factory=tuple)
     parent_process_name: str | None = None
     pid: int | None = None
+    attributes: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -181,6 +182,12 @@ class AdvancedTimeline:
 
             if entry.title:
                 lines.append(entry.title)
+
+            # Use structured attributes if available, rather than scraping text
+            if entry.entry_type == "NETWORK":
+                if entry.attributes.get("protocol"):
+                    lines.append(f"Protocol: {str(entry.attributes['protocol']).upper()}")
+
             if entry.description:
                 lines.append(entry.description)
 
@@ -254,7 +261,8 @@ def build_advanced_timeline(
             process_ids=stage.process_ids,
             correlation_ids=stage.correlation_ids,
             parent_process_name=parent_name,
-            pid=pid
+            pid=pid,
+            attributes=stage.attributes
         ))
 
     ass_score = None
