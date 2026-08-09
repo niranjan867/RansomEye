@@ -387,6 +387,23 @@ def main() -> None:
         help="Optional note about the custody event.",
     )
 
+    custody_list_parser = custody_subparsers.add_parser(
+        "list",
+        help="List custody history for a case.",
+    )
+    custody_list_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    custody_list_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+
     integrity_parser = subparsers.add_parser(
         "integrity",
         help="Create integrity manifests for evidence and reports.",
@@ -480,6 +497,36 @@ def main() -> None:
                     print(
                         f"Recorded custody event for case {args.case_id}"
                     )
+                finally:
+                    store.close()
+            except (ValueError, KeyError) as exc:
+                parser.exit(1, f"{exc}\n")
+        elif args.custody_command == "list":
+            try:
+                store = EvidenceStore(args.database)
+                try:
+                    case = store.get_case(args.case_id)
+                    if case is None:
+                        parser.exit(1, f"Case not found: {args.case_id}\n")
+
+                    events = store.get_custody_events(args.case_id)
+                    if not events:
+                        print(f"No custody records for case {args.case_id}")
+                        return
+
+                    for event in events:
+                        verification = "N/A"
+                        if event["verification_result"] is not None:
+                            verification = "Yes" if event["verification_result"] else "FAILED"
+
+                        print(f"{event['recorded_at']} {event['action']}")
+                        print(f"Artifact: {event['artifact_path']}")
+                        print(f"Action: {event['action']}")
+                        print(f"Analyst: {event['analyst']}")
+                        print(f"SHA-256: {event['sha256']}")
+                        print(f"Note: {event['note'] or 'N/A'}")
+                        print(f"Verification: {verification}")
+                        print()
                 finally:
                     store.close()
             except (ValueError, KeyError) as exc:

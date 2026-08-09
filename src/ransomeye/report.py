@@ -174,13 +174,14 @@ def generate_case_report(
             for row in custody_rows:
                 verification = "N/A"
                 if row["verification_result"] is not None:
-                    verification = "Yes" if row["verification_result"] else "No"
+                    verification = "Yes" if row["verification_result"] else "FAILED"
 
                 lines.extend(
                     [
                         f"{row['recorded_at']} {row['action']}",
-                        f"Analyst: {row['analyst']}",
                         f"Artifact: {row['artifact_path']}",
+                        f"Action: {row['action']}",
+                        f"Analyst: {row['analyst']}",
                         f"SHA-256: {row['sha256']}",
                         f"Note: {row['note'] or 'N/A'}",
                         f"Verification: {verification}",

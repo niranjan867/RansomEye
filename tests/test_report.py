@@ -98,3 +98,67 @@ def test_case_report_includes_current_status_without_history(tmp_path):
     assert "Current status: OPEN" in report
     assert "Case lifecycle" in report
     assert "No status changes recorded." in report
+
+
+def test_case_report_includes_chain_of_custody(tmp_path):
+    database_path = tmp_path / "case.db"
+    output_path = tmp_path / "case-report.txt"
+
+    store = EvidenceStore(database_path)
+    store.create_case(case_id="CASE-001", case_name="Custody Report")
+    store.record_custody_event(
+        case_id="CASE-001",
+        artifact_path="reports/case-report.txt",
+        sha256="a" * 64,
+        action="created",
+        analyst="analyst@example.com",
+        note="Initial report generated",
+        verification_result=None,
+    )
+    store.close()
+
+    write_case_report(
+        database_path=database_path,
+        case_id="CASE-001",
+        output_path=output_path,
+    )
+
+    report = output_path.read_text(encoding="utf-8")
+
+    assert "CHAIN OF CUSTODY" in report
+    assert "Artifact: reports/case-report.txt" in report
+    assert "Action: created" in report
+    assert "Analyst: analyst@example.com" in report
+    assert "SHA-256: " + "a" * 64 in report
+    assert "Verification: N/A" in report
+    assert "Note: Initial report generated" in report
+
+
+def test_case_report_shows_failed_verification(tmp_path):
+    database_path = tmp_path / "case.db"
+    output_path = tmp_path / "case-report.txt"
+
+    store = EvidenceStore(database_path)
+    store.create_case(case_id="CASE-002", case_name="Custody Report")
+    store.record_custody_event(
+        case_id="CASE-002",
+        artifact_path="reports/case-report.txt",
+        sha256="b" * 64,
+        action="verified",
+        analyst="analyst@example.com",
+        note="Manifest mismatch",
+        verification_result=False,
+    )
+    store.close()
+
+    write_case_report(
+        database_path=database_path,
+        case_id="CASE-002",
+        output_path=output_path,
+    )
+
+    report = output_path.read_text(encoding="utf-8")
+
+    assert "CHAIN OF CUSTODY" in report
+    assert "Verification: FAILED" in report
+    assert "Note: Manifest mismatch" in report

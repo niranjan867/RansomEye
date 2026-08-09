@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from ransomeye.commands import print_case_timeline, print_case_tree
@@ -89,3 +92,182 @@ def test_print_case_tree_renders_root_and_children(capsys, tmp_path):
     assert "powershell.exe [PID 100]" in output
     assert "conhost.exe [PID 200]" in output
     assert "└──" in output
+
+
+def _run_command(args, cwd):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    result = subprocess.run(
+        [sys.executable, "-m", "ransomeye.commands", *args],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return result
+
+
+def test_custody_record_command_creates_event(tmp_path):
+    database_path = tmp_path / "test.db"
+    store = EvidenceStore(database_path)
+    store.create_case(case_id="CASE-001", case_name="Custody Command")
+    store.close()
+
+    result = _run_command(
+        [
+            "custody",
+            "record",
+            "--database",
+            str(database_path),
+            "--case",
+            "CASE-001",
+            "--artifact",
+            "reports/case-report.txt",
+            "--hash",
+            "a" * 64,
+            "--action",
+            "created",
+            "--analyst",
+            "analyst@example.com",
+            "--note",
+            "Initial report generated",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
+    assert "Recorded custody event for case CASE-001" in result.stdout
+
+    store = EvidenceStore(database_path)
+    events = store.get_custody_events("CASE-001")
+    store.close()
+
+    assert len(events) == 1
+    assert events[0]["action"] == "created"
+    assert events[0]["analyst"] == "analyst@example.com"
+
+
+def test_custody_list_command_prints_history(tmp_path):
+    database_path = tmp_path / "test.db"
+    store = EvidenceStore(database_path)
+    store.create_case(case_id="CASE-001", case_name="Custody Command")
+    store.record_custody_event(
+        case_id="CASE-001",
+        artifact_path="reports/case-report.txt",
+        sha256="b" * 64,
+        action="created",
+        analyst="analyst@example.com",
+        note="Initial report generated",
+        verification_result=None,
+    )
+    store.close()
+
+    result = _run_command(
+        [
+            "custody",
+            "list",
+            "--database",
+            str(database_path),
+            "--case",
+            "CASE-001",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
+    assert "Artifact: reports/case-report.txt" in result.stdout
+    assert "Action: created" in result.stdout
+    assert "Analyst: analyst@example.com" in result.stdout
+
+
+def test_custody_record_rejects_invalid_action(tmp_path):
+    database_path = tmp_path / "test.db"
+    store = EvidenceStore(database_path)
+    store.create_case(case_id="CASE-001", case_name="Custody Command")
+    store.close()
+
+    result = _run_command(
+        [
+            "custody",
+            "record",
+            "--database",
+            str(database_path),
+            "--case",
+            "CASE-001",
+            "--artifact",
+            "reports/case-report.txt",
+            "--hash",
+            "a" * 64,
+            "--action",
+            "deleted",
+            "--analyst",
+            "analyst@example.com",
+            "--note",
+            "",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode != 0
+    assert "Invalid custody action" in result.stderr
+
+
+def test_custody_record_rejects_missing_case(tmp_path):
+    database_path = tmp_path / "test.db"
+
+    result = _run_command(
+        [
+            "custody",
+            "record",
+            "--database",
+            str(database_path),
+            "--case",
+            "CASE-001",
+            "--artifact",
+            "reports/case-report.txt",
+            "--hash",
+            "a" * 64,
+            "--action",
+            "created",
+            "--analyst",
+            "analyst@example.com",
+            "--note",
+            "",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode != 0
+    assert "Case not found: CASE-001" in result.stderr
+
+
+def test_custody_record_rejects_invalid_hash(tmp_path):
+    database_path = tmp_path / "test.db"
+    store = EvidenceStore(database_path)
+    store.create_case(case_id="CASE-001", case_name="Custody Command")
+    store.close()
+
+    result = _run_command(
+        [
+            "custody",
+            "record",
+            "--database",
+            str(database_path),
+            "--case",
+            "CASE-001",
+            "--artifact",
+            "reports/case-report.txt",
+            "--hash",
+            "deadbeef",
+            "--action",
+            "created",
+            "--analyst",
+            "analyst@example.com",
+            "--note",
+            "",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode != 0
+    assert "Invalid SHA-256 digest" in result.stderr
