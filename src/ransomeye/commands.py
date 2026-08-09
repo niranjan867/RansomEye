@@ -478,6 +478,17 @@ def main() -> None:
         help="Output directory path of the export package.",
     )
 
+    lock_status_parser = export_subparsers.add_parser(
+        "lock-status",
+        help="Inspect export lock file status and owner PID.",
+    )
+    lock_status_parser.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="Output directory path of the export package.",
+    )
+
     unlock_parser = export_subparsers.add_parser(
         "unlock",
         help="Remove export lock file.",
@@ -493,6 +504,7 @@ def main() -> None:
         action="store_true",
         help="Force removal of the lock file.",
     )
+
 
     args = parser.parse_args()
 
@@ -616,6 +628,23 @@ def main() -> None:
                 print(f"  Output: {metadata.get('output')}")
             except (FileNotFoundError, ValueError, OSError) as exc:
                 parser.exit(1, f"{exc}\n")
+        elif args.export_command == "lock-status":
+            try:
+                from ransomeye.export import get_lock_owner_status
+
+                metadata = read_export_lock(args.output)
+                owner_status = get_lock_owner_status(metadata)
+                print("Export lock:")
+                print(f"  PID: {metadata.get('pid')}")
+                print(f"  Created UTC: {metadata.get('created_utc')}")
+                print(f"  Case: {metadata.get('case_id')}")
+                print(f"  Database: {metadata.get('database')}")
+                print(f"  Output: {metadata.get('output')}")
+                print(f"  Owner status: {owner_status.value}")
+
+            except (FileNotFoundError, ValueError, OSError) as exc:
+                parser.exit(1, f"{exc}\n")
+
         elif args.export_command == "unlock":
             try:
                 metadata = read_export_lock(args.output)

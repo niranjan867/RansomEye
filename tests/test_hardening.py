@@ -12,13 +12,16 @@ from pathlib import Path
 import pytest
 
 from ransomeye.export import (
+    LockOwnerStatus,
     _reserve_output_path,
     export_case,
+    get_lock_owner_status,
     read_export_lock,
     remove_export_lock,
     verify_export_package,
 )
 from ransomeye.storage import EvidenceStore
+
 
 
 def _export_worker(
@@ -379,3 +382,49 @@ def test_unlock_one_output_does_not_remove_another(tmp_path: Path) -> None:
         assert lock_path2.exists()
     finally:
         lock_path2.unlink(missing_ok=True)
+
+
+def test_lock_owner_status_current_process(tmp_path: Path) -> None:
+    metadata = {"pid": os.getpid()}
+    assert get_lock_owner_status(metadata) == LockOwnerStatus.ACTIVE
+
+
+def test_lock_owner_status_nonexistent_pid(tmp_path: Path) -> None:
+    metadata = {"pid": 999999}
+    assert get_lock_owner_status(metadata) == LockOwnerStatus.INACTIVE
+
+
+def test_lock_owner_status_invalid_pid(tmp_path: Path) -> None:
+    assert get_lock_owner_status({"pid": "invalid"}) == LockOwnerStatus.UNKNOWN
+    assert get_lock_owner_status({"pid": -5}) == LockOwnerStatus.UNKNOWN
+    assert get_lock_owner_status({}) == LockOwnerStatus.UNKNOWN
+
+
+def test_lock_status_cli_command(tmp_path: Path) -> None:
+    output_path = tmp_path / "CASE-STATUS"
+    lock_path, lock_fd = _reserve_output_path(
+        output_path,
+        database_path=tmp_path / "test.db",
+        case_id="CASE-STATUS",
+    )
+
+    try:
+        result = _run_cli(["export", "lock-status", "--output", str(output_path)], cwd=tmp_path)
+        assert result.returncode == 0
+        assert "Export lock:" in result.stdout
+        assert f"PID: {os.getpid()}" in result.stdout
+        assert "Owner status: ACTIVE" in result.stdout
+        assert lock_path.exists()  # Never removes lock
+    finally:
+        os.close(lock_fd)
+        lock_path.unlink(missing_ok=True)
+
+
+def test_lock_status_malformed_returns_failure(tmp_path: Path) -> None:
+    output_path = tmp_path / "CASE-MALFORMED"
+    lock_path = tmp_path / ".CASE-MALFORMED.lock"
+    lock_path.write_text("bad json", encoding="utf-8")
+
+    result = _run_cli(["export", "lock-status", "--output", str(output_path)], cwd=tmp_path)
+    assert result.returncode != 0
+    assert "Export lock is invalid" in result.stderr

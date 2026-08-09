@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import errno
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,13 @@ from ransomeye.integrity import sha256_file
 from ransomeye.report import write_case_report
 from ransomeye.storage import EvidenceStore
 from ransomeye.timeline import get_case_timeline
+
+
+class LockOwnerStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    UNKNOWN = "UNKNOWN"
+
 
 
 def verify_export_package(export_dir: Path) -> bool:
@@ -103,6 +111,40 @@ def remove_export_lock(output_path: Path, *, force: bool = False) -> Path:
 
     lock_path.unlink()
     return lock_path
+
+
+def get_lock_owner_status(metadata: dict[str, Any]) -> LockOwnerStatus:
+    pid = metadata.get("pid")
+
+    if not isinstance(pid, int) or pid <= 0:
+        return LockOwnerStatus.UNKNOWN
+
+    if pid == os.getpid():
+        return LockOwnerStatus.ACTIVE
+
+    try:
+        if os.name == "nt":
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            output = result.stdout.strip()
+            if not output or "No tasks are running" in output:
+                return LockOwnerStatus.INACTIVE
+            return LockOwnerStatus.ACTIVE
+
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return LockOwnerStatus.INACTIVE
+    except PermissionError:
+        return LockOwnerStatus.ACTIVE
+    except (OSError, subprocess.SubprocessError):
+        return LockOwnerStatus.UNKNOWN
+    else:
+        return LockOwnerStatus.ACTIVE
+
 
 
 
