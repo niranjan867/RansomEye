@@ -13,9 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from ransomeye.integrity import sha256_file
+from ransomeye.logging import try_write_audit_event
 from ransomeye.report import write_case_report
+
 from ransomeye.storage import EvidenceStore
 from ransomeye.timeline import get_case_timeline
+
 
 
 class LockOwnerStatus(str, Enum):
@@ -106,26 +109,68 @@ def remove_export_lock(
     force: bool = False,
     break_lock: bool = False,
 ) -> Path:
-    metadata = read_export_lock(output_path)
+    log_path = os.environ.get("RANSOMEYE_LOG_PATH", "logs/audit.jsonl")
+    try:
+        metadata = read_export_lock(output_path)
 
-    if not force:
-        raise PermissionError("Lock removal requires --force")
+        if not force:
+            try_write_audit_event(
+                log_path,
+                "lock_removed",
+                "rejected",
+                output=str(output_path),
+                reason="Missing --force",
+            )
+            raise PermissionError("Lock removal requires --force")
 
-    owner_status = get_lock_owner_status(metadata)
+        owner_status = get_lock_owner_status(metadata)
 
-    if owner_status == LockOwnerStatus.ACTIVE and not break_lock:
-        raise PermissionError(
-            "Export lock owner is active; use --break-lock to override"
+        if owner_status == LockOwnerStatus.ACTIVE and not break_lock:
+            try_write_audit_event(
+                log_path,
+                "lock_removed",
+                "rejected",
+                output=str(output_path),
+                reason="Active lock owner requires --break-lock",
+            )
+            raise PermissionError(
+                "Export lock owner is active; use --break-lock to override"
+            )
+
+        if owner_status == LockOwnerStatus.UNKNOWN and not break_lock:
+            try_write_audit_event(
+                log_path,
+                "lock_removed",
+                "rejected",
+                output=str(output_path),
+                reason="Unknown lock owner requires --break-lock",
+            )
+            raise PermissionError(
+                "Export lock owner status is unknown; use --break-lock to override"
+            )
+
+        lock_path = get_export_lock_path(output_path)
+        lock_path.unlink()
+        try_write_audit_event(
+            log_path,
+            "lock_removed",
+            "success",
+            output=str(output_path),
+            case_id=metadata.get("case_id"),
         )
+        return lock_path
+    except Exception as exc:
+        if not isinstance(exc, PermissionError):
+            try_write_audit_event(
+                log_path,
+                "lock_removed",
+                "failure",
+                output=str(output_path),
+                error=str(exc),
+            )
+        raise
 
-    if owner_status == LockOwnerStatus.UNKNOWN and not break_lock:
-        raise PermissionError(
-            "Export lock owner status is unknown; use --break-lock to override"
-        )
 
-    lock_path = get_export_lock_path(output_path)
-    lock_path.unlink()
-    return lock_path
 
 
 
@@ -220,12 +265,34 @@ def export_case(
     database_path = Path(database_path)
     output_path = Path(output_path)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path, lock_fd = _reserve_output_path(
-        output_path,
-        database_path=database_path,
+    log_path = os.environ.get("RANSOMEYE_LOG_PATH", "logs/audit.jsonl")
+    try_write_audit_event(
+        log_path,
+        "export_started",
+        "success",
+        database=str(database_path),
         case_id=case_id,
+        output=str(output_path),
     )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        lock_path, lock_fd = _reserve_output_path(
+            output_path,
+            database_path=database_path,
+            case_id=case_id,
+        )
+    except Exception as exc:
+        try_write_audit_event(
+            log_path,
+            "export_failed",
+            "failure",
+            database=str(database_path),
+            case_id=case_id,
+            output=str(output_path),
+            error=str(exc),
+        )
+        raise
 
     staging_dir: Path | None = Path(
         tempfile.mkdtemp(
@@ -310,10 +377,28 @@ def export_case(
         # 9. Atomic rename/move to target output_path
         os.rename(staging_dir, output_path)
         staging_dir = None
+
+        try_write_audit_event(
+            log_path,
+            "export_completed",
+            "success",
+            database=str(database_path),
+            case_id=case_id,
+            output=str(output_path),
+        )
         return output_path
-    except Exception:
+    except Exception as exc:
         if staging_dir is not None and staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
+        try_write_audit_event(
+            log_path,
+            "export_failed",
+            "failure",
+            database=str(database_path),
+            case_id=case_id,
+            output=str(output_path),
+            error=str(exc),
+        )
         raise
     finally:
         os.close(lock_fd)

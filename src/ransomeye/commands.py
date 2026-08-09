@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 from pathlib import Path
+
 
 
 from ransomeye.integrity import sha256_file, verify_manifest
@@ -661,7 +663,17 @@ def main() -> None:
 
         if args.export_command == "lock-info":
             try:
+                from ransomeye.logging import try_write_audit_event
+
+                log_path = os.environ.get("RANSOMEYE_LOG_PATH", "logs/audit.jsonl")
                 metadata = read_export_lock(args.output)
+                try_write_audit_event(
+                    log_path,
+                    "lock_inspected",
+                    "success",
+                    output=str(args.output),
+                    case_id=metadata.get("case_id"),
+                )
                 print("Export lock:")
                 print(f"  PID: {metadata.get('pid')}")
                 print(f"  Created UTC: {metadata.get('created_utc')}")
@@ -669,13 +681,33 @@ def main() -> None:
                 print(f"  Database: {metadata.get('database')}")
                 print(f"  Output: {metadata.get('output')}")
             except (FileNotFoundError, ValueError, OSError) as exc:
+                from ransomeye.logging import try_write_audit_event
+
+                log_path = os.environ.get("RANSOMEYE_LOG_PATH", "logs/audit.jsonl")
+                try_write_audit_event(
+                    log_path,
+                    "lock_inspected",
+                    "failure",
+                    output=str(args.output),
+                    error=str(exc),
+                )
                 parser.exit(1, f"{exc}\n")
         elif args.export_command == "lock-status":
             try:
                 from ransomeye.export import get_lock_owner_status
+                from ransomeye.logging import try_write_audit_event
 
+                log_path = os.environ.get("RANSOMEYE_LOG_PATH", "logs/audit.jsonl")
                 metadata = read_export_lock(args.output)
                 owner_status = get_lock_owner_status(metadata)
+                try_write_audit_event(
+                    log_path,
+                    "lock_inspected",
+                    "success",
+                    output=str(args.output),
+                    case_id=metadata.get("case_id"),
+                    owner_status=owner_status.value,
+                )
                 print("Export lock:")
                 print(f"  PID: {metadata.get('pid')}")
                 print(f"  Created UTC: {metadata.get('created_utc')}")
@@ -685,7 +717,19 @@ def main() -> None:
                 print(f"  Owner status: {owner_status.value}")
 
             except (FileNotFoundError, ValueError, OSError) as exc:
+                from ransomeye.logging import try_write_audit_event
+
+                log_path = os.environ.get("RANSOMEYE_LOG_PATH", "logs/audit.jsonl")
+                try_write_audit_event(
+                    log_path,
+                    "lock_inspected",
+                    "failure",
+                    output=str(args.output),
+                    error=str(exc),
+                )
                 parser.exit(1, f"{exc}\n")
+
+
 
         elif args.export_command == "unlock":
             try:

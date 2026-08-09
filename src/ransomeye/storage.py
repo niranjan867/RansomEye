@@ -12,6 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ransomeye.logging import try_write_audit_event
+
+
+
 CURRENT_SCHEMA_VERSION = 4
 
 CASE_STATUSES = {"OPEN", "TRIAGED", "CONTAINED", "CLOSED", "REOPENED"}
@@ -592,8 +596,16 @@ class EvidenceStore:
 
 def check_database_integrity(database_path: Path | str) -> bool:
     database_path = Path(database_path)
+    log_path = os.environ.get("RANSOMEYE_LOG_PATH", "logs/audit.jsonl")
 
     if not database_path.is_file():
+        try_write_audit_event(
+            log_path,
+            "database_integrity_check",
+            "failure",
+            database=str(database_path),
+            error=f"Database not found: {database_path}",
+        )
         raise FileNotFoundError(
             f"Database not found: {database_path}"
         )
@@ -605,12 +617,25 @@ def check_database_integrity(database_path: Path | str) -> bool:
             result = connection.execute(
                 "PRAGMA integrity_check"
             ).fetchone()
+        is_ok = result == ("ok",)
+        try_write_audit_event(
+            log_path,
+            "database_integrity_check",
+            "success" if is_ok else "failure",
+            database=str(database_path),
+        )
+        return is_ok
     except sqlite3.Error as exc:
+        try_write_audit_event(
+            log_path,
+            "database_integrity_check",
+            "failure",
+            database=str(database_path),
+            error=str(exc),
+        )
         raise sqlite3.DatabaseError(
             f"Database integrity check failed: {exc}"
         ) from exc
-
-    return result == ("ok",)
 
 
 def backup_database(
@@ -619,8 +644,17 @@ def backup_database(
 ) -> Path:
     database_path = Path(database_path)
     output_path = Path(output_path)
+    log_path = os.environ.get("RANSOMEYE_LOG_PATH", "logs/audit.jsonl")
 
     if not database_path.is_file():
+        try_write_audit_event(
+            log_path,
+            "database_backup",
+            "failure",
+            database=str(database_path),
+            output=str(output_path),
+            error=f"Database not found: {database_path}",
+        )
         raise FileNotFoundError(
             f"Database not found: {database_path}"
         )
@@ -634,6 +668,14 @@ def backup_database(
         )
         os.close(fd)
     except FileExistsError as exc:
+        try_write_audit_event(
+            log_path,
+            "database_backup",
+            "rejected",
+            database=str(database_path),
+            output=str(output_path),
+            error=str(exc),
+        )
         raise FileExistsError(
             f"Backup destination already exists: {output_path}"
         ) from exc
@@ -656,8 +698,23 @@ def backup_database(
                 f"Backup integrity check failed: {output_path}"
             )
 
+        try_write_audit_event(
+            log_path,
+            "database_backup",
+            "success",
+            database=str(database_path),
+            output=str(output_path),
+        )
         return output_path
 
-    except Exception:
+    except Exception as exc:
         output_path.unlink(missing_ok=True)
+        try_write_audit_event(
+            log_path,
+            "database_backup",
+            "failure",
+            database=str(database_path),
+            output=str(output_path),
+            error=str(exc),
+        )
         raise
