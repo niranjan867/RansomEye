@@ -178,4 +178,6 @@ def analyze_events(events: list[dict]) -> dict:
         "severity": _severity_from_score(score),
         "confidence": confidence,
         "reasons": reasons,
+        "mass_modify_triggered": mass_modify_triggered,
+        "ransom_note_triggered": ransom_note_triggered,
     }

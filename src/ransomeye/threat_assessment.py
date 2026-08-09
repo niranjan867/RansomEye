@@ -5,7 +5,8 @@ from typing import Any
 
 from ransomeye.behavior import analyze_behavior
 from ransomeye.correlation import correlate_events
-from ransomeye.rules import analyze_events
+from ransomeye.rules import analyze_events, MASS_MODIFY_SCORE, RANSOM_NOTE_SCORE
+from ransomeye.file_behavior import analyze_file_behavior
 
 
 def _severity_from_score(score: int) -> str:
@@ -49,19 +50,41 @@ def assess_threat(events: list[Any]) -> dict[str, Any]:
     """Combine all current findings into one explainable assessment."""
     base_result = analyze_events(events)
     behavior_findings = analyze_behavior(events)
-    incidents = correlate_events(events)
+    file_behavior_findings = analyze_file_behavior(events)
 
-    behavior_score = sum(
-        int(finding.get("score", 0))
-        for finding in behavior_findings
+    # Prevent double counting: if file_behavior detected the same pattern
+    # that rules.py scored, subtract the legacy contribution using the
+    # structured trigger flags rather than fragile reason-string matching.
+    has_mass_mod = any(
+        f.get("type") == "mass_file_modification"
+        for f in file_behavior_findings
+    )
+    has_ransom_note = any(
+        f.get("type") == "ransom_note"
+        for f in file_behavior_findings
     )
 
+    if has_mass_mod and base_result.get("mass_modify_triggered"):
+        base_result["score"] = max(0, base_result["score"] - MASS_MODIFY_SCORE)
+
+    if has_ransom_note and base_result.get("ransom_note_triggered"):
+        base_result["score"] = max(0, base_result["score"] - RANSOM_NOTE_SCORE)
+
+    incidents = correlate_events(events)
+
+    file_behavior_score = sum(int(f.get("score", 0)) for f in file_behavior_findings)
+    behavior_score = sum(int(f.get("score", 0)) for f in behavior_findings)
+
+    all_findings = behavior_findings + file_behavior_findings
+
     correlation_bonus = 0
-    if base_result["score"] > 0 and behavior_findings:
+    # Use (base_result + file_behavior_score) to see if we have baseline suspicious activity
+    if (base_result["score"] + file_behavior_score) > 0 and behavior_findings:
         correlation_bonus = 10
 
-    total_score = min(base_result["score"] + behavior_score + correlation_bonus, 100)
+    total_score = min(base_result["score"] + file_behavior_score + behavior_score + correlation_bonus, 100)
 
+    # Apply aggressive behavior floor ONLY to the original behavior findings (powershell, certutil, etc.)
     if behavior_findings:
         behavior_floor = 25
         if len(behavior_findings) > 1:
@@ -75,13 +98,13 @@ def assess_threat(events: list[Any]) -> dict[str, Any]:
         reasons.extend(base_result["reasons"])
 
     reasons.extend(
-        f"{finding['reason']} (+{finding['score']})"
-        for finding in behavior_findings
+        f"{finding['reason']} (+{finding.get('score', 0)})"
+        for finding in all_findings
     )
 
     techniques = sorted({
         finding["technique"]
-        for finding in behavior_findings
+        for finding in all_findings
         if finding.get("technique")
     })
 
@@ -121,12 +144,12 @@ def assess_threat(events: list[Any]) -> dict[str, Any]:
         "severity": _severity_from_score(total_score),
         "confidence": _combine_confidence(
             base_result,
-            behavior_findings,
+            all_findings,
             total_score,
         ),
         "reasons": reasons,
         "techniques": techniques,
-        "finding_count": len(behavior_findings),
+        "finding_count": len(all_findings),
         "correlation_count": len(correlations_data),
         "correlations": correlations_data,
     }

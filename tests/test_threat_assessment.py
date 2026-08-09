@@ -242,7 +242,7 @@ def test_correlated_activity_produces_combined_score():
     assert result["score"] == 65
 
     assert result["severity"] == "MEDIUM"
-    assert result["finding_count"] == 2
+    assert result["finding_count"] == 4
     assert "T1059.001" in result["techniques"]
     assert "T1490" in result["techniques"]
     assert result["confidence"] > 0
