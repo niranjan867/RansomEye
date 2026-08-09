@@ -361,7 +361,11 @@ def test_unlock_with_force_removes_exact_lock(tmp_path: Path) -> None:
     )
     os.close(lock_fd)
 
-    removed = remove_export_lock(output_path, force=True)
+    # Since current process pid is ACTIVE, --force alone is rejected, requires break_lock=True
+    with pytest.raises(PermissionError, match="use --break-lock to override"):
+        remove_export_lock(output_path, force=True, break_lock=False)
+
+    removed = remove_export_lock(output_path, force=True, break_lock=True)
     assert removed == lock_path
     assert not lock_path.exists()
 
@@ -377,11 +381,12 @@ def test_unlock_one_output_does_not_remove_another(tmp_path: Path) -> None:
     os.close(lock_fd2)
 
     try:
-        remove_export_lock(path1, force=True)
+        remove_export_lock(path1, force=True, break_lock=True)
         assert not lock_path1.exists()
         assert lock_path2.exists()
     finally:
         lock_path2.unlink(missing_ok=True)
+
 
 
 def test_lock_owner_status_current_process(tmp_path: Path) -> None:
@@ -428,3 +433,123 @@ def test_lock_status_malformed_returns_failure(tmp_path: Path) -> None:
     result = _run_cli(["export", "lock-status", "--output", str(output_path)], cwd=tmp_path)
     assert result.returncode != 0
     assert "Export lock is invalid" in result.stderr
+
+
+def test_unlock_inactive_with_force_removes_lock(tmp_path: Path) -> None:
+    output_path = tmp_path / "CASE-INACTIVE"
+    lock_path = tmp_path / ".CASE-INACTIVE.lock"
+    metadata = {
+        "pid": 999999,
+        "created_utc": "2026-08-09T00:00:00Z",
+        "database": "db.db",
+        "case_id": "CASE-INACTIVE",
+        "output": str(output_path),
+    }
+    lock_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    removed = remove_export_lock(output_path, force=True, break_lock=False)
+    assert removed == lock_path
+    assert not lock_path.exists()
+
+
+def test_unlock_active_with_force_is_rejected(tmp_path: Path) -> None:
+    output_path = tmp_path / "CASE-ACTIVE"
+    lock_path, lock_fd = _reserve_output_path(output_path, database_path=tmp_path / "db.db", case_id="CASE-ACTIVE")
+
+    try:
+        with pytest.raises(PermissionError, match="Export lock owner is active; use --break-lock to override"):
+            remove_export_lock(output_path, force=True, break_lock=False)
+
+        result = _run_cli(["export", "unlock", "--output", str(output_path), "--force"], cwd=tmp_path)
+        assert result.returncode != 0
+        assert "--break-lock" in result.stderr
+        assert lock_path.exists()
+    finally:
+        try:
+            os.close(lock_fd)
+        except OSError:
+            pass
+        lock_path.unlink(missing_ok=True)
+
+
+
+def test_unlock_unknown_with_force_is_rejected(tmp_path: Path) -> None:
+    output_path = tmp_path / "CASE-UNKNOWN"
+    lock_path = tmp_path / ".CASE-UNKNOWN.lock"
+    metadata = {
+        "pid": "invalid_pid",
+        "created_utc": "2026-08-09T00:00:00Z",
+        "database": "db.db",
+        "case_id": "CASE-UNKNOWN",
+        "output": str(output_path),
+    }
+    lock_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    try:
+        with pytest.raises(PermissionError, match="Export lock owner status is unknown; use --break-lock to override"):
+            remove_export_lock(output_path, force=True, break_lock=False)
+
+        result = _run_cli(["export", "unlock", "--output", str(output_path), "--force"], cwd=tmp_path)
+        assert result.returncode != 0
+        assert "--break-lock" in result.stderr
+        assert lock_path.exists()
+    finally:
+        lock_path.unlink(missing_ok=True)
+
+
+def test_unlock_active_with_force_and_break_lock_removes_lock(tmp_path: Path) -> None:
+    output_path = tmp_path / "CASE-ACTIVE-BREAK"
+    lock_path, lock_fd = _reserve_output_path(output_path, database_path=tmp_path / "db.db", case_id="CASE-ACTIVE-BREAK")
+    os.close(lock_fd)
+
+    try:
+        result = _run_cli(["export", "unlock", "--output", str(output_path), "--force", "--break-lock"], cwd=tmp_path)
+        assert result.returncode == 0
+        assert "Removed export lock:" in result.stdout
+        assert not lock_path.exists()
+    finally:
+        lock_path.unlink(missing_ok=True)
+
+
+
+
+def test_unlock_unknown_with_force_and_break_lock_removes_lock(tmp_path: Path) -> None:
+    output_path = tmp_path / "CASE-UNKNOWN-BREAK"
+    lock_path = tmp_path / ".CASE-UNKNOWN-BREAK.lock"
+    metadata = {
+        "pid": "invalid_pid",
+        "created_utc": "2026-08-09T00:00:00Z",
+        "database": "db.db",
+        "case_id": "CASE-UNKNOWN-BREAK",
+        "output": str(output_path),
+    }
+    lock_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = _run_cli(["export", "unlock", "--output", str(output_path), "--force", "--break-lock"], cwd=tmp_path)
+    assert result.returncode == 0
+    assert "Removed export lock:" in result.stdout
+    assert not lock_path.exists()
+
+
+def test_unlock_missing_force_rejected_even_with_break_lock(tmp_path: Path) -> None:
+    output_path = tmp_path / "CASE-NO-FORCE"
+    lock_path = tmp_path / ".CASE-NO-FORCE.lock"
+    metadata = {
+        "pid": 999999,
+        "created_utc": "2026-08-09T00:00:00Z",
+        "database": "db.db",
+        "case_id": "CASE-NO-FORCE",
+        "output": str(output_path),
+    }
+    lock_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    try:
+        with pytest.raises(PermissionError, match="Lock removal requires --force"):
+            remove_export_lock(output_path, force=False, break_lock=True)
+
+        result = _run_cli(["export", "unlock", "--output", str(output_path), "--break-lock"], cwd=tmp_path)
+        assert result.returncode != 0
+        assert "Lock removal requires --force" in result.stderr
+        assert lock_path.exists()
+    finally:
+        lock_path.unlink(missing_ok=True)

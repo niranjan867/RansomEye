@@ -100,17 +100,33 @@ def read_export_lock(output_path: Path) -> dict[str, Any]:
     return metadata
 
 
-def remove_export_lock(output_path: Path, *, force: bool = False) -> Path:
-    lock_path = get_export_lock_path(output_path)
+def remove_export_lock(
+    output_path: Path,
+    *,
+    force: bool = False,
+    break_lock: bool = False,
+) -> Path:
     metadata = read_export_lock(output_path)
 
     if not force:
+        raise PermissionError("Lock removal requires --force")
+
+    owner_status = get_lock_owner_status(metadata)
+
+    if owner_status == LockOwnerStatus.ACTIVE and not break_lock:
         raise PermissionError(
-            "Lock removal requires --force"
+            "Export lock owner is active; use --break-lock to override"
         )
 
+    if owner_status == LockOwnerStatus.UNKNOWN and not break_lock:
+        raise PermissionError(
+            "Export lock owner status is unknown; use --break-lock to override"
+        )
+
+    lock_path = get_export_lock_path(output_path)
     lock_path.unlink()
     return lock_path
+
 
 
 def get_lock_owner_status(metadata: dict[str, Any]) -> LockOwnerStatus:

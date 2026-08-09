@@ -504,6 +504,12 @@ def main() -> None:
         action="store_true",
         help="Force removal of the lock file.",
     )
+    unlock_parser.add_argument(
+        "--break-lock",
+        action="store_true",
+        help="Override active or unknown lock-owner status.",
+    )
+
 
 
     args = parser.parse_args()
@@ -654,8 +660,13 @@ def main() -> None:
                 print(f"  Case: {metadata.get('case_id')}")
                 print(f"  Database: {metadata.get('database')}")
                 print(f"  Output: {metadata.get('output')}")
-                removed_lock = remove_export_lock(args.output, force=args.force)
+                removed_lock = remove_export_lock(
+                    args.output,
+                    force=args.force,
+                    break_lock=args.break_lock,
+                )
                 print(f"Removed export lock: {removed_lock}")
+
             except (FileNotFoundError, ValueError, PermissionError, OSError) as exc:
                 parser.exit(1, f"{exc}\n")
         else:
