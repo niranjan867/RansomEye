@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -53,6 +54,28 @@ def verify_export_package(export_dir: Path) -> bool:
         return False
 
 
+def _reserve_output_path(output_path: Path) -> Path:
+    lock_path = output_path.parent / f".{output_path.name}.lock"
+    try:
+        fd = os.open(
+            lock_path,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        )
+        os.close(fd)
+    except FileExistsError as exc:
+        raise FileExistsError(
+            f"Export output already exists or is being created: {output_path}"
+        ) from exc
+
+    if output_path.exists():
+        lock_path.unlink(missing_ok=True)
+        raise FileExistsError(
+            f"Export output already exists: {output_path}"
+        )
+
+    return lock_path
+
+
 def export_case(
     database_path: Path,
     case_id: str,
@@ -62,39 +85,36 @@ def export_case(
     database_path = Path(database_path)
     output_path = Path(output_path)
 
-    if output_path.exists():
-        raise FileExistsError(
-            f"Export output already exists: {output_path}"
-        )
-
-    store = EvidenceStore(database_path)
-
-    try:
-        case = store.get_case(case_id)
-        if case is None:
-            raise ValueError(f"Case not found: {case_id}")
-
-        findings = store.get_case_findings(case_id)
-        history = store.get_case_history(case_id)
-        custody = store.get_custody_events(case_id)
-        timeline = get_case_timeline(database_path, case_id)
-
-    finally:
-        store.close()
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    staging_dir = Path(
-        tempfile.mkdtemp(prefix="ransomeye_export_tmp_", dir=output_path.parent)
+    lock_path = _reserve_output_path(output_path)
+
+    staging_dir: Path | None = Path(
+        tempfile.mkdtemp(
+            prefix="ransomeye_export_tmp_",
+            dir=output_path.parent,
+        )
     )
 
     try:
+        store = EvidenceStore(database_path)
+        try:
+            case = store.get_case(case_id)
+            if case is None:
+                raise ValueError(f"Case not found: {case_id}")
+
+            findings = store.get_case_findings(case_id)
+            history = store.get_case_history(case_id)
+            custody = store.get_custody_events(case_id)
+            timeline = get_case_timeline(database_path, case_id)
+        finally:
+            store.close()
+
         # 1. case-report.txt & case-report.txt.sha256
         report_txt_path = staging_dir / "case-report.txt"
         write_case_report(database_path, case_id, report_txt_path)
         report_hash = sha256_file(report_txt_path)
         report_sha_path = staging_dir / "case-report.txt.sha256"
         report_sha_path.write_text(f"{report_hash}  case-report.txt\n", encoding="utf-8")
-
 
         # 2. case-metadata.json
         metadata_path = staging_dir / "case-metadata.json"
@@ -149,11 +169,12 @@ def export_case(
             raise RuntimeError("Export manifest verification failed prior to finalization.")
 
         # 9. Atomic rename/move to target output_path
-        shutil.move(str(staging_dir), str(output_path))
-
-
+        os.rename(staging_dir, output_path)
+        staging_dir = None
         return output_path
     except Exception:
-        if staging_dir.exists():
+        if staging_dir is not None and staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
         raise
+    finally:
+        lock_path.unlink(missing_ok=True)
