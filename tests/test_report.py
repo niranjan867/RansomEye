@@ -161,5 +161,139 @@ def test_case_report_shows_failed_verification(tmp_path):
     report = output_path.read_text(encoding="utf-8")
 
     assert "CHAIN OF CUSTODY" in report
+
     assert "Verification: FAILED" in report
     assert "Note: Manifest mismatch" in report
+
+
+def test_report_includes_evidence_traceability_for_linked_finding(tmp_path):
+    database_path = tmp_path / "trace_report.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-TR-REP", "Traceability Report Test")
+    store.save_event(
+        "CASE-TR-REP",
+        {
+            "event_id": "evt-tr-101",
+            "timestamp": "2026-08-08T20:00:00Z",
+            "source": "sysmon",
+            "event_type": "process_creation",
+            "process_name": "cmd.exe",
+            "pid": "3333",
+        },
+    )
+    store.save_finding(
+        "CASE-TR-REP",
+        {"type": "suspicious_cmd", "score": 15, "reason": "Suspicious cmd execution"},
+        event_ids=["evt-tr-101"],
+    )
+    store.close()
+
+    report = generate_case_report(database_path, "CASE-TR-REP")
+
+    assert "EVIDENCE TRACEABILITY" in report
+    assert "Finding #1: suspicious_cmd" in report
+    assert "Evidence Event ID: evt-tr-101" in report
+    assert "Time:              2026-08-08T20:00:00Z" in report
+    assert "Process:           cmd.exe" in report
+    assert "PID:               3333" in report
+
+
+def test_finding_linked_to_multiple_events_prints_all_evidence_ids(tmp_path):
+    database_path = tmp_path / "multi_ev_report.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-MEV-REP", "Multi Event Report Test")
+    store.save_event("CASE-MEV-REP", {"event_id": "evt-m1", "timestamp": "2026-08-08T20:00:00Z", "source": "sysmon", "event_type": "process_creation"})
+    store.save_event("CASE-MEV-REP", {"event_id": "evt-m2", "timestamp": "2026-08-08T20:00:01Z", "source": "sysmon", "event_type": "process_creation"})
+    store.save_finding(
+        "CASE-MEV-REP",
+        {"type": "multi_event_rule", "score": 25, "reason": "Multi event pattern"},
+        event_ids=["evt-m1", "evt-m2"],
+    )
+    store.close()
+
+    report = generate_case_report(database_path, "CASE-MEV-REP")
+
+    assert "EVIDENCE TRACEABILITY" in report
+    assert "Evidence Event ID: evt-m1" in report
+    assert "Evidence Event ID: evt-m2" in report
+
+
+def test_finding_without_evidence_remains_reportable(tmp_path):
+    database_path = tmp_path / "no_ev_report.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-NOEV-REP", "No Evidence Report Test")
+    store.save_finding("CASE-NOEV-REP", {"type": "manual_rule", "score": 5, "reason": "No evidence attached"})
+    store.close()
+
+    report = generate_case_report(database_path, "CASE-NOEV-REP")
+
+    assert "EVIDENCE TRACEABILITY" in report
+    assert "No evidence links." in report
+
+
+def test_report_includes_correlations_section(tmp_path):
+    database_path = tmp_path / "corr_report.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-CORR-REP", "Correlation Report Test")
+    store.save_event(
+        "CASE-CORR-REP",
+        {
+            "event_id": "evt-c1",
+            "timestamp": "2026-08-08T20:00:00Z",
+            "source": "sysmon",
+            "event_type": "process_creation",
+            "process_name": "notepad.exe",
+            "process_guid": "{GUID-NOTEPAD}",
+        },
+    )
+    store.close()
+
+    report = generate_case_report(database_path, "CASE-CORR-REP")
+
+    assert "CORRELATIONS" in report
+    assert "Incident:    INC-0001" in report
+    assert "Process Key: guid:{GUID-NOTEPAD}" in report
+    assert "Events:      evt-c1" in report
+
+
+def test_end_to_end_traceability_report(monkeypatch, tmp_path):
+    from ransomeye import pipeline
+
+    events = [
+        {
+            "event_id": "e2e-ps-999",
+            "timestamp": "2026-08-08T18:00:00Z",
+            "source": "sysmon",
+            "event_type": "process_creation",
+            "process_name": "powershell.exe",
+            "pid": "7777",
+            "parent_pid": "1000",
+            "process_guid": "{E2E-PS-GUID}",
+            "file_path": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            "command_line": "powershell.exe -NoProfile -EncodedCommand SGVsbG8=",
+            "metadata": {"rule": "Sysmon Event ID 1"},
+        }
+    ]
+
+    monkeypatch.setattr(pipeline, "read_process_creation_events", lambda limit: events)
+    database_path = tmp_path / "e2e_report.db"
+
+    pipeline.collect_and_store(
+        database_path=database_path,
+        case_id="RE-E2E-001",
+        case_name="End to End Traceability",
+        limit=10,
+    )
+
+    report = generate_case_report(database_path, "RE-E2E-001")
+
+    assert "RANSOMEYE CASE REPORT" in report
+    assert "FINDINGS" in report
+    assert "EVIDENCE TRACEABILITY" in report
+    assert "Finding #1: suspicious_powershell" in report
+    assert "Evidence Event ID: e2e-ps-999" in report
+    assert "Process:           powershell.exe" in report
+    assert "PID:               7777" in report
+    assert "CORRELATIONS" in report
+    assert "Incident:    INC-0001" in report
+    assert "Events:      e2e-ps-999" in report

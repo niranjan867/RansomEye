@@ -1,11 +1,11 @@
 """Generate analyst-readable RansomEye case reports."""
 
-from __future__ import annotations
-
+from datetime import datetime
 import json
 import sqlite3
 from pathlib import Path
 
+from ransomeye.correlation import correlate_events
 from ransomeye.storage import EvidenceStore
 from ransomeye.timeline import build_process_tree, get_case_timeline
 
@@ -57,10 +57,10 @@ def generate_case_report(
 
         findings = connection.execute(
             """
-            SELECT finding_type, score, confidence, technique, reason
+            SELECT finding_id, finding_type, score, confidence, technique, reason
             FROM findings
             WHERE case_id = ?
-            ORDER BY created_at ASC
+            ORDER BY created_at ASC, finding_id ASC
             """,
             (case_id,),
         ).fetchall()
@@ -133,6 +133,97 @@ def generate_case_report(
                         "",
                     ]
                 )
+
+        traceability_rows = connection.execute(
+            """
+            SELECT
+                fe.finding_id,
+                f.finding_type,
+                e.event_id,
+                e.timestamp,
+                e.source,
+                e.event_type,
+                e.process_name,
+                e.pid,
+                e.file_path,
+                e.command_line
+            FROM finding_evidence fe
+            JOIN findings f ON fe.finding_id = f.finding_id
+            JOIN events e ON fe.event_id = e.event_id
+            WHERE f.case_id = ?
+            ORDER BY fe.finding_id ASC, e.timestamp ASC, e.event_id ASC
+            """,
+            (case_id,),
+        ).fetchall()
+
+        lines.extend(["", "EVIDENCE TRACEABILITY", "---------------------"])
+
+        if not traceability_rows:
+            lines.append("No evidence links.")
+        else:
+            findings_by_id: dict[int, list[sqlite3.Row]] = {}
+            for row in traceability_rows:
+                findings_by_id.setdefault(row["finding_id"], []).append(row)
+
+            for finding_id, rows in findings_by_id.items():
+                finding_type = rows[0]["finding_type"]
+                lines.append(f"Finding #{finding_id}: {finding_type}")
+
+                seen_event_ids: set[str] = set()
+                for row in rows:
+                    eid = row["event_id"]
+                    if eid in seen_event_ids:
+                        continue
+                    seen_event_ids.add(eid)
+
+                    lines.extend(
+                        [
+                            f"  Evidence Event ID: {eid}",
+                            f"  Time:              {row['timestamp'] or 'N/A'}",
+                            f"  Source:            {row['source'] or 'N/A'}",
+                            f"  Event Type:        {row['event_type'] or 'N/A'}",
+                            f"  Process:           {row['process_name'] or 'N/A'}",
+                            f"  PID:               {row['pid'] or 'N/A'}",
+                            "",
+                        ]
+                    )
+
+        lines.extend(["", "CORRELATIONS", "------------"])
+
+        incidents = correlate_events(timeline)
+
+        if not incidents:
+            lines.append("No correlations.")
+        else:
+            for inc in incidents:
+                start_t = (
+                    inc.start_time.isoformat()
+                    if isinstance(inc.start_time, datetime)
+                    else str(inc.start_time)
+                )
+                end_t = (
+                    inc.end_time.isoformat()
+                    if isinstance(inc.end_time, datetime)
+                    else str(inc.end_time)
+                )
+                ev_ids = [
+                    str(evt["event_id"])
+                    for evt in inc.events
+                    if evt.get("event_id") is not None and str(evt.get("event_id")).strip()
+                ]
+
+                lines.extend(
+                    [
+                        f"Incident:    {inc.incident_id}",
+                        f"Process Key: {inc.process_key}",
+                        f"Start Time:  {start_t}",
+                        f"End Time:    {end_t}",
+                        f"Duration:    {inc.duration_seconds}s",
+                        f"Events:      {', '.join(ev_ids) if ev_ids else 'N/A'}",
+                        "",
+                    ]
+                )
+
 
         lines.extend(["Case lifecycle", "--------------"])
         lines.append(f"Current status: {case['status'] or 'OPEN'}")
