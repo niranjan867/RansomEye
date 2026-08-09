@@ -529,6 +529,24 @@ def main() -> None:
         help="Path to the RansomEye SQLite database.",
     )
 
+    db_backup_parser = database_subparsers.add_parser(
+        "backup",
+        help="Create a safe SQLite database backup.",
+    )
+    db_backup_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the source SQLite database.",
+    )
+    db_backup_parser.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="Destination path for the backup.",
+    )
+
+
     args = parser.parse_args()
 
 
@@ -713,6 +731,19 @@ def main() -> None:
                     parser.exit(1, "Database integrity check failed: Integrity check returned non-ok result\n")
             except (FileNotFoundError, sqlite3.DatabaseError, sqlite3.Error, OSError) as exc:
                 parser.exit(1, f"Database integrity check failed: {exc}\n")
+        elif args.database_command == "backup":
+            try:
+                from ransomeye.storage import backup_database
+
+                backup_path = backup_database(
+                    args.database,
+                    args.output,
+                )
+                print(f"Database backup created: {backup_path}")
+            except (FileExistsError, FileNotFoundError, OSError, sqlite3.Error) as exc:
+                parser.exit(1, f"Database backup failed: {exc}\n")
+
+
 
 
 

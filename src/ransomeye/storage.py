@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import string
+
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -609,3 +611,53 @@ def check_database_integrity(database_path: Path | str) -> bool:
         ) from exc
 
     return result == ("ok",)
+
+
+def backup_database(
+    database_path: Path | str,
+    output_path: Path | str,
+) -> Path:
+    database_path = Path(database_path)
+    output_path = Path(output_path)
+
+    if not database_path.is_file():
+        raise FileNotFoundError(
+            f"Database not found: {database_path}"
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        fd = os.open(
+            output_path,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        )
+        os.close(fd)
+    except FileExistsError as exc:
+        raise FileExistsError(
+            f"Backup destination already exists: {output_path}"
+        ) from exc
+
+    try:
+        source_uri = f"{database_path.resolve().as_uri()}?mode=ro"
+
+        source = sqlite3.connect(source_uri, uri=True)
+        try:
+            destination = sqlite3.connect(output_path)
+            try:
+                source.backup(destination)
+            finally:
+                destination.close()
+        finally:
+            source.close()
+
+        if not check_database_integrity(output_path):
+            raise sqlite3.DatabaseError(
+                f"Backup integrity check failed: {output_path}"
+            )
+
+        return output_path
+
+    except Exception:
+        output_path.unlink(missing_ok=True)
+        raise
