@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+
 
 import pytest
 
@@ -220,3 +223,50 @@ def test_duplicate_status_transition_is_handled(tmp_path: Path) -> None:
     assert history[0]["old_status"] == "OPEN"
     assert history[0]["new_status"] == "OPEN"
     store.close()
+
+
+def test_export_lock_contains_metadata(tmp_path: Path) -> None:
+    from ransomeye.export import _reserve_output_path
+
+    output_path = tmp_path / "CASE-001"
+    lock_path, lock_fd = _reserve_output_path(
+        output_path,
+        database_path=tmp_path / "test.db",
+        case_id="CASE-001",
+    )
+
+    try:
+        metadata = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert metadata["pid"] == os.getpid()
+        assert metadata["case_id"] == "CASE-001"
+        assert metadata["output"] == str(output_path)
+        assert metadata["database"] == str(tmp_path / "test.db")
+        assert "created_utc" in metadata
+    finally:
+        os.close(lock_fd)
+        lock_path.unlink(missing_ok=True)
+
+
+def test_failed_export_removes_metadata_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ransomeye import export
+
+    db_path = tmp_path / "test.db"
+    store = EvidenceStore(db_path)
+    store.create_case("CASE-001", "Failure Case")
+    store.close()
+
+    monkeypatch.setattr(
+        export,
+        "write_case_report",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("simulated failure")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="simulated failure"):
+        export_case(db_path, "CASE-001", tmp_path / "CASE-001")
+
+    assert not (tmp_path / ".CASE-001.lock").exists()

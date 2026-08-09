@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -54,26 +56,51 @@ def verify_export_package(export_dir: Path) -> bool:
         return False
 
 
-def _reserve_output_path(output_path: Path) -> Path:
+def _reserve_output_path(
+    output_path: Path,
+    *,
+    database_path: Path,
+    case_id: str,
+) -> tuple[Path, int]:
     lock_path = output_path.parent / f".{output_path.name}.lock"
+    metadata = {
+        "pid": os.getpid(),
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "database": str(database_path),
+        "case_id": case_id,
+        "output": str(output_path),
+    }
+
     try:
-        fd = os.open(
+        lock_fd = os.open(
             lock_path,
             os.O_CREAT | os.O_EXCL | os.O_WRONLY,
         )
-        os.close(fd)
     except FileExistsError as exc:
         raise FileExistsError(
             f"Export output already exists or is being created: {output_path}"
         ) from exc
 
+    try:
+        os.write(
+            lock_fd,
+            (json.dumps(metadata, indent=2) + "\n").encode("utf-8"),
+        )
+        os.fsync(lock_fd)
+    except Exception:
+        os.close(lock_fd)
+        lock_path.unlink(missing_ok=True)
+        raise
+
+
     if output_path.exists():
+        os.close(lock_fd)
         lock_path.unlink(missing_ok=True)
         raise FileExistsError(
             f"Export output already exists: {output_path}"
         )
 
-    return lock_path
+    return lock_path, lock_fd
 
 
 def export_case(
@@ -86,7 +113,11 @@ def export_case(
     output_path = Path(output_path)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = _reserve_output_path(output_path)
+    lock_path, lock_fd = _reserve_output_path(
+        output_path,
+        database_path=database_path,
+        case_id=case_id,
+    )
 
     staging_dir: Path | None = Path(
         tempfile.mkdtemp(
@@ -177,4 +208,5 @@ def export_case(
             shutil.rmtree(staging_dir, ignore_errors=True)
         raise
     finally:
+        os.close(lock_fd)
         lock_path.unlink(missing_ok=True)
