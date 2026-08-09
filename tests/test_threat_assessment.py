@@ -240,8 +240,83 @@ def test_correlated_activity_produces_combined_score():
     result = assess_threat(events)
 
     assert result["score"] == 65
+
     assert result["severity"] == "MEDIUM"
     assert result["finding_count"] == 2
     assert "T1059.001" in result["techniques"]
     assert "T1490" in result["techniques"]
     assert result["confidence"] > 0
+    assert result["correlation_count"] > 0
+    assert len(result["correlations"]) > 0
+
+
+def test_no_events_produces_zero_correlations():
+    result = assess_threat([])
+
+    assert result["correlation_count"] == 0
+    assert result["correlations"] == []
+
+
+def test_real_assessment_invokes_correlate_events_and_populates_results():
+    events = [
+        {
+            "event_id": "evt-proc-1",
+            "timestamp": "2026-08-08T15:00:00Z",
+            "source": "sysmon",
+            "event_type": "process_creation",
+            "process_name": "cmd.exe",
+            "pid": "1000",
+            "process_guid": "{GUID-CMD-1000}",
+        },
+        {
+            "event_id": "evt-proc-2",
+            "timestamp": "2026-08-08T15:00:05Z",
+            "source": "sysmon",
+            "event_type": "process_creation",
+            "process_name": "cmd.exe",
+            "pid": "1000",
+            "process_guid": "{GUID-CMD-1000}",
+            "command_line": "cmd.exe /c dir",
+        },
+    ]
+
+    result = assess_threat(events)
+
+    assert result["correlation_count"] == 1
+    assert len(result["correlations"]) == 1
+
+    corr = result["correlations"][0]
+    assert corr["incident_id"] == "INC-0001"
+    assert corr["process_key"] == "guid:{GUID-CMD-1000}"
+    assert corr["start_time"] == "2026-08-08T15:00:00Z"
+    assert corr["end_time"] == "2026-08-08T15:00:05Z"
+    assert corr["duration"] == 5.0
+    assert corr["evidence_event_ids"] == ["evt-proc-1", "evt-proc-2"]
+
+
+def test_multiple_correlated_incidents_represented_correctly():
+    events = [
+        {
+            "event_id": "evt-proc-a",
+            "timestamp": "2026-08-08T15:00:00Z",
+            "source": "sysmon",
+            "event_type": "process_creation",
+            "process_name": "proc_a.exe",
+            "process_guid": "{GUID-A}",
+        },
+        {
+            "event_id": "evt-proc-b",
+            "timestamp": "2026-08-08T15:00:01Z",
+            "source": "sysmon",
+            "event_type": "process_creation",
+            "process_name": "proc_b.exe",
+            "process_guid": "{GUID-B}",
+        },
+    ]
+
+    result = assess_threat(events)
+
+    assert result["correlation_count"] == 2
+    assert len(result["correlations"]) == 2
+    assert result["correlations"][0]["evidence_event_ids"] == ["evt-proc-a"]
+    assert result["correlations"][1]["evidence_event_ids"] == ["evt-proc-b"]

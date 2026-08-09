@@ -1,10 +1,10 @@
 """Unified threat assessment for RansomEye."""
 
-from __future__ import annotations
-
+from datetime import datetime
 from typing import Any
 
 from ransomeye.behavior import analyze_behavior
+from ransomeye.correlation import correlate_events
 from ransomeye.rules import analyze_events
 
 
@@ -49,6 +49,7 @@ def assess_threat(events: list[Any]) -> dict[str, Any]:
     """Combine all current findings into one explainable assessment."""
     base_result = analyze_events(events)
     behavior_findings = analyze_behavior(events)
+    incidents = correlate_events(events)
 
     behavior_score = sum(
         int(finding.get("score", 0))
@@ -87,6 +88,34 @@ def assess_threat(events: list[Any]) -> dict[str, Any]:
     if not reasons:
         reasons.append("No suspicious activity detected.")
 
+    correlations_data: list[dict[str, Any]] = []
+    for inc in incidents:
+        start_t = (
+            inc.start_time.isoformat()
+            if isinstance(inc.start_time, datetime)
+            else str(inc.start_time)
+        )
+        end_t = (
+            inc.end_time.isoformat()
+            if isinstance(inc.end_time, datetime)
+            else str(inc.end_time)
+        )
+        ev_ids = [
+            str(evt["event_id"])
+            for evt in inc.events
+            if evt.get("event_id") is not None and str(evt.get("event_id")).strip()
+        ]
+        correlations_data.append(
+            {
+                "incident_id": inc.incident_id,
+                "process_key": inc.process_key,
+                "start_time": start_t,
+                "end_time": end_t,
+                "duration": inc.duration_seconds,
+                "evidence_event_ids": ev_ids,
+            }
+        )
+
     return {
         "score": total_score,
         "severity": _severity_from_score(total_score),
@@ -98,4 +127,6 @@ def assess_threat(events: list[Any]) -> dict[str, Any]:
         "reasons": reasons,
         "techniques": techniques,
         "finding_count": len(behavior_findings),
+        "correlation_count": len(correlations_data),
+        "correlations": correlations_data,
     }

@@ -9,21 +9,29 @@ from typing import Any
 from ransomeye.evidence import EvidenceEvent
 
 
+def _parse_dt(ts: datetime | str) -> datetime:
+    if isinstance(ts, datetime):
+        return ts
+    return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+
+
 @dataclass
 class CorrelatedIncident:
     """A group of evidence events associated with one process context."""
 
     incident_id: str
     process_key: str
-    start_time: datetime
-    end_time: datetime
+    start_time: datetime | str
+    end_time: datetime | str
     events: list[dict[str, Any]]
     processes: list[dict[str, Any]]
     parent_relationships: list[dict[str, Any]]
 
     @property
     def duration_seconds(self) -> float:
-        return (self.end_time - self.start_time).total_seconds()
+        start = _parse_dt(self.start_time)
+        end = _parse_dt(self.end_time)
+        return (end - start).total_seconds()
 
 
 def _as_dict(event: EvidenceEvent | dict[str, Any]) -> dict[str, Any]:
@@ -81,8 +89,9 @@ def correlate_events(
     for index, (process_key, group) in enumerate(groups.items(), start=1):
         ordered_events = sorted(
             group,
-            key=lambda event: event["timestamp"],
+            key=lambda event: _parse_dt(event["timestamp"]),
         )
+
 
         processes: list[dict[str, Any]] = []
         seen_processes: set[tuple[Any, Any]] = set()
