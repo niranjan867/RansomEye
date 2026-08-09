@@ -16,6 +16,16 @@ from ransomeye.timeline import (
     build_process_tree,
     get_case_timeline,
 )
+from ransomeye.investigation import load_investigation, get_investigation_summary
+
+
+def show_investigation(database_path: str | Path, case_id: str) -> None:
+    """Load and print an investigation summary."""
+    try:
+        investigation = load_investigation(database_path, case_id)
+        print(get_investigation_summary(investigation))
+    except ValueError as e:
+        print(e)
 
 
 def print_case_timeline(database_path: str | Path, case_id: str) -> None:
@@ -565,13 +575,38 @@ def main() -> None:
         help="Destination path for the restored database.",
     )
 
+    investigation_parser = subparsers.add_parser(
+        "investigation",
+        help="Investigation domain model operations.",
+    )
+    investigation_subparsers = investigation_parser.add_subparsers(dest="investigation_command", required=True)
 
+    investigation_show_parser = investigation_subparsers.add_parser(
+        "show",
+        help="Show investigation summary.",
+    )
+    investigation_show_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    investigation_show_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
 
     args = parser.parse_args()
 
-
-
-    if args.command == "timeline":
+    if args.command == "investigation":
+        if args.investigation_command == "show":
+            show_investigation(
+                database_path=args.database,
+                case_id=args.case_id,
+            )
+    elif args.command == "timeline":
 
         print_case_timeline(
             database_path=args.database,

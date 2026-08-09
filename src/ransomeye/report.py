@@ -31,38 +31,12 @@ def generate_case_report(
             "PRAGMA user_version"
         ).fetchone()[0]
 
-        case = connection.execute(
-            """
-            SELECT case_id, case_name, host, status, severity, created_at
-            FROM cases
-            WHERE case_id = ?
-            """,
-            (case_id,),
-        ).fetchone()
+        from ransomeye.investigation import load_investigation
+        investigation = load_investigation(database_path, case_id)
 
-        if case is None:
-            raise ValueError(f"Case not found: {case_id}")
-
-        db_assessment = connection.execute(
-            """
-            SELECT score, severity, confidence, reasons_json, techniques_json
-            FROM assessments
-            WHERE case_id = ?
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            (case_id,),
-        ).fetchone()
-
-        findings = connection.execute(
-            """
-            SELECT finding_id, finding_type, score, confidence, technique, reason
-            FROM findings
-            WHERE case_id = ?
-            ORDER BY created_at ASC, finding_id ASC
-            """,
-            (case_id,),
-        ).fetchall()
+        case = investigation.case
+        db_assessment = investigation.assessment
+        findings = investigation.findings
 
         history_rows = connection.execute(
             """
@@ -74,8 +48,8 @@ def generate_case_report(
             (case_id,),
         ).fetchall()
 
-        timeline = get_case_timeline(database_path, case_id)
-        tree = build_process_tree(timeline)
+        timeline = investigation.timeline
+        tree = investigation.processes
 
         if assessment is None and timeline:
             from ransomeye.threat_assessment import assess_threat
@@ -127,12 +101,12 @@ def generate_case_report(
             )
             lines.extend(
                 f"- {reason}"
-                for reason in _json_list(db_assessment["reasons_json"])
+                for reason in db_assessment.get("reasons", [])
             )
             lines.append("Techniques:")
             lines.extend(
                 f"- {technique}"
-                for technique in _json_list(db_assessment["techniques_json"])
+                for technique in db_assessment.get("techniques", [])
             )
 
         lines.extend(["", "FINDINGS", "--------"])
@@ -211,7 +185,7 @@ def generate_case_report(
         correlations = (
             assessment.get("correlations", [])
             if isinstance(assessment, dict)
-            else []
+            else investigation.correlations
         )
 
         if not correlations:
