@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 *.log
 .env
+.env.*
+!.env.example
 vol-cache/
 memory.raw
 *.raw
@@ -18,3 +20,5 @@ data/
 reports/
 .pytest-tmp/
 .pytest-temp/
+*.egg-info/
+exports/

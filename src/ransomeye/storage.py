@@ -562,6 +562,19 @@ class EvidenceStore:
 
         return [dict(row) for row in rows]
 
+    def get_case_findings(self, case_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT finding_id, case_id, finding_type, score, confidence, technique, reason, created_at
+            FROM findings
+            WHERE case_id = ?
+            ORDER BY finding_id ASC
+            """,
+            (case_id,),
+        ).fetchall()
+
+        return [dict(row) for row in rows]
+
     def get_case(self, case_id: str) -> dict[str, Any] | None:
         row = self.connection.execute(
             """

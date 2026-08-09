@@ -444,9 +444,33 @@ def main() -> None:
         help="SHA-256 manifest file.",
     )
 
+    export_parser = subparsers.add_parser(
+        "export",
+        help="Export case evidence package.",
+    )
+    export_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    export_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+    export_parser.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="Output directory path for the export package.",
+    )
+
     args = parser.parse_args()
 
     if args.command == "timeline":
+
         print_case_timeline(
             database_path=args.database,
             case_id=args.case_id,
@@ -546,6 +570,18 @@ def main() -> None:
             if not verified:
                 parser.exit(1, "Integrity verification failed\n")
             print("Integrity verified")
+    elif args.command == "export":
+        try:
+            from ransomeye.export import export_case
+
+            exported_path = export_case(
+                database_path=args.database,
+                case_id=args.case_id,
+                output_path=args.output,
+            )
+            print(f"Exported case package to {exported_path}")
+        except ValueError as exc:
+            parser.exit(1, f"{exc}\n")
 
 
 if __name__ == "__main__":

@@ -271,3 +271,29 @@ def test_custody_record_rejects_invalid_hash(tmp_path):
 
     assert result.returncode != 0
     assert "Invalid SHA-256 digest" in result.stderr
+
+
+def test_export_command(tmp_path):
+    database_path = tmp_path / "test.db"
+    store = EvidenceStore(database_path)
+    store.create_case(case_id="CASE-CLI-001", case_name="Export CLI Case")
+    store.close()
+
+    output_dir = tmp_path / "exports" / "CASE-CLI-001"
+
+    result = _run_command(
+        [
+            "export",
+            "--database",
+            str(database_path),
+            "--case",
+            "CASE-CLI-001",
+            "--output",
+            str(output_dir),
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
+    assert "Exported case package to" in result.stdout
+    assert (output_dir / "MANIFEST.sha256").exists()
