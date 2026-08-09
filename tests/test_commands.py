@@ -94,7 +94,7 @@ def test_print_case_tree_renders_root_and_children(capsys, tmp_path):
     assert "└──" in output
 
 
-def _run_command(args, cwd):
+def _run_command(args, cwd=None):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
     result = subprocess.run(
@@ -105,6 +105,7 @@ def _run_command(args, cwd):
         text=True,
     )
     return result
+
 
 
 def test_custody_record_command_creates_event(tmp_path):
@@ -297,3 +298,18 @@ def test_export_command(tmp_path):
     assert result.returncode == 0
     assert "Exported case package to" in result.stdout
     assert (output_dir / "MANIFEST.sha256").exists()
+
+
+def test_cli_help():
+    result = _run_command(["--help"])
+
+    assert result.returncode == 0
+    assert "timeline" in result.stdout
+    assert "database" in result.stdout
+
+
+def test_cli_invalid_command():
+    result = _run_command(["invalid-command"])
+
+    assert result.returncode == 2
+    assert "usage:" in result.stderr.lower()

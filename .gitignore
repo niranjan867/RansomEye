@@ -23,3 +23,5 @@ reports/
 *.egg-info/
 exports/
 logs/
+.release-dist/
+.release-venv/

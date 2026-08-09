@@ -5,7 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ransomeye"
 version = "0.1.0"
+description = "RansomEye case evidence and lifecycle management CLI"
+readme = "README.md"
 requires-python = ">=3.13"
+
+[project.scripts]
+ransomeye = "ransomeye.commands:main"
+
 
 [tool.setuptools.packages.find]
 where = ["src"]
