@@ -62,7 +62,13 @@ def export_case(
     database_path = Path(database_path)
     output_path = Path(output_path)
 
+    if output_path.exists():
+        raise FileExistsError(
+            f"Export output already exists: {output_path}"
+        )
+
     store = EvidenceStore(database_path)
+
     try:
         case = store.get_case(case_id)
         if case is None:
@@ -143,9 +149,8 @@ def export_case(
             raise RuntimeError("Export manifest verification failed prior to finalization.")
 
         # 9. Atomic rename/move to target output_path
-        if output_path.exists():
-            shutil.rmtree(output_path)
         shutil.move(str(staging_dir), str(output_path))
+
 
         return output_path
     except Exception:

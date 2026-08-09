@@ -580,8 +580,11 @@ def main() -> None:
                 output_path=args.output,
             )
             print(f"Exported case package to {exported_path}")
-        except ValueError as exc:
+        except FileExistsError as exc:
             parser.exit(1, f"{exc}\n")
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            parser.exit(1, f"Operation failed: {exc}\n")
+
 
 
 if __name__ == "__main__":
