@@ -33,11 +33,11 @@ def table_columns(database_path):
     return columns
 
 
-def test_new_database_receives_schema_version_three(tmp_path):
+def test_new_database_receives_schema_version_five(tmp_path):
     database_path = tmp_path / "migrations.db"
     store = EvidenceStore(database_path)
 
-    assert store._get_schema_version() == 4
+    assert store._get_schema_version() == 5
 
     store.close()
 
@@ -53,17 +53,6 @@ def test_existing_cases_remain_after_reopening_database(tmp_path):
 
     assert case is not None
     assert case["case_name"] == "Migration Test"
-
-    reopened.close()
-
-
-def test_new_database_receives_schema_version_four(tmp_path):
-    database_path = tmp_path / "migrations.db"
-    store = EvidenceStore(database_path)
-    store.close()
-
-    reopened = EvidenceStore(database_path)
-    assert reopened._get_schema_version() == 4
 
     reopened.close()
 
@@ -143,7 +132,7 @@ def test_new_events_persist_parent_metadata(tmp_path):
     )
 
 
-def test_reopening_v2_database_upgrades_to_v4_safely(tmp_path):
+def test_reopening_v2_database_upgrades_to_v5_safely(tmp_path):
     database_path = tmp_path / "reopen.db"
 
     first = EvidenceStore(database_path)
@@ -156,7 +145,7 @@ def test_reopening_v2_database_upgrades_to_v4_safely(tmp_path):
     version = connection.execute("PRAGMA user_version").fetchone()[0]
     connection.close()
 
-    assert version == 4
+    assert version == 5
 
 
 def test_unsupported_future_schema_version_fails_clearly(tmp_path):
@@ -168,3 +157,109 @@ def test_unsupported_future_schema_version_fails_clearly(tmp_path):
 
     with pytest.raises(RuntimeError, match="Unsupported database schema version: 99"):
         EvidenceStore(database_path)
+
+
+def test_existing_v4_database_migrates_to_v5(tmp_path):
+    database_path = tmp_path / "v4_migrate.db"
+
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-V4", "V4 Migration Case")
+    store.save_event("CASE-V4", event("evt-v4-1"))
+    store.save_finding("CASE-V4", {"type": "v4_finding", "score": 10, "reason": "v4 test"})
+    store.close()
+
+    conn = sqlite3.connect(database_path)
+    conn.execute("PRAGMA user_version = 4")
+    conn.execute("DROP TABLE IF EXISTS finding_evidence")
+    conn.commit()
+    conn.close()
+
+    reopened = EvidenceStore(database_path)
+    assert reopened._get_schema_version() == 5
+
+    case = reopened.get_case("CASE-V4")
+    events = reopened.get_case_events("CASE-V4")
+    findings = reopened.get_case_findings("CASE-V4")
+
+    assert case is not None
+    assert len(events) == 1
+    assert len(findings) == 1
+    assert findings[0]["finding_type"] == "v4_finding"
+    reopened.close()
+
+
+def test_finding_evidence_table_exists_and_supports_multiple_links(tmp_path):
+    database_path = tmp_path / "links.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-LINKS", "Link Test")
+    store.save_event("CASE-LINKS", event("evt-1"))
+    store.save_event("CASE-LINKS", event("evt-2"))
+    store.save_event("CASE-LINKS", event("evt-3"))
+
+    fid1 = store.save_finding(
+        "CASE-LINKS",
+        {"type": "multi_event", "score": 20, "reason": "multiple events"},
+        event_ids=["evt-1", "evt-2"],
+    )
+
+    fid2 = store.save_finding(
+        "CASE-LINKS",
+        {"type": "shared_event", "score": 15, "reason": "shared event"},
+        event_ids=["evt-2", "evt-3"],
+    )
+
+    assert store.get_finding_event_ids(fid1) == ["evt-1", "evt-2"]
+    assert store.get_finding_event_ids(fid2) == ["evt-2", "evt-3"]
+
+    linked_events = store.get_finding_events(fid1)
+    assert len(linked_events) == 2
+    assert [e["event_id"] for e in linked_events] == ["evt-1", "evt-2"]
+    store.close()
+
+
+def test_duplicate_links_are_safely_ignored(tmp_path):
+    database_path = tmp_path / "dup.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-DUP", "Dup Test")
+    store.save_event("CASE-DUP", event("evt-1"))
+
+    fid = store.save_finding(
+        "CASE-DUP",
+        {"type": "test_dup", "score": 5, "reason": "dup test"},
+        event_ids=["evt-1", "evt-1"],
+    )
+    store.link_finding_evidence(fid, "evt-1")
+
+    assert store.get_finding_event_ids(fid) == ["evt-1"]
+    store.close()
+
+
+def test_invalid_parent_references_rejected_when_foreign_keys_enabled(tmp_path):
+    database_path = tmp_path / "fk.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-FK", "FK Test")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.link_finding_evidence(9999, "nonexistent-evt")
+
+    store.close()
+
+
+def test_pragma_foreign_key_check_returns_no_violations(tmp_path):
+    database_path = tmp_path / "fkcheck.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-FKC", "FK Check Test")
+    store.save_event("CASE-FKC", event("evt-1"))
+    fid = store.save_finding(
+        "CASE-FKC",
+        {"type": "fkc_finding", "score": 10, "reason": "fk check"},
+        event_ids=["evt-1"],
+    )
+
+    conn = sqlite3.connect(database_path)
+    conn.execute("PRAGMA foreign_keys = ON")
+    violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    conn.close()
+
+    assert len(violations) == 0
+    store.close()

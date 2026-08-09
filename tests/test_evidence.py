@@ -9,6 +9,8 @@ import pytest
 from ransomeye.evidence import (
     EvidenceEvent,
     EvidenceValidationError,
+    normalize_event,
+    normalize_events,
     validate_event_dict,
 )
 
@@ -77,3 +79,49 @@ def test_confidence_and_file_count_range_validation(confidence, file_count):
 
     errors = validate_event_dict(data)
     assert errors
+
+
+def test_normalize_event_preserves_parent_fields():
+    data = _minimal_event_dict()
+    data["parent_process_guid"] = "{parent-guid-123}"
+    data["parent_command_line"] = "explorer.exe /select,C:\\"
+
+    ev = normalize_event(data)
+
+    assert isinstance(ev, EvidenceEvent)
+    assert ev.parent_process_guid == "{parent-guid-123}"
+    assert ev.parent_command_line == "explorer.exe /select,C:\\"
+
+
+def test_normalize_event_handles_missing_parent_fields_safely():
+    data = _minimal_event_dict()
+    ev = normalize_event(data)
+
+    assert ev.parent_process_guid is None
+    assert ev.parent_command_line is None
+
+
+def test_normalize_event_preserves_unknown_metadata():
+    data = _minimal_event_dict()
+    data["custom_field"] = "custom_value"
+    data["user_account"] = "admin"
+
+    ev = normalize_event(data)
+
+    assert ev.metadata is not None
+    assert ev.metadata.get("scenario") == "test"
+    assert ev.metadata.get("custom_field") == "custom_value"
+    assert ev.metadata.get("user_account") == "admin"
+
+
+def test_normalize_events_preserves_input_order():
+    raw_list = [
+        {**_minimal_event_dict(), "event_id": "evt-1"},
+        {**_minimal_event_dict(), "event_id": "evt-2"},
+        {**_minimal_event_dict(), "event_id": "evt-3"},
+    ]
+
+    events = normalize_events(raw_list)
+
+    assert len(events) == 3
+    assert [e.event_id for e in events] == ["evt-1", "evt-2", "evt-3"]

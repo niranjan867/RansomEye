@@ -16,7 +16,7 @@ from ransomeye.logging import try_write_audit_event
 
 
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 CASE_STATUSES = {"OPEN", "TRIAGED", "CONTAINED", "CLOSED", "REOPENED"}
 CUSTODY_ACTIONS = {"created", "verified", "exported", "reviewed"}
@@ -66,6 +66,20 @@ CREATE TABLE IF NOT EXISTS findings (
     created_at TEXT NOT NULL,
     FOREIGN KEY (case_id) REFERENCES cases(case_id)
 );
+
+CREATE TABLE IF NOT EXISTS finding_evidence (
+    finding_id INTEGER NOT NULL,
+    event_id TEXT NOT NULL,
+    PRIMARY KEY (finding_id, event_id),
+    FOREIGN KEY (finding_id) REFERENCES findings(finding_id),
+    FOREIGN KEY (event_id) REFERENCES events(event_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_finding_evidence_finding_id
+ON finding_evidence(finding_id);
+
+CREATE INDEX IF NOT EXISTS idx_finding_evidence_event_id
+ON finding_evidence(event_id);
 
 CREATE TABLE IF NOT EXISTS assessments (
     assessment_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -178,6 +192,10 @@ class EvidenceStore:
 
         if version == 3:
             self._upgrade_schema_v3_to_v4()
+            version = 4
+
+        if version == 4:
+            self._upgrade_schema_v4_to_v5()
             version = CURRENT_SCHEMA_VERSION
 
         if version != CURRENT_SCHEMA_VERSION:
@@ -272,7 +290,29 @@ class EvidenceStore:
             END;
             """)
         self.connection.commit()
+        self._set_schema_version(4)
+
+    def _upgrade_schema_v4_to_v5(self) -> None:
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS finding_evidence (
+                finding_id INTEGER NOT NULL,
+                event_id TEXT NOT NULL,
+                PRIMARY KEY (finding_id, event_id),
+                FOREIGN KEY (finding_id) REFERENCES findings(finding_id),
+                FOREIGN KEY (event_id) REFERENCES events(event_id)
+            )
+            """
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_finding_evidence_finding_id ON finding_evidence(finding_id)"
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_finding_evidence_event_id ON finding_evidence(event_id)"
+        )
+        self.connection.commit()
         self._set_schema_version(CURRENT_SCHEMA_VERSION)
+
 
     def close(self) -> None:
         self.connection.close()
@@ -489,8 +529,62 @@ class EvidenceStore:
         )
         self.connection.commit()
 
-    def save_finding(self, case_id: str, finding: dict[str, Any]) -> None:
-        self.connection.execute(
+    def link_finding_evidence(
+        self,
+        finding_id: int,
+        event_ids: str | Iterable[str],
+    ) -> None:
+        """Link one or more evidence events to a finding."""
+        if isinstance(event_ids, str):
+            ids = [event_ids]
+        else:
+            ids = list(event_ids)
+
+        for event_id in ids:
+            if event_id:
+                self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO finding_evidence (finding_id, event_id)
+                    VALUES (?, ?)
+                    """,
+                    (finding_id, event_id),
+                )
+        self.connection.commit()
+
+    def get_finding_event_ids(self, finding_id: int) -> list[str]:
+        """Return all event IDs linked to a finding."""
+        rows = self.connection.execute(
+            """
+            SELECT event_id
+            FROM finding_evidence
+            WHERE finding_id = ?
+            ORDER BY event_id ASC
+            """,
+            (finding_id,),
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def get_finding_events(self, finding_id: int) -> list[dict[str, Any]]:
+        """Return full event records linked to a finding."""
+        rows = self.connection.execute(
+            """
+            SELECT e.*
+            FROM events e
+            JOIN finding_evidence fe ON e.event_id = fe.event_id
+            WHERE fe.finding_id = ?
+            ORDER BY e.timestamp ASC
+            """,
+            (finding_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_finding(
+        self,
+        case_id: str,
+        finding: dict[str, Any],
+        event_ids: str | Iterable[str] | None = None,
+    ) -> int:
+        cursor = self.connection.execute(
             """
             INSERT INTO findings (
                 case_id,
@@ -513,7 +607,35 @@ class EvidenceStore:
                 _now(),
             ),
         )
+        finding_id = cursor.lastrowid
+
+        target_ids: list[str] = []
+        if event_ids is not None:
+            if isinstance(event_ids, str):
+                target_ids.append(event_ids)
+            else:
+                target_ids.extend(event_ids)
+        else:
+            fid = finding.get("event_id")
+            if fid:
+                target_ids.append(str(fid))
+            fids = finding.get("event_ids")
+            if fids and isinstance(fids, (list, tuple, set)):
+                target_ids.extend(str(i) for i in fids)
+
+        if target_ids:
+            for eid in target_ids:
+                if eid:
+                    self.connection.execute(
+                        """
+                        INSERT OR IGNORE INTO finding_evidence (finding_id, event_id)
+                        VALUES (?, ?)
+                        """,
+                        (finding_id, eid),
+                    )
+
         self.connection.commit()
+        return finding_id
 
     def save_assessment(
         self,
@@ -579,7 +701,13 @@ class EvidenceStore:
             (case_id,),
         ).fetchall()
 
-        return [dict(row) for row in rows]
+        findings = []
+        for row in rows:
+            item = dict(row)
+            item["event_ids"] = self.get_finding_event_ids(item["finding_id"])
+            findings.append(item)
+        return findings
+
 
     def get_case(self, case_id: str) -> dict[str, Any] | None:
         row = self.connection.execute(
