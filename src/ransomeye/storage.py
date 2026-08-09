@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import string
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 CASE_STATUSES = {"OPEN", "TRIAGED", "CONTAINED", "CLOSED", "REOPENED"}
+CUSTODY_ACTIONS = {"created", "verified", "exported", "reviewed"}
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -83,6 +85,39 @@ CREATE TABLE IF NOT EXISTS case_history (
 
 CREATE INDEX IF NOT EXISTS idx_case_history_case_id
 ON case_history(case_id);
+
+CREATE TABLE IF NOT EXISTS case_custody (
+    custody_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id TEXT NOT NULL,
+    artifact_path TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (
+        action IN ('created', 'verified', 'exported', 'reviewed')
+    ),
+    analyst TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    verification_result INTEGER,
+    FOREIGN KEY (case_id) REFERENCES cases(case_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_case_custody_case_id
+ON case_custody(case_id);
+
+CREATE INDEX IF NOT EXISTS idx_case_custody_artifact
+ON case_custody(artifact_path);
+
+CREATE TRIGGER IF NOT EXISTS prevent_custody_update
+BEFORE UPDATE ON case_custody
+BEGIN
+    SELECT RAISE(ABORT, 'case custody records are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS prevent_custody_delete
+BEFORE DELETE ON case_custody
+BEGIN
+    SELECT RAISE(ABORT, 'case custody records are append-only');
+END;
 """
 
 
@@ -133,6 +168,10 @@ class EvidenceStore:
 
         if version == 2:
             self._upgrade_schema_v2_to_v3()
+            version = 3
+
+        if version == 3:
+            self._upgrade_schema_v3_to_v4()
             version = CURRENT_SCHEMA_VERSION
 
         if version != CURRENT_SCHEMA_VERSION:
@@ -183,6 +222,49 @@ class EvidenceStore:
         self.connection.execute(
             "UPDATE cases SET status = 'OPEN' WHERE status IS NULL OR status = '' OR status = 'Open' OR status = 'open'"
         )
+        self.connection.commit()
+        self._set_schema_version(3)
+
+    def _upgrade_schema_v3_to_v4(self) -> None:
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS case_custody (
+                custody_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id TEXT NOT NULL,
+                artifact_path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                action TEXT NOT NULL CHECK (
+                    action IN ('created', 'verified', 'exported', 'reviewed')
+                ),
+                analyst TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                verification_result INTEGER,
+                FOREIGN KEY (case_id) REFERENCES cases(case_id)
+            )
+            """)
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_case_custody_case_id ON case_custody(case_id)"
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_case_custody_artifact ON case_custody(artifact_path)"
+        )
+        self.connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS prevent_custody_update
+            BEFORE UPDATE ON case_custody
+            BEGIN
+                SELECT RAISE(ABORT, 'case custody records are append-only');
+            END;
+            """)
+        self.connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS prevent_custody_delete
+            BEFORE DELETE ON case_custody
+            BEGIN
+                SELECT RAISE(ABORT, 'case custody records are append-only');
+            END;
+            """)
         self.connection.commit()
         self._set_schema_version(CURRENT_SCHEMA_VERSION)
 
@@ -257,6 +339,95 @@ class EvidenceStore:
         ).fetchall()
 
         return [dict(row) for row in rows]
+
+    def record_custody_event(
+        self,
+        case_id: str,
+        artifact_path: str,
+        sha256: str,
+        action: str,
+        analyst: str,
+        note: str = "",
+        verification_result: bool | None = None,
+    ) -> None:
+        if action not in CUSTODY_ACTIONS:
+            raise ValueError("Invalid custody action")
+
+        if not analyst or not analyst.strip():
+            raise ValueError("Analyst name must not be empty")
+
+        if not artifact_path or not artifact_path.strip():
+            raise ValueError("Artifact path must not be empty")
+
+        if not isinstance(sha256, str) or len(sha256) != 64:
+            raise ValueError("Invalid SHA-256 digest")
+
+        if any(c not in string.hexdigits for c in sha256):
+            raise ValueError("Invalid SHA-256 digest")
+
+        case_row = self.connection.execute(
+            "SELECT case_id FROM cases WHERE case_id = ?",
+            (case_id,),
+        ).fetchone()
+        if case_row is None:
+            raise KeyError(f"Case not found: {case_id}")
+
+        if verification_result is not None and not isinstance(verification_result, bool):
+            raise ValueError("Verification result must be True, False, or None")
+
+        self.connection.execute(
+            """
+            INSERT INTO case_custody (
+                case_id,
+                artifact_path,
+                sha256,
+                action,
+                analyst,
+                recorded_at,
+                note,
+                verification_result
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                case_id,
+                artifact_path,
+                sha256.lower(),
+                action,
+                analyst,
+                _now(),
+                note or "",
+                None if verification_result is None else int(verification_result),
+            ),
+        )
+        self.connection.commit()
+
+    def get_custody_events(self, case_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT custody_id,
+                   case_id,
+                   artifact_path,
+                   sha256,
+                   action,
+                   analyst,
+                   recorded_at,
+                   note,
+                   verification_result
+            FROM case_custody
+            WHERE case_id = ?
+            ORDER BY recorded_at ASC, custody_id ASC
+            """,
+            (case_id,),
+        ).fetchall()
+
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            event = dict(row)
+            if event["verification_result"] is not None:
+                event["verification_result"] = bool(event["verification_result"])
+            events.append(event)
+
+        return events
 
     def save_event(self, case_id: str, event: Any) -> None:
         item = _event_dict(event)

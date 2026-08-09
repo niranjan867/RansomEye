@@ -337,6 +337,56 @@ def main() -> None:
         help="Case identifier.",
     )
 
+    custody_parser = subparsers.add_parser(
+        "custody",
+        help="Record or inspect case chain-of-custody events.",
+    )
+    custody_subparsers = custody_parser.add_subparsers(dest="custody_command", required=True)
+
+    custody_record_parser = custody_subparsers.add_parser(
+        "record",
+        help="Record a custody event for a case.",
+    )
+    custody_record_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    custody_record_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+    custody_record_parser.add_argument(
+        "--artifact",
+        required=True,
+        dest="artifact_path",
+        help="Path to the artifact within the case.",
+    )
+    custody_record_parser.add_argument(
+        "--hash",
+        required=True,
+        dest="sha256",
+        help="SHA-256 digest of the artifact.",
+    )
+    custody_record_parser.add_argument(
+        "--action",
+        required=True,
+        help="Custody action: created, verified, exported, reviewed.",
+    )
+    custody_record_parser.add_argument(
+        "--analyst",
+        required=True,
+        help="Analyst name or email recording the event.",
+    )
+    custody_record_parser.add_argument(
+        "--note",
+        default="",
+        help="Optional note about the custody event.",
+    )
+
     integrity_parser = subparsers.add_parser(
         "integrity",
         help="Create integrity manifests for evidence and reports.",
@@ -414,6 +464,26 @@ def main() -> None:
                 database_path=args.database,
                 case_id=args.case_id,
             )
+    elif args.command == "custody":
+        if args.custody_command == "record":
+            try:
+                store = EvidenceStore(args.database)
+                try:
+                    store.record_custody_event(
+                        case_id=args.case_id,
+                        artifact_path=args.artifact_path,
+                        sha256=args.sha256,
+                        action=args.action,
+                        analyst=args.analyst,
+                        note=args.note,
+                    )
+                    print(
+                        f"Recorded custody event for case {args.case_id}"
+                    )
+                finally:
+                    store.close()
+            except (ValueError, KeyError) as exc:
+                parser.exit(1, f"{exc}\n")
     elif args.command == "integrity":
         if args.integrity_command == "hash":
             manifest_path = write_integrity_manifest(

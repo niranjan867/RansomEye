@@ -37,7 +37,7 @@ def test_new_database_receives_schema_version_three(tmp_path):
     database_path = tmp_path / "migrations.db"
     store = EvidenceStore(database_path)
 
-    assert store._get_schema_version() == 3
+    assert store._get_schema_version() == 4
 
     store.close()
 
@@ -57,13 +57,13 @@ def test_existing_cases_remain_after_reopening_database(tmp_path):
     reopened.close()
 
 
-def test_reopening_already_current_database_is_safe(tmp_path):
+def test_new_database_receives_schema_version_four(tmp_path):
     database_path = tmp_path / "migrations.db"
     store = EvidenceStore(database_path)
     store.close()
 
     reopened = EvidenceStore(database_path)
-    assert reopened._get_schema_version() == 3
+    assert reopened._get_schema_version() == 4
 
     reopened.close()
 
@@ -143,7 +143,7 @@ def test_new_events_persist_parent_metadata(tmp_path):
     )
 
 
-def test_reopening_v2_database_is_safe(tmp_path):
+def test_reopening_v2_database_upgrades_to_v4_safely(tmp_path):
     database_path = tmp_path / "reopen.db"
 
     first = EvidenceStore(database_path)
@@ -156,7 +156,7 @@ def test_reopening_v2_database_is_safe(tmp_path):
     version = connection.execute("PRAGMA user_version").fetchone()[0]
     connection.close()
 
-    assert version == 3
+    assert version == 4
 
 
 def test_unsupported_future_schema_version_fails_clearly(tmp_path):

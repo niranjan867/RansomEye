@@ -150,6 +150,44 @@ def generate_case_report(
                 else:
                     lines.append(f"{row['changed_at']} {status_text}")
 
+        lines.extend(["", "CHAIN OF CUSTODY", "----------------"])
+
+        custody_rows = connection.execute(
+            """
+            SELECT artifact_path,
+                   sha256,
+                   action,
+                   analyst,
+                   recorded_at,
+                   note,
+                   verification_result
+            FROM case_custody
+            WHERE case_id = ?
+            ORDER BY recorded_at ASC, custody_id ASC
+            """,
+            (case_id,),
+        ).fetchall()
+
+        if not custody_rows:
+            lines.append("No custody records.")
+        else:
+            for row in custody_rows:
+                verification = "N/A"
+                if row["verification_result"] is not None:
+                    verification = "Yes" if row["verification_result"] else "No"
+
+                lines.extend(
+                    [
+                        f"{row['recorded_at']} {row['action']}",
+                        f"Analyst: {row['analyst']}",
+                        f"Artifact: {row['artifact_path']}",
+                        f"SHA-256: {row['sha256']}",
+                        f"Note: {row['note'] or 'N/A'}",
+                        f"Verification: {verification}",
+                        "",
+                    ]
+                )
+
         lines.extend(["", "TIMELINE", "--------"])
 
         if not timeline:

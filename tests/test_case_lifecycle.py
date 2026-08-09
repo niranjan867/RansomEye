@@ -85,7 +85,7 @@ def test_case_can_be_reopened(tmp_path):
     store.close()
 
 
-def test_v3_migration_creates_case_history_table(tmp_path):
+def test_current_migration_creates_case_history_table(tmp_path):
     database_path = tmp_path / "case_lifecycle.db"
     store = EvidenceStore(database_path)
     store.close()
@@ -101,4 +101,4 @@ def test_v3_migration_creates_case_history_table(tmp_path):
     connection.close()
 
     assert "case_history" in tables
-    assert version == 3
+    assert version == 4

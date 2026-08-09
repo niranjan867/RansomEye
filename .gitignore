@@ -16,3 +16,4 @@ data/output/
 data/
 
 reports/
+.pytest-tmp/
