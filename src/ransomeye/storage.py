@@ -586,3 +586,26 @@ class EvidenceStore:
         ).fetchone()
 
         return dict(row) if row else None
+
+
+def check_database_integrity(database_path: Path | str) -> bool:
+    database_path = Path(database_path)
+
+    if not database_path.is_file():
+        raise FileNotFoundError(
+            f"Database not found: {database_path}"
+        )
+
+    uri = f"{database_path.resolve().as_uri()}?mode=ro"
+
+    try:
+        with sqlite3.connect(uri, uri=True) as connection:
+            result = connection.execute(
+                "PRAGMA integrity_check"
+            ).fetchone()
+    except sqlite3.Error as exc:
+        raise sqlite3.DatabaseError(
+            f"Database integrity check failed: {exc}"
+        ) from exc
+
+    return result == ("ok",)

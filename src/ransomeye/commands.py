@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import sqlite3
 from pathlib import Path
+
 
 from ransomeye.integrity import sha256_file, verify_manifest
 from ransomeye.report import write_case_report
@@ -510,9 +512,25 @@ def main() -> None:
         help="Override active or unknown lock-owner status.",
     )
 
+    database_parser = subparsers.add_parser(
+        "database",
+        help="Database management operations.",
+    )
+    database_subparsers = database_parser.add_subparsers(dest="database_command", required=True)
 
+    db_check_parser = database_subparsers.add_parser(
+        "check",
+        help="Check SQLite database integrity.",
+    )
+    db_check_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
 
     args = parser.parse_args()
+
 
 
     if args.command == "timeline":
@@ -683,6 +701,19 @@ def main() -> None:
                 parser.exit(1, f"{exc}\n")
             except (OSError, sqlite3.Error, ValueError) as exc:
                 parser.exit(1, f"Operation failed: {exc}\n")
+    elif args.command == "database":
+        if args.database_command == "check":
+            try:
+                from ransomeye.storage import check_database_integrity
+
+                is_ok = check_database_integrity(args.database)
+                if is_ok:
+                    print("Database integrity: OK")
+                else:
+                    parser.exit(1, "Database integrity check failed: Integrity check returned non-ok result\n")
+            except (FileNotFoundError, sqlite3.DatabaseError, sqlite3.Error, OSError) as exc:
+                parser.exit(1, f"Database integrity check failed: {exc}\n")
+
 
 
 
