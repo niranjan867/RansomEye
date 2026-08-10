@@ -101,4 +101,4 @@ def test_current_migration_creates_case_history_table(tmp_path):
     connection.close()
 
     assert "case_history" in tables
-    assert version == 5
+    assert version == 6

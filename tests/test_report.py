@@ -45,7 +45,7 @@ def test_generate_case_report(tmp_path):
     assert "ASSESSMENT" in report
     assert "TIMELINE" in report
     assert "PROCESS TREE" in report
-    assert "Schema:     5" in report
+    assert "Schema:     6" in report
     assert "Command line:" in report
 
     assert "Process GUID:" in report

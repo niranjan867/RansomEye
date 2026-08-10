@@ -33,11 +33,11 @@ def table_columns(database_path):
     return columns
 
 
-def test_new_database_receives_schema_version_five(tmp_path):
+def test_new_database_receives_schema_version_six(tmp_path):
     database_path = tmp_path / "migrations.db"
     store = EvidenceStore(database_path)
 
-    assert store._get_schema_version() == 5
+    assert store._get_schema_version() == 6
 
     store.close()
 
@@ -132,7 +132,7 @@ def test_new_events_persist_parent_metadata(tmp_path):
     )
 
 
-def test_reopening_v2_database_upgrades_to_v5_safely(tmp_path):
+def test_reopening_v2_database_upgrades_to_v6_safely(tmp_path):
     database_path = tmp_path / "reopen.db"
 
     first = EvidenceStore(database_path)
@@ -145,7 +145,7 @@ def test_reopening_v2_database_upgrades_to_v5_safely(tmp_path):
     version = connection.execute("PRAGMA user_version").fetchone()[0]
     connection.close()
 
-    assert version == 5
+    assert version == 6
 
 
 def test_unsupported_future_schema_version_fails_clearly(tmp_path):
@@ -159,7 +159,7 @@ def test_unsupported_future_schema_version_fails_clearly(tmp_path):
         EvidenceStore(database_path)
 
 
-def test_existing_v4_database_migrates_to_v5(tmp_path):
+def test_existing_v4_database_migrates_to_v6(tmp_path):
     database_path = tmp_path / "v4_migrate.db"
 
     store = EvidenceStore(database_path)
@@ -175,7 +175,7 @@ def test_existing_v4_database_migrates_to_v5(tmp_path):
     conn.close()
 
     reopened = EvidenceStore(database_path)
-    assert reopened._get_schema_version() == 5
+    assert reopened._get_schema_version() == 6
 
     case = reopened.get_case("CASE-V4")
     events = reopened.get_case_events("CASE-V4")
@@ -262,4 +262,58 @@ def test_pragma_foreign_key_check_returns_no_violations(tmp_path):
     conn.close()
 
     assert len(violations) == 0
+    store.close()
+
+
+def test_existing_v5_database_migrates_to_v6(tmp_path):
+    database_path = tmp_path / "v5_migrate.db"
+
+    conn = sqlite3.connect(database_path)
+    conn.execute("PRAGMA user_version = 5")
+    conn.executescript("""
+    CREATE TABLE cases (
+        case_id TEXT PRIMARY KEY,
+        case_name TEXT NOT NULL,
+        host TEXT,
+        status TEXT NOT NULL DEFAULT 'OPEN',
+        severity TEXT NOT NULL DEFAULT 'SAFE',
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE assessments (
+        assessment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        case_id TEXT NOT NULL,
+        score INTEGER NOT NULL,
+        severity TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        reasons_json TEXT NOT NULL,
+        techniques_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    INSERT INTO cases (case_id, case_name, host, status, severity, created_at)
+    VALUES ('CASE-V5', 'V5 Migration', 'PC-V5', 'OPEN', 'SAFE', '2026-08-10T10:00:00Z');
+    INSERT INTO assessments (case_id, score, severity, confidence, reasons_json, techniques_json, created_at)
+    VALUES ('CASE-V5', 60, 'MEDIUM', 0.85, '["reasons"]', '["tech"]', '2026-08-10T10:05:00Z');
+    """)
+    conn.commit()
+    conn.close()
+
+    store = EvidenceStore(database_path)
+    assert store._get_schema_version() == 6
+
+    case = store.get_case("CASE-V5")
+    assert case["case_name"] == "V5 Migration"
+    assert case["host"] == "PC-V5"
+
+    conn = sqlite3.connect(database_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM assessments WHERE case_id = 'CASE-V5'").fetchone()
+    conn.close()
+
+    assert row["score"] == 60
+    assert row["severity"] == "MEDIUM"
+    assert row["confidence"] == 0.85
+    assert row["reasons_json"] == '["reasons"]'
+    assert row["techniques_json"] == '["tech"]'
+    assert row["correlations_json"] == "[]"
+
     store.close()

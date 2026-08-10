@@ -237,9 +237,9 @@ def test_existing_v5_database(tmp_path):
     assert investigation.case["case_id"] == "RE-V5"
 
 
-def test_fresh_v5_database(store):
+def test_fresh_v6_database(store):
     store.create_case("RE-FRESH", "Fresh")
-    assert store._get_schema_version() == 5
+    assert store._get_schema_version() == 6
 
     investigation = load_investigation(store.database_path, "RE-FRESH")
     assert investigation.case["case_id"] == "RE-FRESH"

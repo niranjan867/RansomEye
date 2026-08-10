@@ -16,7 +16,7 @@ from ransomeye.logging import try_write_audit_event
 
 
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 CASE_STATUSES = {"OPEN", "TRIAGED", "CONTAINED", "CLOSED", "REOPENED"}
 CUSTODY_ACTIONS = {"created", "verified", "exported", "reviewed"}
@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS assessments (
     confidence REAL NOT NULL,
     reasons_json TEXT NOT NULL,
     techniques_json TEXT NOT NULL,
+    correlations_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     FOREIGN KEY (case_id) REFERENCES cases(case_id)
 );
@@ -196,6 +197,10 @@ class EvidenceStore:
 
         if version == 4:
             self._upgrade_schema_v4_to_v5()
+            version = 5
+
+        if version == 5:
+            self._upgrade_schema_v5_to_v6()
             version = CURRENT_SCHEMA_VERSION
 
         if version != CURRENT_SCHEMA_VERSION:
@@ -311,7 +316,19 @@ class EvidenceStore:
             "CREATE INDEX IF NOT EXISTS idx_finding_evidence_event_id ON finding_evidence(event_id)"
         )
         self.connection.commit()
-        self._set_schema_version(CURRENT_SCHEMA_VERSION)
+        self._set_schema_version(5)
+
+    def _upgrade_schema_v5_to_v6(self) -> None:
+        existing_columns = {
+            row[1]
+            for row in self.connection.execute("PRAGMA table_info(assessments)")
+        }
+        if "correlations_json" not in existing_columns:
+            self.connection.execute(
+                "ALTER TABLE assessments ADD COLUMN correlations_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        self.connection.commit()
+        self._set_schema_version(6)
 
 
     def close(self) -> None:
@@ -651,9 +668,10 @@ class EvidenceStore:
                 confidence,
                 reasons_json,
                 techniques_json,
+                correlations_json,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 case_id,
@@ -662,6 +680,7 @@ class EvidenceStore:
                 assessment["confidence"],
                 json.dumps(assessment.get("reasons", [])),
                 json.dumps(assessment.get("techniques", [])),
+                json.dumps(assessment.get("correlations", [])),
                 _now(),
             ),
         )
