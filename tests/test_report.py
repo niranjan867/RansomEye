@@ -296,14 +296,14 @@ def test_assessment_path_computes_correlations_once_and_report_consumes_result(m
     from ransomeye import threat_assessment
 
     correlation_call_count = 0
-    original_correlate = threat_assessment.correlate_events
+    original_correlate = threat_assessment.correlate_findings
 
-    def spy_correlate(events):
+    def spy_correlate(findings, evidence, processes=None):
         nonlocal correlation_call_count
         correlation_call_count += 1
-        return original_correlate(events)
+        return original_correlate(findings, evidence, processes)
 
-    monkeypatch.setattr(threat_assessment, "correlate_events", spy_correlate)
+    monkeypatch.setattr(threat_assessment, "correlate_findings", spy_correlate)
 
     database_path = tmp_path / "single_corr_call.db"
     store = EvidenceStore(database_path)
@@ -315,7 +315,9 @@ def test_assessment_path_computes_correlations_once_and_report_consumes_result(m
             "timestamp": "2026-08-08T15:00:00Z",
             "source": "sysmon",
             "event_type": "process_creation",
-            "process_name": "test.exe",
+            "process_name": "powershell.exe",
+            "command_line": "powershell.exe -EncodedCommand SGVsbG8=",
+            "pid": "1000",
             "process_guid": "{SC-GUID}",
         },
     )

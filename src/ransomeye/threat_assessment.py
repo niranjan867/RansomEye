@@ -1,10 +1,13 @@
 """Unified threat assessment for RansomEye."""
 
+from __future__ import annotations
+
+import hashlib
 from datetime import datetime
 from typing import Any
 
 from ransomeye.behavior import analyze_behavior
-from ransomeye.correlation import correlate_events
+from ransomeye.correlation import correlate_findings
 from ransomeye.rules import analyze_events, MASS_MODIFY_SCORE, RANSOM_NOTE_SCORE
 from ransomeye.file_behavior import analyze_file_behavior
 
@@ -46,7 +49,32 @@ def _combine_confidence(
     return round(sum(values) / len(values), 2)
 
 
-def assess_threat(events: list[Any]) -> dict[str, Any]:
+def _ensure_finding_ids(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ensure all findings have deterministic finding_ids and event_ids independent of input ordering."""
+    normalized = []
+    for f in findings:
+        f_copy = dict(f)
+        if not f_copy.get("event_ids") and f_copy.get("event_id"):
+            f_copy["event_ids"] = [str(f_copy["event_id"])]
+
+        if not f_copy.get("finding_id"):
+            fid = f_copy.get("id")
+            if not fid:
+                ftype = str(f_copy.get("type", "finding"))
+                sorted_eids = sorted(str(e) for e in (f_copy.get("event_ids") or []))
+                fevts = "-".join(sorted_eids)
+                content = f"{ftype}|{fevts}"
+                digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:8]
+                fid = f"FND-{ftype}-{digest}"
+            f_copy["finding_id"] = str(fid)
+        normalized.append(f_copy)
+    return normalized
+
+
+def assess_threat(
+    events: list[Any],
+    processes: dict[str, Any] | list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Combine all current findings into one explainable assessment."""
     base_result = analyze_events(events)
     behavior_findings = analyze_behavior(events)
@@ -70,12 +98,20 @@ def assess_threat(events: list[Any]) -> dict[str, Any]:
     if has_ransom_note and base_result.get("ransom_note_triggered"):
         base_result["score"] = max(0, base_result["score"] - RANSOM_NOTE_SCORE)
 
-    incidents = correlate_events(events)
+    raw_all_findings = behavior_findings + file_behavior_findings
+    all_findings = _ensure_finding_ids(raw_all_findings)
+
+    if all_findings:
+        incidents = correlate_findings(
+            findings=all_findings,
+            evidence=events,
+            processes=processes,
+        )
+    else:
+        incidents = []
 
     file_behavior_score = sum(int(f.get("score", 0)) for f in file_behavior_findings)
     behavior_score = sum(int(f.get("score", 0)) for f in behavior_findings)
-
-    all_findings = behavior_findings + file_behavior_findings
 
     correlation_bonus = 0
     # Use (base_result + file_behavior_score) to see if we have baseline suspicious activity
@@ -116,26 +152,28 @@ def assess_threat(events: list[Any]) -> dict[str, Any]:
         start_t = (
             inc.start_time.isoformat()
             if isinstance(inc.start_time, datetime)
-            else str(inc.start_time)
+            else (str(inc.start_time) if inc.start_time is not None else None)
         )
         end_t = (
             inc.end_time.isoformat()
             if isinstance(inc.end_time, datetime)
-            else str(inc.end_time)
+            else (str(inc.end_time) if inc.end_time is not None else None)
         )
-        ev_ids = [
-            str(evt["event_id"])
-            for evt in inc.events
-            if evt.get("event_id") is not None and str(evt.get("event_id")).strip()
-        ]
         correlations_data.append(
             {
                 "incident_id": inc.incident_id,
+                "case_id": inc.case_id,
+                "finding_ids": list(inc.finding_ids),
+                "evidence_ids": list(inc.evidence_ids),
+                "evidence_event_ids": list(inc.evidence_ids),
+                "process_ids": list(inc.process_ids),
                 "process_key": inc.process_key,
                 "start_time": start_t,
                 "end_time": end_t,
                 "duration": inc.duration_seconds,
-                "evidence_event_ids": ev_ids,
+                "correlation_reasons": list(inc.correlation_reasons),
+                "processes": [dict(p) for p in inc.processes],
+                "parent_relationships": [dict(r) for r in inc.parent_relationships],
             }
         )
 
