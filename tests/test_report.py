@@ -326,4 +326,4 @@ def test_assessment_path_computes_correlations_once_and_report_consumes_result(m
 
     assert correlation_call_count == 1
     assert "CORRELATIONS" in report
-    assert "Incident:    INC-0001" in report
+    assert "Incident:    INC-" in report

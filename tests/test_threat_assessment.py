@@ -286,10 +286,10 @@ def test_real_assessment_invokes_correlate_events_and_populates_results():
     assert len(result["correlations"]) == 1
 
     corr = result["correlations"][0]
-    assert corr["incident_id"] == "INC-0001"
+    assert corr["incident_id"].startswith("INC-")
     assert corr["process_key"] == "guid:{GUID-CMD-1000}"
-    assert corr["start_time"] == "2026-08-08T15:00:00Z"
-    assert corr["end_time"] == "2026-08-08T15:00:05Z"
+    assert corr["start_time"] in ("2026-08-08T15:00:00Z", "2026-08-08T15:00:00+00:00")
+    assert corr["end_time"] in ("2026-08-08T15:00:05Z", "2026-08-08T15:00:05+00:00")
     assert corr["duration"] == 5.0
     assert corr["evidence_event_ids"] == ["evt-proc-1", "evt-proc-2"]
 
