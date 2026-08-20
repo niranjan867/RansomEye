@@ -3,20 +3,202 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
+import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Any
 
-
-
+from ransomeye.behavior import analyze_behavior
+from ransomeye.evidence import normalize_events, EvidenceValidationError
+from ransomeye.file_behavior import analyze_file_behavior
 from ransomeye.integrity import sha256_file, verify_manifest
 from ransomeye.report import write_case_report
 from ransomeye.storage import EvidenceStore
+from ransomeye.sysmon_reader import parse_sysmon_event
+from ransomeye.threat_assessment import assess_threat
 from ransomeye.timeline import (
     build_process_tree,
     get_case_timeline,
 )
 from ransomeye.investigation import load_investigation, get_investigation_summary
+
+
+def parse_evidence_file(
+    file_path: str | Path,
+    format_type: str = "auto",
+) -> tuple[list[dict[str, Any]], str]:
+    """Parse raw evidence from JSON or Sysmon XML file.
+
+    Returns a tuple of (raw_events_list, detected_format_name).
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Evidence file not found: {path}")
+
+    # Maximum file size check (50 MB)
+    max_size = 50 * 1024 * 1024
+    if path.stat().st_size > max_size:
+        raise ValueError(f"Evidence file exceeds maximum allowed size of {max_size} bytes")
+
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Failed to read {path.name} as UTF-8: {exc}") from exc
+
+    stripped = content.strip()
+    if not stripped:
+        raise ValueError("Evidence file is empty")
+
+    norm_format = format_type.lower().strip()
+    if norm_format not in ("auto", "json", "sysmon-xml", "xml"):
+        raise ValueError(f"Unsupported format: {format_type}. Expected auto, json, or sysmon-xml.")
+
+    resolved_format = norm_format
+    if resolved_format == "auto":
+        if path.suffix.lower() == ".json" or stripped.startswith(("{", "[")):
+            resolved_format = "json"
+        elif path.suffix.lower() == ".xml" or stripped.startswith("<"):
+            resolved_format = "sysmon-xml"
+        else:
+            raise ValueError(f"Could not automatically determine format for: {path.name}")
+
+    if resolved_format == "json":
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON in {path.name}: {exc}") from exc
+
+        if isinstance(payload, dict):
+            if "events" in payload and isinstance(payload["events"], list):
+                raw_events = payload["events"]
+            else:
+                raw_events = [payload]
+        elif isinstance(payload, list):
+            raw_events = payload
+        else:
+            raise ValueError("JSON must contain an event object, a list of events, or an object with an 'events' list.")
+
+        return raw_events, "json"
+
+    elif resolved_format in ("sysmon-xml", "xml"):
+        events = []
+        try:
+            root = ET.fromstring(content)
+            local_tag = root.tag.rsplit("}", 1)[-1]
+            if local_tag == "Event":
+                parsed = parse_sysmon_event(content)
+                if parsed:
+                    events.append(parsed)
+            elif local_tag in ("Events", "root", "Sysmon"):
+                for elem in root:
+                    if elem.tag.rsplit("}", 1)[-1] == "Event":
+                        elem_xml = ET.tostring(elem, encoding="utf-8").decode("utf-8")
+                        parsed = parse_sysmon_event(elem_xml)
+                        if parsed:
+                            events.append(parsed)
+            else:
+                for elem in root.iter():
+                    if elem.tag.rsplit("}", 1)[-1] == "Event":
+                        elem_xml = ET.tostring(elem, encoding="utf-8").decode("utf-8")
+                        parsed = parse_sysmon_event(elem_xml)
+                        if parsed:
+                            events.append(parsed)
+        except ET.ParseError:
+            # Fallback for XML fragments / multi-root concatenated event streams
+            for chunk in content.split("</Event>"):
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                if "<Event" in chunk:
+                    start_idx = chunk.find("<Event")
+                    chunk = chunk[start_idx:] + "</Event>"
+                    try:
+                        parsed = parse_sysmon_event(chunk)
+                        if parsed:
+                            events.append(parsed)
+                    except Exception:
+                        pass
+
+        if not events:
+            raise ValueError(f"No valid Sysmon XML events found in {path.name}")
+
+        return events, "sysmon-xml"
+
+    else:
+        raise ValueError(f"Unsupported format: {format_type}")
+
+
+def ingest_evidence(
+    database_path: str | Path,
+    case_id: str,
+    file_path: str | Path,
+    format_type: str = "auto",
+    case_name: str | None = None,
+    host: str | None = None,
+) -> dict[str, Any]:
+    """Ingest evidence from file into a case, normalize, store, and assess threat."""
+    raw_events, detected_format = parse_evidence_file(file_path, format_type=format_type)
+
+    if not raw_events:
+        raise ValueError("No events found to ingest")
+
+    normalized_events = normalize_events(raw_events)
+
+    store = EvidenceStore(database_path)
+    try:
+        case = store.get_case(case_id)
+        if case is None:
+            c_name = case_name or case_id
+            c_host = host or ""
+            store.create_case(case_id=case_id, case_name=c_name, host=c_host)
+
+        existing_events = store.get_case_events(case_id)
+        existing_ids = {e["event_id"] for e in existing_events}
+
+        accepted_count = 0
+        duplicate_count = 0
+
+        for event in normalized_events:
+            if event.event_id in existing_ids:
+                duplicate_count += 1
+            else:
+                accepted_count += 1
+            store.save_event(case_id, event)
+            existing_ids.add(event.event_id)
+
+        # Run behavioral analysis & threat assessment on all case events
+        all_case_events = store.get_case_events(case_id)
+        behavior_findings = analyze_behavior(all_case_events)
+        file_behavior_findings = analyze_file_behavior(all_case_events)
+        all_findings = behavior_findings + file_behavior_findings
+
+        for finding in all_findings:
+            event_ids = finding.get("event_ids")
+            if not event_ids and finding.get("event_id"):
+                event_ids = [str(finding["event_id"])]
+            store.save_finding(case_id, finding, event_ids=event_ids)
+
+        assessment = assess_threat(all_case_events)
+        store.save_assessment(case_id, assessment)
+
+        return {
+            "database": str(database_path),
+            "case_id": case_id,
+            "input_file": Path(file_path).name,
+            "format": detected_format,
+            "events_read": len(raw_events),
+            "events_accepted": accepted_count,
+            "events_rejected": 0,
+            "duplicates": duplicate_count,
+            "findings_count": len(all_findings),
+            "correlations_count": len(assessment.get("correlations", [])),
+            "score": assessment.get("score", 0),
+            "severity": assessment.get("severity", "SAFE"),
+        }
+    finally:
+        store.close()
 
 
 def show_investigation(database_path: str | Path, case_id: str) -> None:
@@ -598,9 +780,77 @@ def main() -> None:
         help="Case identifier.",
     )
 
+    ingest_parser = subparsers.add_parser(
+        "ingest",
+        help="Ingest JSON or Sysmon XML evidence into a case.",
+    )
+    ingest_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    ingest_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+    ingest_parser.add_argument(
+        "--file",
+        required=True,
+        dest="file_path",
+        type=Path,
+        help="Path to the evidence file to ingest.",
+    )
+    ingest_parser.add_argument(
+        "--format",
+        default="auto",
+        dest="format_type",
+        choices=["auto", "json", "sysmon-xml", "xml"],
+        help="Evidence format (auto, json, sysmon-xml).",
+    )
+    ingest_parser.add_argument(
+        "--case-name",
+        dest="case_name",
+        default=None,
+        help="Optional case name if creating a new case.",
+    )
+    ingest_parser.add_argument(
+        "--host",
+        dest="host",
+        default=None,
+        help="Optional host name if creating a new case.",
+    )
+
     args = parser.parse_args()
 
-    if args.command == "investigation":
+    if args.command == "ingest":
+        try:
+            summary = ingest_evidence(
+                database_path=args.database,
+                case_id=args.case_id,
+                file_path=args.file_path,
+                format_type=args.format_type,
+                case_name=args.case_name,
+                host=args.host,
+            )
+            print("RansomEye evidence ingestion complete\n")
+            print(f"Database: {summary['database']}")
+            print(f"Case: {summary['case_id']}")
+            print(f"Input: {summary['input_file']}")
+            print(f"Format: {summary['format']}\n")
+            print(f"Events read: {summary['events_read']}")
+            print(f"Events accepted: {summary['events_accepted']}")
+            print(f"Events rejected: {summary['events_rejected']}")
+            print(f"Duplicates: {summary['duplicates']}")
+            print(f"Findings: {summary['findings_count']}")
+            print(f"Correlations: {summary['correlations_count']}")
+            print(f"Score: {summary['score']}")
+            print(f"Severity: {summary['severity']}")
+        except (FileNotFoundError, ValueError, EvidenceValidationError, sqlite3.Error, OSError) as exc:
+            parser.exit(1, f"Ingestion failed: {exc}\n")
+    elif args.command == "investigation":
         if args.investigation_command == "show":
             show_investigation(
                 database_path=args.database,

