@@ -323,9 +323,151 @@ def test_assessment_path_computes_correlations_once_and_report_consumes_result(m
     )
     store.close()
 
-    # Generate report without passing assessment -> report triggers assess_threat once
+    # Generate report without passing assessment and without stored assessment -> report triggers assess_threat once
     report = generate_case_report(database_path, "CASE-SINGLE-CALL")
 
     assert correlation_call_count == 1
     assert "CORRELATIONS" in report
     assert "Incident:    INC-" in report
+
+
+# --- Milestone 21.2 Persisted Assessment Report Integration Tests ---
+
+
+def test_report_uses_persisted_assessment_from_database(tmp_path):
+    database_path = tmp_path / "persisted_report.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-PERSIST", "Persisted Case")
+    store.save_event(
+        "CASE-PERSIST",
+        {
+            "event_id": "evt-p-1",
+            "timestamp": "2026-08-08T15:00:00Z",
+            "source": "sysmon",
+            "event_type": "process_creation",
+            "process_name": "powershell.exe",
+            "pid": "1000",
+        },
+    )
+    persisted_assessment = {
+        "score": 65,
+        "severity": "MEDIUM",
+        "confidence": 0.85,
+        "reasons": ["Persisted reason 1", "Persisted reason 2"],
+        "techniques": ["T1059.001"],
+        "correlations": [
+            {
+                "incident_id": "INC-PERSISTED-123",
+                "process_key": "guid:{PERSIST-GUID}",
+                "start_time": "2026-08-08T15:00:00Z",
+                "end_time": "2026-08-08T15:00:10Z",
+                "duration": 10.0,
+                "evidence_event_ids": ["evt-p-1"],
+            }
+        ],
+    }
+    store.save_assessment("CASE-PERSIST", persisted_assessment)
+    store.close()
+
+    report = generate_case_report(database_path, "CASE-PERSIST")
+
+    assert "Score:      65" in report
+    assert "Severity:   MEDIUM" in report
+    assert "Confidence: 0.85" in report
+    assert "- Persisted reason 1" in report
+    assert "- Persisted reason 2" in report
+    assert "- T1059.001" in report
+    assert "CORRELATIONS" in report
+    assert "Incident:    INC-PERSISTED-123" in report
+    assert "Process Key: guid:{PERSIST-GUID}" in report
+    assert "Duration:    10.0s" in report
+    assert "Events:      evt-p-1" in report
+
+
+def test_report_does_not_call_assess_threat_when_persisted_assessment_exists(monkeypatch, tmp_path):
+    from ransomeye import threat_assessment
+
+    assess_called = False
+
+    def fake_assess(events, processes=None):
+        nonlocal assess_called
+        assess_called = True
+        raise AssertionError("assess_threat should not be called when persisted assessment exists")
+
+    monkeypatch.setattr(threat_assessment, "assess_threat", fake_assess)
+
+    database_path = tmp_path / "no_recompute.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-NO-RECOMP", "No Recompute Case")
+    store.save_event(
+        "CASE-NO-RECOMP",
+        {
+            "event_id": "evt-nr-1",
+            "timestamp": "2026-08-08T15:00:00Z",
+            "source": "sysmon",
+            "event_type": "process_creation",
+            "process_name": "cmd.exe",
+            "pid": "1000",
+        },
+    )
+    persisted_assessment = {
+        "score": 40,
+        "severity": "LOW",
+        "confidence": 0.70,
+        "reasons": ["Already assessed"],
+        "techniques": ["T1059"],
+        "correlations": [],
+    }
+    store.save_assessment("CASE-NO-RECOMP", persisted_assessment)
+    store.close()
+
+    report = generate_case_report(database_path, "CASE-NO-RECOMP")
+
+    assert not assess_called
+    assert "Score:      40" in report
+    assert "Severity:   LOW" in report
+    assert "- Already assessed" in report
+
+
+def test_explicit_assessment_takes_precedence_over_persisted_assessment(tmp_path):
+    database_path = tmp_path / "explicit_precedence.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-PRECEDENCE", "Precedence Case")
+    store.save_assessment(
+        "CASE-PRECEDENCE",
+        {
+            "score": 20,
+            "severity": "SAFE",
+            "confidence": 0.50,
+            "reasons": ["Persisted old reason"],
+            "techniques": [],
+            "correlations": [],
+        },
+    )
+    store.close()
+
+    override_assessment = {
+        "score": 90,
+        "severity": "CRITICAL",
+        "confidence": 0.99,
+        "reasons": ["Overridden critical reason"],
+        "techniques": ["T1486"],
+        "correlations": [
+            {
+                "incident_id": "INC-OVERRIDE-999",
+                "process_key": "pid:1234",
+                "start_time": "2026-08-08T16:00:00Z",
+                "end_time": "2026-08-08T16:00:05Z",
+                "duration": 5.0,
+                "evidence_event_ids": ["evt-ov-1"],
+            }
+        ],
+    }
+
+    report = generate_case_report(database_path, "CASE-PRECEDENCE", assessment=override_assessment)
+
+    assert "Score:      90" in report
+    assert "Severity:   CRITICAL" in report
+    assert "- Overridden critical reason" in report
+    assert "Incident:    INC-OVERRIDE-999" in report
+    assert "Persisted old reason" not in report

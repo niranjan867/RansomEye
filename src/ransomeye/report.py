@@ -51,10 +51,18 @@ def generate_case_report(
         timeline = investigation.timeline
         tree = investigation.processes
 
-        if assessment is None and timeline:
-            from ransomeye.threat_assessment import assess_threat
+        # Resolve active assessment:
+        # 1. Explicit assessment argument takes highest precedence.
+        # 2. Persisted investigation assessment from database if available.
+        # 3. Legacy fallback: recompute from timeline events if events exist and no assessment persisted.
+        active_assessment = assessment
+        if active_assessment is None:
+            if db_assessment is not None:
+                active_assessment = db_assessment
+            elif timeline:
+                from ransomeye.threat_assessment import assess_threat
 
-            assessment = assess_threat(timeline)
+                active_assessment = assess_threat(timeline)
 
         lines = [
             "RANSOMEYE CASE REPORT",
@@ -74,40 +82,22 @@ def generate_case_report(
             "----------",
         ]
 
-        if assessment is not None:
-            lines.extend(
-                [
-                    f"Score:      {assessment['score']}",
-                    f"Severity:   {assessment['severity']}",
-                    f"Confidence: {assessment['confidence']}",
-                    "Reasons:",
-                ]
-            )
-            reasons_list = assessment.get("reasons", [])
-            lines.extend(f"- {reason}" for reason in reasons_list)
-            lines.append("Techniques:")
-            tech_list = assessment.get("techniques", [])
-            lines.extend(f"- {technique}" for technique in tech_list)
-        elif db_assessment is None:
+        if active_assessment is None:
             lines.append("No assessment available.")
         else:
             lines.extend(
                 [
-                    f"Score:      {db_assessment['score']}",
-                    f"Severity:   {db_assessment['severity']}",
-                    f"Confidence: {db_assessment['confidence']}",
+                    f"Score:      {active_assessment['score']}",
+                    f"Severity:   {active_assessment['severity']}",
+                    f"Confidence: {active_assessment['confidence']}",
                     "Reasons:",
                 ]
             )
-            lines.extend(
-                f"- {reason}"
-                for reason in db_assessment.get("reasons", [])
-            )
+            reasons_list = active_assessment.get("reasons", [])
+            lines.extend(f"- {reason}" for reason in reasons_list)
             lines.append("Techniques:")
-            lines.extend(
-                f"- {technique}"
-                for technique in db_assessment.get("techniques", [])
-            )
+            tech_list = active_assessment.get("techniques", [])
+            lines.extend(f"- {technique}" for technique in tech_list)
 
         lines.extend(["", "FINDINGS", "--------"])
 
@@ -183,8 +173,8 @@ def generate_case_report(
         lines.extend(["", "CORRELATIONS", "------------"])
 
         correlations = (
-            assessment.get("correlations", [])
-            if isinstance(assessment, dict)
+            active_assessment.get("correlations", [])
+            if isinstance(active_assessment, dict) and active_assessment.get("correlations") is not None
             else investigation.correlations
         )
 
@@ -197,7 +187,7 @@ def generate_case_report(
                 start_time = corr.get("start_time", "N/A")
                 end_time = corr.get("end_time", "N/A")
                 duration = corr.get("duration", 0.0)
-                ev_ids = corr.get("evidence_event_ids", [])
+                ev_ids = corr.get("evidence_event_ids", corr.get("evidence_ids", []))
                 events_str = (
                     ", ".join(str(i) for i in ev_ids) if ev_ids else "N/A"
                 )
