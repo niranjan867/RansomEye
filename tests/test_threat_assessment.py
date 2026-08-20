@@ -635,3 +635,93 @@ def test_integration_9_assessment_persistence_round_trip(tmp_path):
     assert inv.correlations[0]["incident_id"] == assessment["correlations"][0]["incident_id"]
     assert inv.correlations[0]["finding_ids"] == assessment["correlations"][0]["finding_ids"]
     assert inv.correlations[0]["evidence_ids"] == ["ps-1", "ps-2"]
+
+
+# --- Milestone 21.1 Finding ID Hardening Tests ---
+
+from ransomeye.threat_assessment import _ensure_finding_ids
+
+
+def test_finding_id_same_content_produces_same_id():
+    f1 = [{"type": "suspicious_powershell", "event_ids": ["EVT-1", "EVT-2"], "technique": "T1059.001", "reason": "Encoded command"}]
+    f2 = [{"type": "suspicious_powershell", "event_ids": ["EVT-1", "EVT-2"], "technique": "T1059.001", "reason": "Encoded command"}]
+    res1 = _ensure_finding_ids(f1)
+    res2 = _ensure_finding_ids(f2)
+    assert res1[0]["finding_id"] == res2[0]["finding_id"]
+    assert res1[0]["finding_id"].startswith("F-")
+    assert len(res1[0]["finding_id"]) == 2 + 16
+
+
+def test_finding_id_different_event_ids_produces_different_id():
+    f1 = [{"type": "suspicious_powershell", "event_ids": ["EVT-1"], "technique": "T1059.001", "reason": "Encoded command"}]
+    f2 = [{"type": "suspicious_powershell", "event_ids": ["EVT-2"], "technique": "T1059.001", "reason": "Encoded command"}]
+    res1 = _ensure_finding_ids(f1)
+    res2 = _ensure_finding_ids(f2)
+    assert res1[0]["finding_id"] != res2[0]["finding_id"]
+
+
+def test_finding_id_different_type_produces_different_id():
+    f1 = [{"type": "suspicious_powershell", "event_ids": ["EVT-1"], "technique": "T1059.001", "reason": "Encoded command"}]
+    f2 = [{"type": "suspicious_certutil", "event_ids": ["EVT-1"], "technique": "T1059.001", "reason": "Encoded command"}]
+    res1 = _ensure_finding_ids(f1)
+    res2 = _ensure_finding_ids(f2)
+    assert res1[0]["finding_id"] != res2[0]["finding_id"]
+
+
+def test_finding_id_different_technique_produces_different_id():
+    f1 = [{"type": "suspicious_powershell", "event_ids": ["EVT-1"], "technique": "T1059.001", "reason": "Encoded command"}]
+    f2 = [{"type": "suspicious_powershell", "event_ids": ["EVT-1"], "technique": "T1059.003", "reason": "Encoded command"}]
+    res1 = _ensure_finding_ids(f1)
+    res2 = _ensure_finding_ids(f2)
+    assert res1[0]["finding_id"] != res2[0]["finding_id"]
+
+
+def test_finding_id_different_reason_produces_different_id():
+    f1 = [{"type": "suspicious_powershell", "event_ids": ["EVT-1"], "technique": "T1059.001", "reason": "Encoded command detected"}]
+    f2 = [{"type": "suspicious_powershell", "event_ids": ["EVT-1"], "technique": "T1059.001", "reason": "DownloadString detected"}]
+    res1 = _ensure_finding_ids(f1)
+    res2 = _ensure_finding_ids(f2)
+    assert res1[0]["finding_id"] != res2[0]["finding_id"]
+
+
+def test_finding_id_dict_ordering_independence():
+    f1 = [{"reason": "Encoded command", "type": "suspicious_powershell", "technique": "T1059.001", "event_ids": ["EVT-1"]}]
+    f2 = [{"type": "suspicious_powershell", "event_ids": ["EVT-1"], "technique": "T1059.001", "reason": "Encoded command"}]
+    res1 = _ensure_finding_ids(f1)
+    res2 = _ensure_finding_ids(f2)
+    assert res1[0]["finding_id"] == res2[0]["finding_id"]
+
+
+def test_finding_id_event_ids_ordering_independence():
+    f1 = [{"type": "mass_file_modification", "event_ids": ["EVT-3", "EVT-1", "EVT-2"], "technique": "T1486", "reason": "Mass modify"}]
+    f2 = [{"type": "mass_file_modification", "event_ids": ["EVT-1", "EVT-2", "EVT-3"], "technique": "T1486", "reason": "Mass modify"}]
+    res1 = _ensure_finding_ids(f1)
+    res2 = _ensure_finding_ids(f2)
+    assert res1[0]["finding_id"] == res2[0]["finding_id"]
+
+
+def test_finding_id_preserves_explicit_finding_id():
+    f1 = [{"finding_id": "CUSTOM-F-999", "type": "suspicious_powershell", "event_ids": ["EVT-1"]}]
+    f2 = [{"id": "CUSTOM-ID-888", "type": "suspicious_powershell", "event_ids": ["EVT-1"]}]
+    res1 = _ensure_finding_ids(f1)
+    res2 = _ensure_finding_ids(f2)
+    assert res1[0]["finding_id"] == "CUSTOM-F-999"
+    assert res2[0]["finding_id"] == "CUSTOM-ID-888"
+
+
+def test_finding_id_duplicate_semantic_findings_receive_same_id():
+    findings = [
+        {"type": "suspicious_powershell", "event_ids": ["EVT-1"], "technique": "T1059.001", "reason": "Encoded command"},
+        {"type": "suspicious_powershell", "event_ids": ["EVT-1"], "technique": "T1059.001", "reason": "Encoded command"},
+    ]
+    res = _ensure_finding_ids(findings)
+    assert res[0]["finding_id"] == res[1]["finding_id"]
+
+
+def test_finding_id_single_event_id_fallback():
+    f1 = [{"type": "suspicious_powershell", "event_id": "EVT-1", "technique": "T1059.001", "reason": "Encoded command"}]
+    f2 = [{"type": "suspicious_powershell", "event_ids": ["EVT-1"], "technique": "T1059.001", "reason": "Encoded command"}]
+    res1 = _ensure_finding_ids(f1)
+    res2 = _ensure_finding_ids(f2)
+    assert res1[0]["finding_id"] == res2[0]["finding_id"]
+    assert res1[0]["event_ids"] == ["EVT-1"]

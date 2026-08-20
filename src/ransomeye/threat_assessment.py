@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime
 from typing import Any
 
@@ -61,11 +62,19 @@ def _ensure_finding_ids(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
             fid = f_copy.get("id")
             if not fid:
                 ftype = str(f_copy.get("type", "finding"))
-                sorted_eids = sorted(str(e) for e in (f_copy.get("event_ids") or []))
-                fevts = "-".join(sorted_eids)
-                content = f"{ftype}|{fevts}"
-                digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:8]
-                fid = f"FND-{ftype}-{digest}"
+                sorted_eids = sorted(list(set(str(e) for e in (f_copy.get("event_ids") or []))))
+                technique = str(f_copy.get("technique") or "")
+                reason = str(f_copy.get("reason") or "")
+
+                payload = {
+                    "event_ids": sorted_eids,
+                    "reason": reason,
+                    "technique": technique,
+                    "type": ftype,
+                }
+                canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()[:16]
+                fid = f"F-{digest}"
             f_copy["finding_id"] = str(fid)
         normalized.append(f_copy)
     return normalized
