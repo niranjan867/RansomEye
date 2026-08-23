@@ -197,6 +197,153 @@ def show_investigation_graph(database_path: str | Path, case_id: str) -> None:
         print(e)
 
 
+def show_investigation_incident(database_path: str | Path, case_id: str, incident_id: str) -> None:
+    """Isolate and print a specific investigation incident."""
+    store = EvidenceStore(database_path)
+    try:
+        case = store.get_case(case_id)
+        if case is None:
+            print(f"Case not found: {case_id}")
+            sys.exit(1)
+
+        assessment = store.get_latest_assessment(case_id)
+        if assessment is None or not assessment.get("correlations"):
+            print(f"Incident not found in latest assessment: {incident_id}")
+            sys.exit(1)
+
+        target_incident = None
+        for corr in assessment["correlations"]:
+            if corr.get("incident_id") == incident_id:
+                target_incident = corr
+                break
+
+        if not target_incident:
+            print(f"Incident not found in latest assessment: {incident_id}")
+            sys.exit(1)
+
+        print("RANSOMEYE INCIDENT REPORT")
+        print("=========================\n")
+        print(f"Incident ID: {incident_id}")
+        print(f"Case: {case_id}")
+
+        severity = assessment.get("severity", "None")
+        score = assessment.get("score", "None")
+        print(f"Severity: {severity}")
+        print(f"Score: {score}")
+
+        start_time = target_incident.get("start_time")
+        end_time = target_incident.get("end_time")
+        print(f"Timeframe: {start_time} -> {end_time}")
+
+        if "duration_seconds" in target_incident:
+            print(f"Duration: {target_incident['duration_seconds']}")
+        if "process_key" in target_incident:
+            print(f"Process Key: {target_incident['process_key']}")
+
+        corr_finding_ids = target_incident.get("finding_ids", [])
+        print(f"\n--- FINDINGS ({len(corr_finding_ids)}) ---")
+        if not corr_finding_ids:
+            print("None")
+        else:
+            all_case_findings = store.get_case_findings(case_id)
+            import hashlib
+            import json
+            for f in all_case_findings:
+                ftype = str(f.get("finding_type", "finding"))
+                if ftype == "unknown":
+                    ftype = "finding"
+                sorted_eids = sorted(list(set(str(e) for e in (f.get("event_ids") or []))))
+                technique = str(f.get("technique") or "")
+                reason = str(f.get("reason") or "")
+
+                payload = {
+                    "event_ids": sorted_eids,
+                    "reason": reason,
+                    "technique": technique,
+                    "type": ftype,
+                }
+                canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()[:16]
+                f["computed_hash"] = f"F-{digest}"
+
+            for f_id in corr_finding_ids:
+                matching_finding = next((f for f in all_case_findings if f.get("computed_hash") == str(f_id)), None)
+                if not matching_finding:
+                    print(f"Finding not available: {f_id}")
+                else:
+                    ftype = matching_finding.get("finding_type", "unknown")
+                    tech = matching_finding.get("technique") or "unavailable"
+                    fscore = matching_finding.get("score")
+                    if fscore is None:
+                        fscore = "unavailable"
+                    conf = matching_finding.get("confidence")
+                    if conf is None:
+                        conf = "unavailable"
+                    reason = matching_finding.get("reason") or "unavailable"
+
+                    print(f"- Finding ID: {f_id}")
+                    print(f"  Type: {ftype}")
+                    print(f"  Technique: {tech}")
+                    print(f"  Score: {fscore}")
+                    print(f"  Confidence: {conf}")
+                    print(f"  Reason: {reason}")
+
+        evidence_ids = target_incident.get("evidence_ids", target_incident.get("evidence_event_ids", []))
+        print(f"\n--- EVIDENCE ({len(evidence_ids)}) ---")
+        if not evidence_ids:
+            print("None")
+        else:
+            events = []
+            missing = []
+            for eid in evidence_ids:
+                ev = store.get_event(case_id, eid)
+                if ev:
+                    events.append(ev)
+                else:
+                    missing.append(eid)
+
+            events.sort(key=lambda e: (e.get("timestamp") or "", e.get("event_id") or ""))
+
+            for m in missing:
+                print(f"Evidence not available: {m}")
+
+            if events:
+                print(f"{'Timestamp':<25} {'Event ID':<21} {'Event Type':<19} {'Summary'}")
+                print(f"{'-'*9:<25} {'-'*8:<21} {'-'*10:<19} {'-'*7}")
+                for event in events:
+                    ts = (event.get("timestamp") or "").replace("T", " ").replace("Z", "")
+                    eid = event.get("event_id") or ""
+                    etype = (event.get("event_type") or "")[:18]
+
+                    summary = ""
+                    if event.get("process_name"):
+                        summary = event["process_name"].split("\\")[-1]
+                        if event.get("network_json"):
+                            net = event["network_json"]
+                            if net.get("DestinationIp"):
+                                summary += f" -> {net.get('DestinationIp')}:{net.get('DestinationPort', '')}"
+                    elif event.get("file_path"):
+                        summary = event["file_path"].split("\\")[-1]
+                    elif event.get("network_json"):
+                        net = event["network_json"]
+                        if net.get("QueryName"):
+                            summary = net["QueryName"]
+                    elif event.get("command_line"):
+                        summary = event["command_line"][:50]
+
+                    if len(eid) > 21:
+                        short_eid = eid[:18] + "..."
+                        print(f"{ts:<25} {short_eid:<21} {etype:<19} {summary}")
+                        print(f"{'':<25} {eid}")
+                    else:
+                        print(f"{ts:<25} {eid:<21} {etype:<19} {summary}")
+    except (ValueError, KeyError, sqlite3.Error, OSError) as exc:
+        print(f"Incident report failed: {exc}")
+        sys.exit(1)
+    finally:
+        store.close()
+
+
 def show_attack_reconstruction(database_path: str | Path, case_id: str) -> None:
     """Load investigation, build graph, reconstruct and print attack sequence."""
     try:
@@ -868,6 +1015,29 @@ def main() -> None:
         help="Case identifier.",
     )
 
+    investigation_incident_parser = investigation_subparsers.add_parser(
+        "incident",
+        help="Show investigation incident drill-down.",
+    )
+    investigation_incident_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    investigation_incident_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+    investigation_incident_parser.add_argument(
+        "--incident",
+        required=True,
+        dest="incident_id",
+        help="Incident identifier.",
+    )
+
     ingest_parser = subparsers.add_parser(
         "ingest",
         help="Ingest JSON or Sysmon XML evidence into a case.",
@@ -1017,6 +1187,12 @@ def main() -> None:
             show_investigation(
                 database_path=args.database,
                 case_id=args.case_id,
+            )
+        elif args.investigation_command == "incident":
+            show_investigation_incident(
+                database_path=args.database,
+                case_id=args.case_id,
+                incident_id=args.incident_id,
             )
         elif args.investigation_command == "graph":
             show_investigation_graph(

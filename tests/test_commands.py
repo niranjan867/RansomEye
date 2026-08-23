@@ -1179,3 +1179,130 @@ def test_command_evidence_trace(tmp_path, capsys):
     assert "RANSOMEYE EVIDENCE TRACE" in out
     assert "EVT-PARENT" in out
     assert "None" in out # Under findings and correlations
+
+
+def test_command_investigation_incident(tmp_path, capsys):
+    from ransomeye.commands import main
+    from ransomeye.storage import EvidenceStore
+    import sys
+    from unittest.mock import patch
+
+    db_path = tmp_path / "cli_incident.db"
+    store = EvidenceStore(db_path)
+    store.create_case("CASE-INC", "CLI Incident Test")
+
+    event_1 = {
+        "event_id": "EVT-INC-01",
+        "timestamp": "2026-08-08T15:00:00Z",
+        "source": "sysmon",
+        "event_type": "process_creation",
+        "process_name": "powershell.exe",
+        "command_line": "powershell.exe -enc XYZ",
+        "pid": 200,
+        "process_guid": "{AAAA-BBBB}",
+    }
+
+    event_2 = {
+        "event_id": "EVT-INC-02",
+        "timestamp": "2026-08-08T14:59:00Z",
+        "source": "sysmon",
+        "event_type": "process_creation",
+        "process_name": "cmd.exe",
+        "command_line": "cmd.exe /c start",
+        "pid": 100,
+        "process_guid": "{CCCC-DDDD}",
+    }
+
+    # Intentionally insert out of chronological order to test sorting
+    store.save_event("CASE-INC", event_1)
+    store.save_event("CASE-INC", event_2)
+
+    finding_id = store.save_finding(
+        case_id="CASE-INC",
+        finding={
+            "type": "suspicious_powershell",
+            "score": 40,
+            "confidence": 0.8,
+            "technique": "T1059.001",
+            "reason": "Encoded powershell",
+        },
+        event_ids=["EVT-INC-01"],
+    )
+
+    import hashlib
+    import json
+    payload = {
+        "event_ids": ["EVT-INC-01"],
+        "reason": "Encoded powershell",
+        "technique": "T1059.001",
+        "type": "suspicious_powershell",
+    }
+    canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()[:16]
+    hash_id = f"F-{digest}"
+
+    assessment = {
+        "score": 40,
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "reasons": ["Defense evasion"],
+        "techniques": ["T1059.001"],
+        "correlations": [
+            {
+                "incident_id": "INC-TEST-100",
+                "finding_ids": [hash_id],
+                "evidence_ids": ["EVT-INC-01", "EVT-INC-02", "EVT-MISSING"],
+                "start_time": "2026-08-08T14:59:00Z",
+                "end_time": "2026-08-08T15:00:00Z",
+            },
+            {
+                "incident_id": "INC-TEST-OTHER",
+                "finding_ids": [],
+                "evidence_ids": [],
+            }
+        ],
+    }
+    store.save_assessment("CASE-INC", assessment)
+    store.close()
+
+    # 1. Existing incident
+    with patch.object(sys, "argv", ["ransomeye", "investigation", "incident", "--database", str(db_path), "--case", "CASE-INC", "--incident", "INC-TEST-100"]):
+        main()
+    out, err = capsys.readouterr()
+
+    assert "RANSOMEYE INCIDENT REPORT" in out
+    assert "Incident ID: INC-TEST-100" in out
+    assert "Case: CASE-INC" in out
+    assert "Timeframe: 2026-08-08T14:59:00Z -> 2026-08-08T15:00:00Z" in out
+
+    assert f"Finding ID: {hash_id}" in out
+    assert "Type: suspicious_powershell" in out
+    assert "Technique: T1059.001" in out
+
+    # Chronological sort check: EVT-INC-02 should appear before EVT-INC-01
+    idx1 = out.find("EVT-INC-02")
+    idx2 = out.find("EVT-INC-01")
+    assert idx1 != -1 and idx2 != -1
+    assert idx1 < idx2
+
+    # Missing evidence check
+    assert "Evidence not available: EVT-MISSING" in out
+
+    # 2. Missing incident fails
+    with patch.object(sys, "argv", ["ransomeye", "investigation", "incident", "--database", str(db_path), "--case", "CASE-INC", "--incident", "INC-MISSING"]):
+        try:
+            main()
+            assert False, "Should have exited"
+        except SystemExit as e:
+            assert e.code == 1
+    out, err = capsys.readouterr()
+    assert "Incident not found in latest assessment: INC-MISSING" in out
+
+    # 3. No findings/evidence handled
+    with patch.object(sys, "argv", ["ransomeye", "investigation", "incident", "--database", str(db_path), "--case", "CASE-INC", "--incident", "INC-TEST-OTHER"]):
+        main()
+    out, err = capsys.readouterr()
+
+    assert "--- FINDINGS (0) ---" in out
+    # Actually wait, my code prints --- FINDINGS (0) --- followed by "None"
+    assert "--- EVIDENCE (0) ---" in out
