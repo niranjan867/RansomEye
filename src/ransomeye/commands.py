@@ -962,6 +962,29 @@ def main() -> None:
         help="Event identifier.",
     )
 
+    evidence_trace_parser = evidence_subparsers.add_parser(
+        "trace",
+        help="Pivot and trace analytical context for an event.",
+    )
+    evidence_trace_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    evidence_trace_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+    evidence_trace_parser.add_argument(
+        "--event",
+        required=True,
+        dest="event_id",
+        help="Event identifier.",
+    )
+
     args = parser.parse_args()
 
     if args.command == "ingest":
@@ -1309,6 +1332,88 @@ def main() -> None:
                 if not event:
                     parser.exit(1, f"Event not found\n")
                 print(json.dumps(event, indent=2, ensure_ascii=False))
+
+            elif args.evidence_command == "trace":
+                event = store.get_event(args.case_id, args.event_id)
+                if not event:
+                    parser.exit(1, f"Event not found\n")
+
+                print("RANSOMEYE EVIDENCE TRACE")
+                print("=========================\n")
+                print("Event")
+                print(f"Event ID: {event.get('event_id')}")
+                print(f"Timestamp: {event.get('timestamp')}")
+                print(f"Event Type: {event.get('event_type')}")
+                print(f"Summary: {event.get('command_line') or event.get('process_name') or event.get('file_path') or '-'}")
+
+                print("\n--- Process Lineage ---")
+                from ransomeye.timeline import get_case_timeline, build_process_tree
+                timeline = get_case_timeline(args.database, args.case_id)
+                processes = build_process_tree(timeline)
+                nodes = processes.get("nodes", {})
+
+                current_process = None
+                parent_process = None
+
+                pid_val = str(event.get("pid")) if event.get("pid") is not None else None
+                if pid_val and pid_val in nodes:
+                    current_process = nodes[pid_val]
+
+                if current_process:
+                    parent_pid = current_process.get("parent_pid")
+                    if parent_pid and parent_pid in nodes:
+                        parent_process = nodes[parent_pid]
+
+                if parent_process:
+                    name = parent_process.get("process_name", "Unknown")
+                    pid = parent_process.get("pid", "?")
+                    guid = event.get("parent_process_guid") or "?"
+                    cmd = parent_process.get("command_line", "-")
+                    print(f"Parent: {name} [PID {pid}] ({guid})")
+                    print(f"        -> {cmd}")
+                else:
+                    print("Parent: Unknown")
+
+                if current_process:
+                    name = current_process.get("process_name", "Unknown")
+                    pid = current_process.get("pid", "?")
+                    guid = event.get("process_guid") or "?"
+                    print(f"Current: {name} [PID {pid}] ({guid})")
+                else:
+                    print("Current: Unknown")
+
+                print("\n--- Findings ---")
+                findings = store.get_event_findings(args.case_id, args.event_id)
+                finding_ids = []
+                if not findings:
+                    print("None")
+                else:
+                    for f in findings:
+                        fid = f['finding_id']
+                        finding_ids.append(str(fid))
+                        print(f"Finding ID: {fid}")
+                        print(f"Type / Technique: {f.get('finding_type')} / {f.get('technique') or '-'}")
+                        print(f"Reason: {f.get('reason')}")
+                        print(f"Evidence IDs: {', '.join(f.get('event_ids', []))}\n")
+
+                print("--- Correlations / Incidents ---")
+                assessment = store.get_latest_assessment(args.case_id)
+                matched_correlations = []
+                if assessment and assessment.get("correlations"):
+                    for corr in assessment["correlations"]:
+                        corr_finding_ids = [str(x) for x in corr.get("finding_ids", [])]
+                        if any(fid in corr_finding_ids for fid in finding_ids) or \
+                           (args.event_id in corr.get("evidence_ids", [])):
+                           matched_correlations.append(corr)
+
+                if not matched_correlations:
+                    print("None")
+                else:
+                    for corr in matched_correlations:
+                        print(f"Incident ID: {corr.get('incident_id')}")
+                        print(f"Related Finding IDs: {', '.join(str(x) for x in corr.get('finding_ids', []))}")
+                        print(f"Related Evidence IDs: {', '.join(corr.get('evidence_ids', []))}")
+                        print(f"Start / End Time: {corr.get('start_time')} / {corr.get('end_time')}\n")
 
         except (ValueError, KeyError, sqlite3.Error, OSError) as exc:
             parser.exit(1, f"{exc}\n")

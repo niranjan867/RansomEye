@@ -244,3 +244,67 @@ def test_storage_evidence_queries(tmp_path):
     assert len(store.search_events("CASE-SEARCH", "")) == 0
 
     store.close()
+
+
+def test_storage_evidence_trace(tmp_path):
+    from ransomeye.storage import EvidenceStore
+    database_path = tmp_path / "trace_test.db"
+    store = EvidenceStore(database_path)
+    store.create_case("CASE-TRACE", "Trace Test")
+
+    event_file = {
+        "event_id": "EVT-FILE-02",
+        "timestamp": "2026-08-08T15:01:00Z",
+        "source": "sysmon",
+        "event_type": "file_create",
+        "process_name": "cmd.exe",
+        "command_line": "cmd.exe /c vssadmin delete shadows",
+        "file_path": "C:\\Windows\\System32\\vssadmin.exe",
+        "network": {},
+        "metadata": {"hash": "abc123hash"},
+    }
+    store.save_event("CASE-TRACE", event_file)
+
+    finding_id = store.save_finding(
+        case_id="CASE-TRACE",
+        finding={
+            "type": "defense_evasion",
+            "score": 30,
+            "confidence": 0.9,
+            "technique": "T1490",
+            "reason": "VSSAdmin Shadow Copy Deletion",
+        },
+        event_ids=["EVT-FILE-02"],
+    )
+
+    assessment = {
+        "score": 30,
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "reasons": ["Defense evasion"],
+        "techniques": ["T1490"],
+        "correlations": [
+            {
+                "incident_id": "INC-TEST-001",
+                "finding_ids": [finding_id],
+                "evidence_ids": [],
+            }
+        ],
+    }
+    store.save_assessment("CASE-TRACE", assessment)
+
+    findings = store.get_event_findings("CASE-TRACE", "EVT-FILE-02")
+    assert len(findings) == 1
+    assert findings[0]["finding_id"] == finding_id
+    assert findings[0]["technique"] == "T1490"
+
+    empty_findings = store.get_event_findings("CASE-TRACE", "EVT-UNKNOWN")
+    assert len(empty_findings) == 0
+
+    latest_assessment = store.get_latest_assessment("CASE-TRACE")
+    assert latest_assessment is not None
+    assert latest_assessment["severity"] == "HIGH"
+    assert len(latest_assessment["correlations"]) == 1
+    assert latest_assessment["correlations"][0]["incident_id"] == "INC-TEST-001"
+
+    store.close()

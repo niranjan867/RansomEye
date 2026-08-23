@@ -1082,3 +1082,100 @@ def test_command_evidence_search_inspect(tmp_path, capsys):
             assert e.code == 1
     out, err = capsys.readouterr()
     assert "Event not found" in err
+
+
+def test_command_evidence_trace(tmp_path, capsys):
+    from ransomeye.commands import main
+    from ransomeye.storage import EvidenceStore
+    import sys
+    from unittest.mock import patch
+
+    db_path = tmp_path / "cli_trace.db"
+    store = EvidenceStore(db_path)
+    store.create_case("CASE-TRACE", "CLI Trace Test")
+
+    event_network = {
+        "event_id": "EVT-NET-CLI",
+        "timestamp": "2026-08-08T15:00:00Z",
+        "source": "sysmon",
+        "event_type": "network_connect",
+        "process_name": "powershell.exe",
+        "command_line": "powershell.exe -enc XYZ",
+        "pid": 200,
+        "parent_pid": 100,
+        "process_guid": "{AAAA-BBBB}",
+        "parent_process_guid": "{CCCC-DDDD}",
+        "network": {"DestinationIp": "203.0.113.55"},
+        "metadata": {"test": "val"},
+    }
+
+    event_parent = {
+        "event_id": "EVT-PARENT",
+        "timestamp": "2026-08-08T14:59:00Z",
+        "source": "sysmon",
+        "event_type": "process_creation",
+        "process_name": "cmd.exe",
+        "command_line": "cmd.exe /c start",
+        "pid": 100,
+        "process_guid": "{CCCC-DDDD}",
+        "network": {},
+        "metadata": {},
+    }
+    store.save_event("CASE-TRACE", event_network)
+    store.save_event("CASE-TRACE", event_parent)
+
+    finding_id = store.save_finding(
+        case_id="CASE-TRACE",
+        finding={
+            "type": "defense_evasion",
+            "score": 30,
+            "confidence": 0.9,
+            "technique": "T1490",
+            "reason": "VSSAdmin Shadow Copy Deletion",
+        },
+        event_ids=["EVT-NET-CLI"],
+    )
+
+    assessment = {
+        "score": 30,
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "reasons": ["Defense evasion"],
+        "techniques": ["T1490"],
+        "correlations": [
+            {
+                "incident_id": "INC-TEST-001",
+                "finding_ids": [finding_id],
+                "evidence_ids": [],
+            }
+        ],
+    }
+    store.save_assessment("CASE-TRACE", assessment)
+    store.close()
+
+    # 1. evidence trace returns context
+    with patch.object(sys, "argv", ["ransomeye", "evidence", "trace", "--database", str(db_path), "--case", "CASE-TRACE", "--event", "EVT-NET-CLI"]):
+        main()
+    out, err = capsys.readouterr()
+
+    assert "RANSOMEYE EVIDENCE TRACE" in out
+    assert "EVT-NET-CLI" in out
+    assert "--- Process Lineage ---" in out
+    assert "Parent: cmd.exe" in out
+    assert "{CCCC-DDDD}" in out
+    assert "Current: powershell.exe" in out
+    assert "{AAAA-BBBB}" in out
+    assert "--- Findings ---" in out
+    assert str(finding_id) in out
+    assert "T1490" in out
+    assert "VSSAdmin Shadow Copy Deletion" in out
+    assert "--- Correlations / Incidents ---" in out
+    assert "INC-TEST-001" in out
+
+    # 2. evidence trace returns no findings for parent
+    with patch.object(sys, "argv", ["ransomeye", "evidence", "trace", "--database", str(db_path), "--case", "CASE-TRACE", "--event", "EVT-PARENT"]):
+        main()
+    out, err = capsys.readouterr()
+    assert "RANSOMEYE EVIDENCE TRACE" in out
+    assert "EVT-PARENT" in out
+    assert "None" in out # Under findings and correlations

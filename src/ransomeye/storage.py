@@ -595,6 +595,26 @@ class EvidenceStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_event_findings(self, case_id: str, event_id: str) -> list[dict[str, Any]]:
+        """Return all findings linked to a specific event within a case."""
+        rows = self.connection.execute(
+            """
+            SELECT f.*
+            FROM findings f
+            JOIN finding_evidence fe ON f.finding_id = fe.finding_id
+            WHERE f.case_id = ? AND fe.event_id = ?
+            ORDER BY f.finding_id ASC
+            """,
+            (case_id, event_id),
+        ).fetchall()
+
+        findings = []
+        for row in rows:
+            item = dict(row)
+            item["event_ids"] = self.get_finding_event_ids(item["finding_id"])
+            findings.append(item)
+        return findings
+
     def save_finding(
         self,
         case_id: str,
@@ -695,6 +715,34 @@ class EvidenceStore:
         )
 
         self.connection.commit()
+
+    def get_latest_assessment(self, case_id: str) -> dict[str, Any] | None:
+        """Return the most recent assessment for a case."""
+        row = self.connection.execute(
+            """
+            SELECT *
+            FROM assessments
+            WHERE case_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (case_id,),
+        ).fetchone()
+
+        if not row:
+            return None
+
+        assessment = dict(row)
+        for json_field in ("reasons_json", "techniques_json", "correlations_json"):
+            if assessment.get(json_field):
+                try:
+                    assessment[json_field.replace("_json", "")] = json.loads(assessment[json_field])
+                except json.JSONDecodeError:
+                    assessment[json_field.replace("_json", "")] = []
+            else:
+                assessment[json_field.replace("_json", "")] = []
+
+        return assessment
 
     def get_case_events(self, case_id: str) -> list[dict[str, Any]]:
         rows = self.connection.execute(
