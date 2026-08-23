@@ -18,22 +18,7 @@ def get_case_timeline(
     try:
         rows = connection.execute(
             """
-            SELECT
-                event_id,
-                case_id,
-                timestamp,
-                source,
-                event_type,
-                process_name,
-                pid,
-                parent_pid,
-                process_guid,
-                parent_process_guid,
-                parent_image,
-                parent_command_line,
-                command_line,
-                file_path,
-                confidence
+            SELECT *
             FROM events
             WHERE case_id = ?
             ORDER BY timestamp ASC, event_id ASC

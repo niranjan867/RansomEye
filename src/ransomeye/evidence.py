@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import json
 from typing import Any, Iterable, Mapping
 
 ALLOWED_EVENT_TYPES = frozenset(
@@ -52,8 +53,10 @@ KNOWN_FIELDS = frozenset(
         "file_path",
         "file_count",
         "network",
+        "network_json",
         "confidence",
         "metadata",
+        "metadata_json",
     }
 )
 
@@ -168,6 +171,27 @@ class EvidenceEvent:
             raise EvidenceValidationError("Event must be a mapping or EvidenceEvent object.")
 
         metadata = data.get("metadata")
+        if metadata is None and data.get("metadata_json"):
+            raw_meta = data.get("metadata_json")
+            if isinstance(raw_meta, str):
+                try:
+                    metadata = json.loads(raw_meta)
+                except (json.JSONDecodeError, TypeError):
+                    metadata = None
+            elif isinstance(raw_meta, dict):
+                metadata = raw_meta
+
+        network = data.get("network")
+        if network is None and data.get("network_json"):
+            raw_net = data.get("network_json")
+            if isinstance(raw_net, str):
+                try:
+                    network = json.loads(raw_net)
+                except (json.JSONDecodeError, TypeError):
+                    network = None
+            elif isinstance(raw_net, dict):
+                network = raw_net
+
         extra_keys = {
             k: v for k, v in data.items()
             if k not in KNOWN_FIELDS
@@ -196,7 +220,7 @@ class EvidenceEvent:
             hashes=data.get("hashes"),
             file_path=data.get("file_path"),
             file_count=data.get("file_count"),
-            network=data.get("network"),
+            network=network,
             confidence=data.get("confidence"),
             metadata=metadata,
         )

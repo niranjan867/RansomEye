@@ -195,9 +195,10 @@ class AdvancedTimeline:
                 lines.append(f"Parent: {entry.parent_process_name}")
 
             if entry.finding_ids:
-                lines.append(f"Finding: {', '.join(sorted(entry.finding_ids))}")
+                f_list = sorted(str(f) for f in entry.finding_ids)
+                lines.append(f"Finding: {', '.join(f_list)}")
             if entry.evidence_ids:
-                evs = sorted(entry.evidence_ids)
+                evs = sorted(str(e) for e in entry.evidence_ids)
                 if len(evs) > 3:
                     lines.append(f"Evidence: {evs[0]} ... {evs[-1]}")
                 else:

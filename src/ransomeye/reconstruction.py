@@ -72,11 +72,11 @@ class AttackSequence:
                     pass # We will rely on other properties or the user can adjust if needed
 
             if stage.correlation_ids:
-                lines.append(f"Incident: {', '.join(sorted(stage.correlation_ids))}")
+                lines.append(f"Incident: {', '.join(sorted(str(c) for c in stage.correlation_ids))}")
             if stage.finding_ids:
-                lines.append(f"Finding: {', '.join(sorted(stage.finding_ids))}")
+                lines.append(f"Finding: {', '.join(sorted(str(f) for f in stage.finding_ids))}")
             if stage.evidence_ids:
-                lines.append(f"Evidence: {', '.join(sorted(stage.evidence_ids))}")
+                lines.append(f"Evidence: {', '.join(sorted(str(e) for e in stage.evidence_ids))}")
 
         return "\n".join(lines)
 
@@ -111,13 +111,14 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
 
     for finding in investigation.findings:
         f_id = finding.get("finding_id")
-        if not f_id:
+        if f_id is None:
             continue
+        f_id_str = str(f_id)
 
         f_type = finding.get("finding_type", "").lower()
         f_title = finding.get("title") or f_type
         f_desc = finding.get("description", "")
-        ev_ids = finding.get("event_ids", [])
+        ev_ids = [str(x) for x in (finding.get("event_ids") or [])]
 
         # Determine stage type
         if "mass" in f_type and "file" in f_type:
@@ -146,14 +147,14 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
                     pids.add(pid)
 
             stages.append(AttackStage(
-                stage_id=f"STAGE-F-{f_id}",
+                stage_id=f"STAGE-F-{f_id_str}",
                 timestamp=min_time,
                 end_time=max_time,
                 stage_type=stage_type,
                 title=f_title,
                 description=f_desc,
                 evidence_ids=tuple(sorted(ev_ids)),
-                finding_ids=(f_id,),
+                finding_ids=(f_id_str,),
                 process_ids=tuple(sorted(pids))
             ))
             grouped_evidence_ids.update(ev_ids)
@@ -168,7 +169,7 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
                         "title": f_title,
                         "description": f_desc
                     }
-                finding_upgrades[eid]["finding_ids"].add(f_id)
+                finding_upgrades[eid]["finding_ids"].add(f_id_str)
                 # Keep the most severe stage type if multiple (simplification: last one wins or specific overrides)
                 if stage_type != "FINDING":
                     finding_upgrades[eid]["stage_type"] = stage_type

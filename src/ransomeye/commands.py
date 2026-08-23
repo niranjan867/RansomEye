@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sqlite3
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -210,8 +211,58 @@ def show_investigation(database_path: str | Path, case_id: str) -> None:
         print(e)
 
 
-def print_case_timeline(database_path: str | Path, case_id: str) -> None:
-    """Print a simple analyst-friendly timeline for a stored case."""
+def show_investigation_graph(database_path: str | Path, case_id: str) -> None:
+    """Load investigation, build and print investigation evidence graph summary."""
+    try:
+        investigation = load_investigation(database_path, case_id)
+        from ransomeye.investigation_graph import build_investigation_graph
+
+        graph = build_investigation_graph(investigation)
+        print(graph.summary(case_id))
+    except ValueError as e:
+        print(e)
+
+
+def show_attack_reconstruction(database_path: str | Path, case_id: str) -> None:
+    """Load investigation, build graph, reconstruct and print attack sequence."""
+    try:
+        investigation = load_investigation(database_path, case_id)
+        from ransomeye.investigation_graph import build_investigation_graph
+        from ransomeye.reconstruction import reconstruct_attack
+
+        graph = build_investigation_graph(investigation)
+        sequence = reconstruct_attack(investigation, graph)
+        print(sequence.summary())
+    except ValueError as e:
+        print(e)
+
+
+def show_advanced_timeline(database_path: str | Path, case_id: str) -> None:
+    """Load investigation, build graph and attack sequence, and print advanced timeline."""
+    try:
+        investigation = load_investigation(database_path, case_id)
+        from ransomeye.investigation_graph import build_investigation_graph
+        from ransomeye.reconstruction import reconstruct_attack
+        from ransomeye.advanced_timeline import build_advanced_timeline
+
+        graph = build_investigation_graph(investigation)
+        sequence = reconstruct_attack(investigation, graph)
+        timeline = build_advanced_timeline(investigation, sequence, graph)
+        print(timeline.render())
+    except ValueError as e:
+        print(e)
+
+
+def print_case_timeline(
+    database_path: str | Path,
+    case_id: str,
+    advanced: bool = False,
+) -> None:
+    """Print an analyst-friendly timeline for a stored case."""
+    if advanced:
+        show_advanced_timeline(database_path, case_id)
+        return
+
     store = EvidenceStore(database_path)
 
     try:
@@ -399,6 +450,12 @@ def verify_integrity_manifest(artifact_path: str | Path, manifest_path: str | Pa
 
 
 def main() -> None:
+    if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     parser = argparse.ArgumentParser(
         prog="ransomeye",
         description="Inspect stored RansomEye cases.",
@@ -424,6 +481,12 @@ def main() -> None:
         required=True,
         dest="case_id",
         help="Case identifier.",
+    )
+    timeline_parser.add_argument(
+        "--advanced",
+        action="store_true",
+        default=False,
+        help="Print advanced analyst timeline.",
     )
 
     tree_parser = subparsers.add_parser(
@@ -780,6 +843,57 @@ def main() -> None:
         help="Case identifier.",
     )
 
+    investigation_graph_parser = investigation_subparsers.add_parser(
+        "graph",
+        help="Show investigation evidence graph summary.",
+    )
+    investigation_graph_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    investigation_graph_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+
+    investigation_reconstruct_parser = investigation_subparsers.add_parser(
+        "reconstruct",
+        help="Reconstruct chronological attack sequence.",
+    )
+    investigation_reconstruct_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    investigation_reconstruct_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+
+    investigation_timeline_parser = investigation_subparsers.add_parser(
+        "timeline",
+        help="Show advanced investigation timeline.",
+    )
+    investigation_timeline_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    investigation_timeline_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+
     ingest_parser = subparsers.add_parser(
         "ingest",
         help="Ingest JSON or Sysmon XML evidence into a case.",
@@ -856,11 +970,27 @@ def main() -> None:
                 database_path=args.database,
                 case_id=args.case_id,
             )
+        elif args.investigation_command == "graph":
+            show_investigation_graph(
+                database_path=args.database,
+                case_id=args.case_id,
+            )
+        elif args.investigation_command == "reconstruct":
+            show_attack_reconstruction(
+                database_path=args.database,
+                case_id=args.case_id,
+            )
+        elif args.investigation_command == "timeline":
+            show_advanced_timeline(
+                database_path=args.database,
+                case_id=args.case_id,
+            )
     elif args.command == "timeline":
 
         print_case_timeline(
             database_path=args.database,
             case_id=args.case_id,
+            advanced=getattr(args, "advanced", False),
         )
     elif args.command == "tree":
         print_case_tree(
