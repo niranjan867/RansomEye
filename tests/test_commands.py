@@ -983,3 +983,45 @@ def test_investigation_timeline_and_flag_command(tmp_path):
     assert result2.returncode == 0
     assert "ADVANCED INVESTIGATION TIMELINE" in result2.stdout
     assert "PROCESS" in result2.stdout
+
+
+def test_realistic_ransomware_sequence_integration(tmp_path):
+    import os
+    db_path = tmp_path / "realistic_ransomware.db"
+    
+    samples_dir = os.path.join(os.path.dirname(__file__), "..", "samples", "sysmon")
+    xml_path = os.path.join(samples_dir, "realistic_ransomware_sequence.xml")
+    
+    result = _run_command(
+        [
+            "ingest",
+            "--database",
+            str(db_path),
+            "--case",
+            "CASE-RANSOMWARE",
+            "--file",
+            str(xml_path),
+            "--format",
+            "sysmon-xml",
+        ],
+        cwd=tmp_path,
+    )
+    
+    assert result.returncode == 0
+    assert "Events read: 7" in result.stdout
+    assert "Events accepted: 7" in result.stdout
+    assert "Events rejected: 0" in result.stdout
+    assert "Duplicates: 0" in result.stdout
+    assert "Findings: 4" in result.stdout or "Findings" in result.stdout
+    
+    # Verify we can run graph and timeline without crashing on real data
+    result2 = _run_command([
+        "investigation",
+        "timeline",
+        "--database",
+        str(db_path),
+        "--case",
+        "CASE-RANSOMWARE",
+    ])
+    assert result2.returncode == 0
+    assert "ADVANCED INVESTIGATION TIMELINE" in result2.stdout

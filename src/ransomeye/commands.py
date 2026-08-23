@@ -29,10 +29,10 @@ from ransomeye.investigation import load_investigation, get_investigation_summar
 def parse_evidence_file(
     file_path: str | Path,
     format_type: str = "auto",
-) -> tuple[list[dict[str, Any]], str]:
+) -> tuple[list[dict[str, Any]], int, str]:
     """Parse raw evidence from JSON or Sysmon XML file.
 
-    Returns a tuple of (raw_events_list, detected_format_name).
+    Returns a tuple of (raw_events_list, rejected_count, detected_format_name).
     """
     path = Path(file_path)
     if not path.is_file():
@@ -81,55 +81,28 @@ def parse_evidence_file(
         else:
             raise ValueError("JSON must contain an event object, a list of events, or an object with an 'events' list.")
 
-        return raw_events, "json"
+        return raw_events, 0, "json"
 
     elif resolved_format in ("sysmon-xml", "xml"):
+        from ransomeye.sysmon_reader import iter_sysmon_events
         events = []
-        try:
-            root = ET.fromstring(content)
-            local_tag = root.tag.rsplit("}", 1)[-1]
-            if local_tag == "Event":
-                parsed = parse_sysmon_event(content)
-                if parsed:
-                    events.append(parsed)
-            elif local_tag in ("Events", "root", "Sysmon"):
-                for elem in root:
-                    if elem.tag.rsplit("}", 1)[-1] == "Event":
-                        elem_xml = ET.tostring(elem, encoding="utf-8").decode("utf-8")
-                        parsed = parse_sysmon_event(elem_xml)
-                        if parsed:
-                            events.append(parsed)
+        rejected = 0
+        
+        for item in iter_sysmon_events(content):
+            if item["error"] is None and item["parsed"] is not None:
+                events.append(item["parsed"])
             else:
-                for elem in root.iter():
-                    if elem.tag.rsplit("}", 1)[-1] == "Event":
-                        elem_xml = ET.tostring(elem, encoding="utf-8").decode("utf-8")
-                        parsed = parse_sysmon_event(elem_xml)
-                        if parsed:
-                            events.append(parsed)
-        except ET.ParseError:
-            # Fallback for XML fragments / multi-root concatenated event streams
-            for chunk in content.split("</Event>"):
-                chunk = chunk.strip()
-                if not chunk:
-                    continue
-                if "<Event" in chunk:
-                    start_idx = chunk.find("<Event")
-                    chunk = chunk[start_idx:] + "</Event>"
-                    try:
-                        parsed = parse_sysmon_event(chunk)
-                        if parsed:
-                            events.append(parsed)
-                    except Exception:
-                        pass
+                rejected += 1
 
-        if not events:
+        if not events and rejected == 0:
             raise ValueError(f"No valid Sysmon XML events found in {path.name}")
+        elif not events and rejected > 0:
+            raise ValueError(f"No valid Sysmon XML events found in {path.name} (rejected {rejected} malformed/unsupported events)")
 
-        return events, "sysmon-xml"
+        return events, rejected, "sysmon-xml"
 
     else:
         raise ValueError(f"Unsupported format: {format_type}")
-
 
 def ingest_evidence(
     database_path: str | Path,
@@ -140,7 +113,7 @@ def ingest_evidence(
     host: str | None = None,
 ) -> dict[str, Any]:
     """Ingest evidence from file into a case, normalize, store, and assess threat."""
-    raw_events, detected_format = parse_evidence_file(file_path, format_type=format_type)
+    raw_events, rejected_count, detected_format = parse_evidence_file(file_path, format_type=format_type)
 
     if not raw_events:
         raise ValueError("No events found to ingest")
@@ -183,15 +156,17 @@ def ingest_evidence(
 
         assessment = assess_threat(all_case_events)
         store.save_assessment(case_id, assessment)
+        
+        events_read = accepted_count + duplicate_count + rejected_count
 
         return {
             "database": str(database_path),
             "case_id": case_id,
             "input_file": Path(file_path).name,
             "format": detected_format,
-            "events_read": len(raw_events),
+            "events_read": events_read,
             "events_accepted": accepted_count,
-            "events_rejected": 0,
+            "events_rejected": rejected_count,
             "duplicates": duplicate_count,
             "findings_count": len(all_findings),
             "correlations_count": len(assessment.get("correlations", [])),
@@ -200,7 +175,6 @@ def ingest_evidence(
         }
     finally:
         store.close()
-
 
 def show_investigation(database_path: str | Path, case_id: str) -> None:
     """Load and print an investigation summary."""

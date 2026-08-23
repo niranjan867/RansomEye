@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
-from typing import Any
+from typing import Any, Iterator, Dict
 
 
 SYSMON_CHANNEL = "Microsoft-Windows-Sysmon/Operational"
@@ -258,6 +258,51 @@ def parse_sysmon_event(xml_text: str) -> dict[str, Any] | None:
     return result
 
 
+def iter_sysmon_events(xml_text: str) -> Iterator[Dict[str, Any]]:
+    """Yield normalized events from an XML document or concatenated stream.
+    
+    Safe streaming fallback: If ET.fromstring fails (e.g. malformed wrappers,
+    concatenated event streams), fall back to chunking strictly by Event tags.
+    """
+    index = 0
+    try:
+        root = ET.fromstring(xml_text)
+        local_tag = _local_name(root.tag)
+        events = []
+        if local_tag == "Event":
+            events.append(root)
+        else:
+            for element in root.iter():
+                if _local_name(element.tag) == "Event":
+                    events.append(element)
+                    
+        for ev in events:
+            ev_str = ET.tostring(ev, encoding="utf-8").decode("utf-8")
+            parsed = parse_sysmon_event(ev_str)
+            if parsed is None:
+                yield {"index": index, "xml": ev_str, "error": "Unsupported or malformed EventID", "parsed": None}
+            else:
+                yield {"index": index, "xml": ev_str, "error": None, "parsed": parsed}
+            index += 1
+        return
+    except ET.ParseError:
+        pass
+        
+    # Fallback to chunking
+    import re
+    # Find <Event ...> ... </Event> non-greedily
+    pattern = re.compile(r'(<[\w:]*Event[\s>].*?</[\w:]*Event>)', re.DOTALL | re.IGNORECASE)
+    
+    for match in pattern.finditer(xml_text):
+        ev_str = match.group(1).strip()
+        parsed = parse_sysmon_event(ev_str)
+        if parsed is None:
+            yield {"index": index, "xml": ev_str, "error": "Unsupported or malformed EventID or Parse Error", "parsed": None}
+        else:
+            yield {"index": index, "xml": ev_str, "error": None, "parsed": parsed}
+        index += 1
+
+
 def parse_process_creation_event(xml_text: str) -> dict[str, Any]:
     """Compatibility wrapper for Sysmon Event ID 1 XML event parsing."""
     try:
@@ -340,18 +385,11 @@ def read_sysmon_events(limit: int = 100, event_ids: list[int] | None = None) -> 
         raise SysmonReaderError(message)
 
     events: list[dict[str, Any]] = []
-
-    for xml_text in result.stdout.split("</Event>"):
-        xml_text = xml_text.strip()
-
-        if not xml_text:
-            continue
-
-        xml_text += "</Event>"
-
-        parsed = parse_sysmon_event(xml_text)
-        if parsed is not None:
-            events.append(parsed)
+    
+    # Use our robust iterator on the command output
+    for item in iter_sysmon_events(result.stdout):
+        if item["error"] is None and item["parsed"] is not None:
+            events.append(item["parsed"])
 
     return events
 

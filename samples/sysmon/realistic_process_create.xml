@@ -1,0 +1,42 @@
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <Provider Name="Microsoft-Windows-Sysmon" Guid="{5770385F-C22A-43E0-BF4C-06F5698FFBD9}" />
+    <EventID>1</EventID>
+    <Version>5</Version>
+    <Level>4</Level>
+    <Task>1</Task>
+    <Opcode>0</Opcode>
+    <Keywords>0x8000000000000000</Keywords>
+    <TimeCreated SystemTime="2026-08-22T10:00:00.0000000Z" />
+    <EventRecordID>1000</EventRecordID>
+    <Correlation />
+    <Execution ProcessID="2000" ThreadID="3000" />
+    <Channel>Microsoft-Windows-Sysmon/Operational</Channel>
+    <Computer>LAPTOP-TEST</Computer>
+    <Security UserID="S-1-5-18" />
+  </System>
+  <EventData>
+    <Data Name="RuleName">-</Data>
+    <Data Name="UtcTime">2026-08-22 10:00:00.000</Data>
+    <Data Name="ProcessGuid">{33333333-3333-3333-3333-333333333333}</Data>
+    <Data Name="ProcessId">1000</Data>
+    <Data Name="Image">C:\Windows\System32\explorer.exe</Data>
+    <Data Name="FileVersion">10.0.19041.1 (WinBuild.160101.0800)</Data>
+    <Data Name="Description">Windows Explorer</Data>
+    <Data Name="Product">Microsoft® Windows® Operating System</Data>
+    <Data Name="Company">Microsoft Corporation</Data>
+    <Data Name="OriginalFileName">EXPLORER.EXE</Data>
+    <Data Name="CommandLine">C:\Windows\Explorer.EXE</Data>
+    <Data Name="CurrentDirectory">C:\Windows\</Data>
+    <Data Name="User">TEST\Analyst</Data>
+    <Data Name="LogonGuid">{33333333-3333-3333-3333-333333333333}</Data>
+    <Data Name="LogonId">0x3e7</Data>
+    <Data Name="TerminalSessionId">1</Data>
+    <Data Name="IntegrityLevel">Medium</Data>
+    <Data Name="Hashes">SHA1=1234567890ABCDEF1234567890ABCDEF12345678,MD5=1234567890ABCDEF1234567890ABCDEF,SHA256=1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF</Data>
+    <Data Name="ParentProcessGuid">{11111111-1111-1111-1111-111111111111}</Data>
+    <Data Name="ParentProcessId">500</Data>
+    <Data Name="ParentImage">C:\Windows\System32\userinit.exe</Data>
+    <Data Name="ParentCommandLine">C:\Windows\system32\userinit.exe</Data>
+  </EventData>
+</Event>

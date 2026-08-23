@@ -149,3 +149,95 @@ def test_registry_normalization():
     parsed = parse_sysmon_event(xml_text)
     assert parsed["event_type"] == "registry_create"
     assert "HKLM" in parsed["registry_path"]
+
+def test_iter_sysmon_events_multiple_blocks():
+    from ransomeye.sysmon_reader import iter_sysmon_events
+    xml_text = '''<Event><System><EventID>1</EventID></System><EventData><Data Name="ProcessId">100</Data></EventData></Event>
+    <Event><System><EventID>3</EventID></System><EventData><Data Name="ProcessId">100</Data></EventData></Event>'''
+    
+    events = list(iter_sysmon_events(xml_text))
+    assert len(events) == 2
+    assert events[0]["error"] is None
+    assert events[1]["error"] is None
+    assert events[0]["parsed"]["event_type"] == "process_creation"
+    assert events[1]["parsed"]["event_type"] == "network_connect"
+
+def test_iter_sysmon_events_with_namespaces():
+    from ransomeye.sysmon_reader import iter_sysmon_events
+    xml_text = '''<Events>
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+<System><EventID>1</EventID></System>
+<EventData><Data Name="ProcessId">100</Data></EventData>
+</Event>
+</Events>'''
+    events = list(iter_sysmon_events(xml_text))
+    assert len(events) == 1
+    assert events[0]["parsed"]["event_type"] == "process_creation"
+
+def test_iter_sysmon_events_malformed_fallback():
+    from ransomeye.sysmon_reader import iter_sysmon_events
+    xml_text = '''<Events>
+<Event><System><EventID>1</EventID></System><EventData><Data Name="ProcessId">100</Data></EventData></Event>
+<Event><System><EventID>1</EventID></System> <UnclosedTag> BAD XML HERE </Event>
+<Event><System><EventID>3</EventID></System><EventData><Data Name="ProcessId">100</Data></EventData></Event>
+'''
+    events = list(iter_sysmon_events(xml_text))
+    assert len(events) == 3
+    assert events[0]["parsed"]["event_type"] == "process_creation"
+    assert events[1]["error"] is not None
+    assert events[1]["parsed"] is None
+    assert events[2]["parsed"]["event_type"] == "network_connect"
+
+def test_realistic_fixtures_parse_successfully():
+    import os
+    from ransomeye.sysmon_reader import parse_sysmon_event
+    
+    fixtures = [
+        "realistic_process_create.xml",
+        "realistic_network_connect.xml",
+        "realistic_file_create.xml",
+        "realistic_dns_query.xml",
+        "realistic_file_delete.xml"
+    ]
+    
+    for fixture in fixtures:
+        path = os.path.join(SAMPLES_DIR, fixture)
+        with open(path, "r", encoding="utf-8") as f:
+            xml = f.read()
+        parsed = parse_sysmon_event(xml)
+        assert parsed is not None, f"Failed to parse {fixture}"
+
+def test_optional_fields_preservation():
+    import os
+    from ransomeye.sysmon_reader import parse_sysmon_event
+    path = os.path.join(SAMPLES_DIR, "realistic_process_create.xml")
+    with open(path, "r", encoding="utf-8") as f:
+        xml = f.read()
+    parsed = parse_sysmon_event(xml)
+    assert parsed["metadata"]["TerminalSessionId"] == "1"
+    assert parsed["metadata"]["IntegrityLevel"] == "Medium"
+    assert parsed["parent_process_guid"] == "{11111111-1111-1111-1111-111111111111}"
+    assert parsed["parent_pid"] == "500"
+
+def test_network_preservation():
+    import os
+    from ransomeye.sysmon_reader import parse_sysmon_event
+    path = os.path.join(SAMPLES_DIR, "realistic_network_connect.xml")
+    with open(path, "r", encoding="utf-8") as f:
+        xml = f.read()
+    parsed = parse_sysmon_event(xml)
+    assert "network" in parsed
+    assert parsed["network"]["protocol"] == "tcp"
+    assert parsed["network"]["source_ip"] == "192.168.1.100"
+    assert parsed["network"]["destination_ip"] == "203.0.113.55"
+
+def test_dns_preservation():
+    import os
+    from ransomeye.sysmon_reader import parse_sysmon_event
+    path = os.path.join(SAMPLES_DIR, "realistic_dns_query.xml")
+    with open(path, "r", encoding="utf-8") as f:
+        xml = f.read()
+    parsed = parse_sysmon_event(xml)
+    assert "network" in parsed
+    assert parsed["network"]["query_name"] == "evil-corp.test"
+    assert parsed["network"]["query_results"] == "::ffff:203.0.113.55;"
