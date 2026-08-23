@@ -87,7 +87,7 @@ def parse_evidence_file(
         from ransomeye.sysmon_reader import iter_sysmon_events
         events = []
         rejected = 0
-        
+
         for item in iter_sysmon_events(content):
             if item["error"] is None and item["parsed"] is not None:
                 events.append(item["parsed"])
@@ -156,7 +156,7 @@ def ingest_evidence(
 
         assessment = assess_threat(all_case_events)
         store.save_assessment(case_id, assessment)
-        
+
         events_read = accepted_count + duplicate_count + rejected_count
 
         return {
@@ -911,6 +911,57 @@ def main() -> None:
         help="Optional host name if creating a new case.",
     )
 
+    evidence_parser = subparsers.add_parser(
+        "evidence",
+        help="Interrogate and search case evidence.",
+    )
+    evidence_subparsers = evidence_parser.add_subparsers(dest="evidence_command", required=True)
+
+    evidence_search_parser = evidence_subparsers.add_parser(
+        "search",
+        help="Search events for a specific query string.",
+    )
+    evidence_search_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    evidence_search_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+    evidence_search_parser.add_argument(
+        "--query",
+        required=True,
+        help="Search indicator or text fragment.",
+    )
+
+    evidence_inspect_parser = evidence_subparsers.add_parser(
+        "inspect",
+        help="Inspect a specific event by ID.",
+    )
+    evidence_inspect_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    evidence_inspect_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+    evidence_inspect_parser.add_argument(
+        "--event",
+        required=True,
+        dest="event_id",
+        help="Event identifier.",
+    )
+
     args = parser.parse_args()
 
     if args.command == "ingest":
@@ -1204,13 +1255,65 @@ def main() -> None:
                 print(f"Database restored: {restored_path}")
             except (FileExistsError, FileNotFoundError, OSError, sqlite3.Error) as exc:
                 parser.exit(1, f"Database restore failed: {exc}\n")
+    elif args.command == "evidence":
+        store = EvidenceStore(args.database)
+        try:
+            case = store.get_case(args.case_id)
+            if not case:
+                parser.exit(1, f"Case not found: {args.case_id}\n")
 
+            if args.evidence_command == "search":
+                if not args.query:
+                    parser.exit(1, "Query cannot be empty\n")
 
+                events = store.search_events(args.case_id, args.query)
 
+                print("RANSOMEYE EVIDENCE SEARCH")
+                print("=========================\n")
+                print(f"Case: {args.case_id}")
+                print(f"Query: {args.query}")
+                print(f"Matches: {len(events)}\n")
 
+                if not events:
+                    print("No matching evidence found.")
+                else:
+                    print(f"{'Timestamp':<25} {'Event ID':<21} {'Event Type':<17} {'Summary'}")
+                    print(f"{'-'*9:<25} {'-'*8:<21} {'-'*10:<17} {'-'*7}")
+                    for event in events:
+                        ts = (event.get("timestamp") or "").replace("T", " ").replace("Z", "")
+                        eid = event.get("event_id") or ""
+                        if len(eid) > 20:
+                            eid = eid[:17] + "..."
+                        etype = (event.get("event_type") or "")[:16]
 
+                        summary = ""
+                        if event.get("process_name"):
+                            summary = event["process_name"].split("\\")[-1]
+                            if event.get("network_json"):
+                                net = event["network_json"]
+                                if net.get("DestinationIp"):
+                                    summary += f" -> {net.get('DestinationIp')}:{net.get('DestinationPort', '')}"
+                        elif event.get("file_path"):
+                            summary = event["file_path"].split("\\")[-1]
+                        elif event.get("network_json"):
+                            net = event["network_json"]
+                            if net.get("QueryName"):
+                                summary = net["QueryName"]
+                        elif event.get("command_line"):
+                            summary = event["command_line"][:50]
 
+                        print(f"{ts:<25} {eid:<21} {etype:<17} {summary}")
 
+            elif args.evidence_command == "inspect":
+                event = store.get_event(args.case_id, args.event_id)
+                if not event:
+                    parser.exit(1, f"Event not found\n")
+                print(json.dumps(event, indent=2, ensure_ascii=False))
+
+        except (ValueError, KeyError, sqlite3.Error, OSError) as exc:
+            parser.exit(1, f"{exc}\n")
+        finally:
+            store.close()
 
 if __name__ == "__main__":
     main()

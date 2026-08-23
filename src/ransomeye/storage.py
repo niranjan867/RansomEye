@@ -709,6 +709,80 @@ class EvidenceStore:
 
         return [dict(row) for row in rows]
 
+    def get_event(self, case_id: str, event_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """
+            SELECT *
+            FROM events
+            WHERE case_id = ? AND event_id = ?
+            """,
+            (case_id, event_id),
+        ).fetchone()
+
+        if not row:
+            return None
+
+        event = dict(row)
+        if event.get("network_json"):
+            try:
+                event["network_json"] = json.loads(event["network_json"])
+            except json.JSONDecodeError:
+                event["network_json"] = {}
+        if event.get("metadata_json"):
+            try:
+                event["metadata_json"] = json.loads(event["metadata_json"])
+            except json.JSONDecodeError:
+                event["metadata_json"] = {}
+        return event
+
+    def search_events(self, case_id: str, query: str) -> list[dict[str, Any]]:
+        if not query:
+            return []
+
+        like_query = f"%{query}%"
+        rows = self.connection.execute(
+            """
+            SELECT *
+            FROM events
+            WHERE case_id = ?
+            AND (
+                LOWER(event_id) LIKE LOWER(?) OR
+                LOWER(source) LIKE LOWER(?) OR
+                LOWER(event_type) LIKE LOWER(?) OR
+                LOWER(process_name) LIKE LOWER(?) OR
+                LOWER(file_path) LIKE LOWER(?) OR
+                LOWER(command_line) LIKE LOWER(?) OR
+                LOWER(process_guid) LIKE LOWER(?) OR
+                LOWER(parent_process_guid) LIKE LOWER(?) OR
+                LOWER(network_json) LIKE LOWER(?) OR
+                LOWER(metadata_json) LIKE LOWER(?)
+            )
+            ORDER BY timestamp ASC, event_id ASC
+            """,
+            (
+                case_id,
+                like_query, like_query, like_query, like_query,
+                like_query, like_query, like_query, like_query,
+                like_query, like_query
+            ),
+        ).fetchall()
+
+        events = []
+        for row in rows:
+            event = dict(row)
+            if event.get("network_json"):
+                try:
+                    event["network_json"] = json.loads(event["network_json"])
+                except json.JSONDecodeError:
+                    event["network_json"] = {}
+            if event.get("metadata_json"):
+                try:
+                    event["metadata_json"] = json.loads(event["metadata_json"])
+                except json.JSONDecodeError:
+                    event["metadata_json"] = {}
+            events.append(event)
+        return events
+
     def get_case_findings(self, case_id: str) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             """

@@ -988,10 +988,10 @@ def test_investigation_timeline_and_flag_command(tmp_path):
 def test_realistic_ransomware_sequence_integration(tmp_path):
     import os
     db_path = tmp_path / "realistic_ransomware.db"
-    
+
     samples_dir = os.path.join(os.path.dirname(__file__), "..", "samples", "sysmon")
     xml_path = os.path.join(samples_dir, "realistic_ransomware_sequence.xml")
-    
+
     result = _run_command(
         [
             "ingest",
@@ -1006,14 +1006,14 @@ def test_realistic_ransomware_sequence_integration(tmp_path):
         ],
         cwd=tmp_path,
     )
-    
+
     assert result.returncode == 0
     assert "Events read: 7" in result.stdout
     assert "Events accepted: 7" in result.stdout
     assert "Events rejected: 0" in result.stdout
     assert "Duplicates: 0" in result.stdout
     assert "Findings: 4" in result.stdout or "Findings" in result.stdout
-    
+
     # Verify we can run graph and timeline without crashing on real data
     result2 = _run_command([
         "investigation",
@@ -1025,3 +1025,60 @@ def test_realistic_ransomware_sequence_integration(tmp_path):
     ])
     assert result2.returncode == 0
     assert "ADVANCED INVESTIGATION TIMELINE" in result2.stdout
+
+
+def test_command_evidence_search_inspect(tmp_path, capsys):
+    from ransomeye.commands import main
+    from ransomeye.storage import EvidenceStore
+    import sys
+    from unittest.mock import patch
+    import json
+
+    db_path = tmp_path / "cli_search.db"
+    store = EvidenceStore(db_path)
+    store.create_case("CASE-CLI", "CLI Search Test")
+
+    event_network = {
+        "event_id": "EVT-NET-CLI",
+        "timestamp": "2026-08-08T15:00:00Z",
+        "source": "sysmon",
+        "event_type": "network_connect",
+        "process_name": "powershell.exe",
+        "command_line": "powershell.exe -enc XYZ",
+        "network": {"DestinationIp": "203.0.113.55"},
+        "metadata": {"test": "val"},
+    }
+    store.save_event("CASE-CLI", event_network)
+    store.close()
+
+    # 1. evidence search returns matching rows
+    with patch.object(sys, "argv", ["ransomeye", "evidence", "search", "--database", str(db_path), "--case", "CASE-CLI", "--query", "203.0.113.55"]):
+        main()
+    out, err = capsys.readouterr()
+    assert "EVT-NET-CLI" in out
+    assert "203.0.113.55" in out
+
+    # 2. evidence search returns no-match output
+    with patch.object(sys, "argv", ["ransomeye", "evidence", "search", "--database", str(db_path), "--case", "CASE-CLI", "--query", "NOTFOUND123"]):
+        main()
+    out, err = capsys.readouterr()
+    assert "No matching evidence found" in out
+
+    # 3. evidence inspect prints valid JSON with network data
+    with patch.object(sys, "argv", ["ransomeye", "evidence", "inspect", "--database", str(db_path), "--case", "CASE-CLI", "--event", "EVT-NET-CLI"]):
+        main()
+    out, err = capsys.readouterr()
+
+    parsed = json.loads(out)
+    assert parsed["event_id"] == "EVT-NET-CLI"
+    assert parsed["network_json"]["DestinationIp"] == "203.0.113.55"
+    assert parsed["metadata_json"]["test"] == "val"
+
+    # 4. missing event returns clear error
+    with patch.object(sys, "argv", ["ransomeye", "evidence", "inspect", "--database", str(db_path), "--case", "CASE-CLI", "--event", "EVT-MISSING"]):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 1
+    out, err = capsys.readouterr()
+    assert "Event not found" in err
