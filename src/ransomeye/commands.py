@@ -344,6 +344,235 @@ def show_investigation_incident(database_path: str | Path, case_id: str, inciden
         store.close()
 
 
+
+def show_investigation_process(database_path: str | Path, case_id: str, process_query: str) -> None:
+    """Isolate and print a specific process profile."""
+    try:
+        from ransomeye.investigation_graph import build_investigation_graph
+        investigation = load_investigation(database_path, case_id)
+        graph = build_investigation_graph(investigation)
+
+        process_nodes = graph.get_process_nodes()
+        matched_nodes = []
+
+        target_id = f"PROCESS:{process_query}"
+        node = graph.get_node(target_id)
+        if node:
+            matched_nodes = [node]
+        else:
+            for n in process_nodes:
+                if str(n.attributes.get("pid")) == str(process_query):
+                    matched_nodes.append(n)
+
+        if not matched_nodes:
+            print(f"Process not found in case: {process_query}")
+            sys.exit(1)
+
+        if len(matched_nodes) > 1:
+            print(f"Multiple processes matched PID: {process_query}")
+            for n in matched_nodes:
+                guid = n.node_id.replace("PROCESS:", "") if not n.node_id.startswith("PROCESS:PID:") else "N/A"
+                ts = "unknown"
+                for ev in investigation.evidence:
+                    if str(ev.pid) == str(process_query) and (guid == "N/A" or ev.process_guid == guid):
+                        if ev.timestamp:
+                            ts = str(ev.timestamp)
+                            break
+                print(f"- {n.node_id} at {ts}")
+            sys.exit(1)
+
+        target_node = matched_nodes[0]
+
+        process_name = target_node.label
+        pid = target_node.attributes.get("pid", "unavailable")
+        guid = target_node.node_id.replace("PROCESS:", "") if not target_node.node_id.startswith("PROCESS:PID:") else "unavailable"
+        image_path = target_node.attributes.get("image") or target_node.attributes.get("image_path") or "unavailable"
+        command_line = target_node.attributes.get("command_line") or "unavailable"
+        timestamp = "unavailable"
+
+        for ev in investigation.evidence:
+            if ev.process_guid == guid or (str(ev.pid) == str(pid) and (guid == "unavailable" or ev.process_guid == guid)):
+                if getattr(ev, "image_path", None) and image_path == "unavailable":
+                    image_path = ev.image_path
+                if ev.command_line and command_line == "unavailable":
+                    command_line = ev.command_line
+                if ev.timestamp and timestamp == "unavailable":
+                    timestamp = str(ev.timestamp)
+                if image_path != "unavailable" and command_line != "unavailable" and timestamp != "unavailable":
+                    break
+        print(f"DEBUG: after loop image_path={image_path}")
+        print("RANSOMEYE PROCESS PROFILE")
+        print("=========================\n")
+        print(f"Case: {case_id}")
+        print(f"Process: {process_name}")
+        print(f"PID: {pid}")
+        print(f"GUID: {guid}")
+        print(f"Image: {image_path}")
+        print(f"Command Line: {command_line}")
+        print(f"Timestamp: {timestamp}")
+        print("")
+
+        incoming_spawned = [e for e in graph.get_edges_for_node(target_node.node_id) if e.target_id == target_node.node_id and e.relationship == "SPAWNED"]
+        outgoing_spawned = [e for e in graph.get_edges_for_node(target_node.node_id) if e.source_id == target_node.node_id and e.relationship == "SPAWNED"]
+
+        print("--- PARENT ---")
+        parent_str = "unavailable"
+        if incoming_spawned:
+            parent_node = graph.get_node(incoming_spawned[0].source_id)
+            if parent_node:
+                p_pid = parent_node.attributes.get("pid", "unknown")
+                p_guid = parent_node.node_id.replace("PROCESS:", "") if not parent_node.node_id.startswith("PROCESS:PID:") else "N/A"
+                parent_str = f"{parent_node.label} (PID {p_pid})"
+                if p_guid != "N/A":
+                    parent_str += f" [{p_guid}]"
+        print(f"Parent: {parent_str}")
+        print("")
+
+        children = []
+        for edge in outgoing_spawned:
+            child_node = graph.get_node(edge.target_id)
+            if child_node:
+                c_pid = child_node.attributes.get("pid", "unknown")
+                c_guid = child_node.node_id.replace("PROCESS:", "") if not child_node.node_id.startswith("PROCESS:PID:") else "N/A"
+
+                ts = ""
+                if edge.evidence_ids:
+                    ev_id = edge.evidence_ids[0]
+                    for ev in investigation.evidence:
+                        if ev.event_id == ev_id:
+                            ts = str(ev.timestamp or "")
+                            break
+
+                children.append({
+                    "name": child_node.label,
+                    "pid": c_pid,
+                    "guid": c_guid,
+                    "rel": edge.relationship,
+                    "ts": ts
+                })
+
+        children.sort(key=lambda x: (x["ts"], x["guid"]))
+
+        print(f"--- CHILDREN ({len(children)}) ---")
+        if not children:
+            print("None")
+        else:
+            for child in children:
+                c_guid_str = f" [{child['guid']}]" if child['guid'] != "N/A" else ""
+                print(f"- {child['name']} (PID {child['pid']}){c_guid_str} - {child['rel']}")
+
+        print("")
+
+        files_edges = [e for e in graph.get_edges_for_node(target_node.node_id) if e.source_id == target_node.node_id and e.relationship in ("CREATED", "MODIFIED", "DELETED", "RENAMED")]
+        files_edges.sort(key=lambda e: (e.relationship, graph.get_node(e.target_id).attributes.get("file_path", "") if graph.get_node(e.target_id) else ""))
+
+        print(f"--- FILES TOUCHED ({len(files_edges)}) ---")
+        if not files_edges:
+            print("None")
+        else:
+            for edge in files_edges:
+                f_node = graph.get_node(edge.target_id)
+                if f_node:
+                    f_path = f_node.attributes.get("file_path", f_node.label)
+                    print(f"- {edge.relationship}: {f_path}")
+
+        print("")
+
+        network_edges = [e for e in graph.get_edges_for_node(target_node.node_id) if e.source_id == target_node.node_id and graph.get_node(e.target_id) and graph.get_node(e.target_id).node_type == "NETWORK"]
+
+        net_items = []
+        for edge in network_edges:
+            n_node = graph.get_node(edge.target_id)
+            if n_node:
+                ts = ""
+                if edge.evidence_ids:
+                    ev_id = edge.evidence_ids[0]
+                    for ev in investigation.evidence:
+                        if ev.event_id == ev_id:
+                            ts = str(ev.timestamp or "")
+                            break
+                proto = n_node.attributes.get("protocol") or n_node.attributes.get("Protocol") or ""
+                proto_str = f" [{proto}]" if proto else ""
+                rel_str = edge.relationship if edge.relationship != "CONNECTED_TO" else "CONNECTED"
+
+                # Check for DNS
+                if n_node.attributes.get("QueryName"):
+                    rel_str = "DNS QUERY"
+                    label = n_node.attributes.get("QueryName")
+                    proto_str = ""
+                else:
+                    label = n_node.label
+
+                net_items.append({
+                    "ts": ts,
+                    "label": label,
+                    "rel": rel_str,
+                    "proto": proto_str
+                })
+
+        net_items.sort(key=lambda x: (x["ts"], x["label"]))
+        print(f"--- NETWORK CONNECTIONS ({len(net_items)}) ---")
+        if not net_items:
+            print("None")
+        else:
+            for n in net_items:
+                print(f"- {n['rel']}: {n['label']}{n['proto']}")
+
+        print("")
+
+        # Associated Findings
+        # A finding is associated if there is a SUPPORTS edge from an EVIDENCE node to the FINDING node,
+        # AND that EVIDENCE node has an INVOLVED edge from the PROCESS node.
+        # Or, since we only need associated findings, we can just look at findings whose evidence contains the process.
+
+        # We can just look for FINDING nodes in the graph where a SUPPORTS edge comes from an EVIDENCE node that is connected to our PROCESS node.
+        # Wait, the graph builder in investigation_graph.py links FINDINGS.
+        associated_finding_ids = set()
+
+        # First find all EVIDENCE nodes connected to this PROCESS
+        ev_edges = [e for e in graph.get_edges_for_node(target_node.node_id) if e.source_id == target_node.node_id or e.target_id == target_node.node_id]
+        process_ev_ids = set()
+        for e in ev_edges:
+            if e.evidence_ids:
+                process_ev_ids.update(e.evidence_ids)
+
+        # Now find findings connected to these evidence IDs
+        finding_nodes = graph.get_finding_nodes()
+        associated_findings = []
+        for fn in finding_nodes:
+            # check if any SUPPORTS edge from evidence to finding matches process_ev_ids
+            supports_edges = [e for e in graph.get_edges_for_node(fn.node_id) if e.target_id == fn.node_id and e.relationship == "SUPPORTS"]
+            is_associated = False
+            for se in supports_edges:
+                ev_id = se.source_id.replace("EVIDENCE:", "")
+                if ev_id in process_ev_ids:
+                    is_associated = True
+                    break
+            if is_associated:
+                associated_findings.append(fn)
+
+        associated_findings.sort(key=lambda fn: fn.node_id)
+        print(f"--- ASSOCIATED FINDINGS ({len(associated_findings)}) ---")
+        if not associated_findings:
+            print("None")
+        else:
+            for fn in associated_findings:
+                fid = fn.node_id.replace("FINDING:", "")
+                ftype = fn.attributes.get("finding_type", "unknown")
+                tech = fn.attributes.get("technique", "unavailable")
+                score = fn.attributes.get("score", "unavailable")
+                reason = fn.attributes.get("reason", "unavailable")
+
+                print(f"- {fid} ({ftype})")
+                print(f"  Technique: {tech}")
+                print(f"  Score: {score}")
+                print(f"  Reason: {reason}")
+
+    except ValueError as e:
+        print(e)
+        sys.exit(1)
+
+
 def show_attack_reconstruction(database_path: str | Path, case_id: str) -> None:
     """Load investigation, build graph, reconstruct and print attack sequence."""
     try:
@@ -1038,6 +1267,29 @@ def main() -> None:
         help="Incident identifier.",
     )
 
+    investigation_process_parser = investigation_subparsers.add_parser(
+        "process",
+        help="View a specific process profile.",
+    )
+    investigation_process_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    investigation_process_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+    investigation_process_parser.add_argument(
+        "--process",
+        required=True,
+        dest="process_query",
+        help="Process GUID or PID.",
+    )
+
     ingest_parser = subparsers.add_parser(
         "ingest",
         help="Ingest JSON or Sysmon XML evidence into a case.",
@@ -1193,6 +1445,12 @@ def main() -> None:
                 database_path=args.database,
                 case_id=args.case_id,
                 incident_id=args.incident_id,
+            )
+        elif args.investigation_command == "process":
+            show_investigation_process(
+                database_path=args.database,
+                case_id=args.case_id,
+                process_query=args.process_query,
             )
         elif args.investigation_command == "graph":
             show_investigation_graph(

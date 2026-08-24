@@ -1045,7 +1045,7 @@ def test_command_evidence_search_inspect(tmp_path, capsys):
         "event_type": "network_connect",
         "process_name": "powershell.exe",
         "command_line": "powershell.exe -enc XYZ",
-        "network": {"DestinationIp": "203.0.113.55"},
+        "network": {"destination_ip": "203.0.113.55"},
         "metadata": {"test": "val"},
     }
     store.save_event("CASE-CLI", event_network)
@@ -1071,7 +1071,7 @@ def test_command_evidence_search_inspect(tmp_path, capsys):
 
     parsed = json.loads(out)
     assert parsed["event_id"] == "EVT-NET-CLI"
-    assert parsed["network_json"]["DestinationIp"] == "203.0.113.55"
+    assert parsed["network_json"]["destination_ip"] == "203.0.113.55"
     assert parsed["metadata_json"]["test"] == "val"
 
     # 4. missing event returns clear error
@@ -1105,7 +1105,7 @@ def test_command_evidence_trace(tmp_path, capsys):
         "parent_pid": 100,
         "process_guid": "{AAAA-BBBB}",
         "parent_process_guid": "{CCCC-DDDD}",
-        "network": {"DestinationIp": "203.0.113.55"},
+        "network": {"destination_ip": "203.0.113.55"},
         "metadata": {"test": "val"},
     }
 
@@ -1306,3 +1306,150 @@ def test_command_investigation_incident(tmp_path, capsys):
     assert "--- FINDINGS (0) ---" in out
     # Actually wait, my code prints --- FINDINGS (0) --- followed by "None"
     assert "--- EVIDENCE (0) ---" in out
+
+
+def test_command_investigation_process(tmp_path, capsys):
+    from ransomeye.commands import main
+    from ransomeye.storage import EvidenceStore
+    import sys
+    from unittest.mock import patch
+
+    db_path = tmp_path / "cli_process.db"
+    store = EvidenceStore(db_path)
+    store.create_case("CASE-PROC", "CLI Process Test")
+
+    # A parent process
+    event_1 = {
+        "event_id": "EVT-PROC-01",
+        "timestamp": "2026-08-08T15:00:00Z",
+        "source": "sysmon",
+        "event_type": "process_creation",
+        "process_name": "cmd.exe",
+        "command_line": "cmd.exe /c start",
+        "pid": 100,
+        "process_guid": "{CMD-GUID}",
+        "image_path": "C:\\Windows\\System32\\cmd.exe",
+    }
+
+    # A target child process
+    event_2 = {
+        "event_id": "EVT-PROC-02",
+        "timestamp": "2026-08-08T15:01:00Z",
+        "source": "sysmon",
+        "event_type": "process_creation",
+        "process_name": "powershell.exe",
+        "command_line": "powershell.exe -enc XYZ",
+        "pid": 200,
+        "parent_pid": 100,
+        "process_guid": "{PS-GUID}",
+        "parent_process_guid": "{CMD-GUID}",
+        "image_path": "C:\\Windows\\System32\\powershell.exe",
+        "parent_image": "C:\\Windows\\System32\\cmd.exe",
+    }
+
+    # Target process spawns a child
+    event_3 = {
+        "event_id": "EVT-PROC-03",
+        "timestamp": "2026-08-08T15:02:00Z",
+        "source": "sysmon",
+        "event_type": "process_creation",
+        "process_name": "vssadmin.exe",
+        "command_line": "vssadmin delete shadows",
+        "pid": 300,
+        "parent_pid": 200,
+        "process_guid": "{VSS-GUID}",
+        "parent_process_guid": "{PS-GUID}",
+    }
+
+    # Target process creates a file
+    event_4 = {
+        "event_id": "EVT-PROC-04",
+        "timestamp": "2026-08-08T15:03:00Z",
+        "source": "sysmon",
+        "event_type": "file_create",
+        "process_name": "powershell.exe",
+        "pid": 200,
+        "process_guid": "{PS-GUID}",
+        "file_path": "C:\\Users\\Analyst\\README.txt",
+    }
+
+    # Target process network connection
+    event_5 = {
+        "event_id": "EVT-PROC-05",
+        "timestamp": "2026-08-08T15:04:00Z",
+        "source": "sysmon",
+        "event_type": "network_connect",
+        "process_name": "powershell.exe",
+        "pid": 200,
+        "process_guid": "{PS-GUID}",
+        "network": {
+            "destination_ip": "203.0.113.55",
+            "destination_port": "443",
+            "protocol": "tcp"
+        }
+    }
+
+    store.save_event("CASE-PROC", event_1)
+    store.save_event("CASE-PROC", event_2)
+    store.save_event("CASE-PROC", event_3)
+    store.save_event("CASE-PROC", event_4)
+    store.save_event("CASE-PROC", event_5)
+
+    store.save_finding(
+        case_id="CASE-PROC",
+        finding={
+            "type": "suspicious_powershell",
+            "score": 40,
+            "confidence": 0.8,
+            "technique": "T1059.001",
+            "reason": "Encoded powershell",
+        },
+        event_ids=["EVT-PROC-02"],
+    )
+
+    store.close()
+
+    # Test exact GUID lookup
+    with patch.object(sys, "argv", ["ransomeye", "investigation", "process", "--database", str(db_path), "--case", "CASE-PROC", "--process", "{PS-GUID}"]):
+        main()
+    out, err = capsys.readouterr()
+
+    assert "RANSOMEYE PROCESS PROFILE" in out
+    assert "Case: CASE-PROC" in out
+    assert "Process: powershell.exe" in out
+    assert "PID: 200" in out
+    assert "GUID: {PS-GUID}" in out
+    assert "Image: unavailable" in out
+    assert "Command Line: powershell.exe -enc XYZ" in out
+    assert "Timestamp: 2026-08-08 15:01:00+00:00" in out
+
+    assert "Parent: cmd.exe (PID 100) [{CMD-GUID}]" in out
+
+    assert "--- CHILDREN (1) ---" in out
+    assert "- vssadmin.exe (PID 300) [{VSS-GUID}] - SPAWNED" in out
+
+    assert "--- FILES TOUCHED (1) ---" in out
+    assert "- CREATED: C:\\Users\\Analyst\\README.txt" in out
+
+    assert "--- NETWORK CONNECTIONS (1) ---" in out
+    assert "- CONNECTED: 203.0.113.55:443 [tcp]" in out
+
+    assert "--- ASSOCIATED FINDINGS (1) ---" in out
+    assert "suspicious_powershell" in out
+
+    # Test exact PID lookup
+    with patch.object(sys, "argv", ["ransomeye", "investigation", "process", "--database", str(db_path), "--case", "CASE-PROC", "--process", "100"]):
+        main()
+    out, err = capsys.readouterr()
+
+    assert "Process: cmd.exe" in out
+    assert "PID: 100" in out
+
+    # Test Not Found
+    with patch.object(sys, "argv", ["ransomeye", "investigation", "process", "--database", str(db_path), "--case", "CASE-PROC", "--process", "9999"]):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 1
+    out, err = capsys.readouterr()
+    assert "Process not found in case: 9999" in out
