@@ -732,14 +732,103 @@ def print_case_tree(database_path: str | Path, case_id: str) -> None:
         store.close()
 
 
+def create_case(
+    database_path: str | Path,
+    case_id: str,
+    case_name: str | None = None,
+    host: str | None = None,
+) -> None:
+    """Create a new case in the database."""
+    store = EvidenceStore(database_path)
+    try:
+        store.create_case(
+            case_id=case_id,
+            case_name=case_name or case_id,
+            host=host or "",
+        )
+        case = store.get_case(case_id)
+        print("RANSOMEYE CASE CREATED")
+        print("======================\n")
+        print(f"Database: {database_path}")
+        print(f"Case ID: {case['case_id']}")
+        print(f"Name: {case['case_name']}")
+        print(f"Host: {case['host'] or '-'}")
+        print(f"Status: {case['status']}")
+        print(f"Created: {case['created_at']}")
+    finally:
+        store.close()
+
+
+def list_cases(database_path: str | Path) -> None:
+    """List all stored cases in the database."""
+    store = EvidenceStore(database_path)
+    try:
+        cases = store.list_cases()
+        print("RANSOMEYE CASES")
+        print("===============\n")
+        if not cases:
+            print("No cases found.")
+            return
+
+        print(f"{'Case ID':<20} {'Name':<20} {'Host':<18} {'Status':<10} {'Severity':<10} {'Events':<8} {'Findings':<10} {'Incidents':<10}")
+        print(f"{'-'*18:<20} {'-'*18:<20} {'-'*16:<18} {'-'*8:<10} {'-'*8:<10} {'-'*6:<8} {'-'*8:<10} {'-'*9:<10}")
+        for c in cases:
+            cid = c["case_id"]
+            events = len(store.get_case_events(cid))
+            findings = len(store.get_case_findings(cid))
+            assessment = store.get_latest_assessment(cid)
+            incidents = len(assessment.get("correlations", [])) if assessment else 0
+            sev = assessment.get("severity", c.get("severity", "SAFE")) if assessment else c.get("severity", "SAFE")
+            name = c.get("case_name") or cid
+            host = c.get("host") or "-"
+            status = c.get("status") or "OPEN"
+            print(f"{cid:<20} {name:<20} {host:<18} {status:<10} {sev:<10} {events:<8} {findings:<10} {incidents:<10}")
+    finally:
+        store.close()
+
+
+def show_case(database_path: str | Path, case_id: str) -> None:
+    """Show detailed information for a specific case."""
+    store = EvidenceStore(database_path)
+    try:
+        case = store.get_case(case_id)
+        if case is None:
+            raise KeyError(f"Case not found: {case_id}")
+
+        events = store.get_case_events(case_id)
+        findings = store.get_case_findings(case_id)
+        assessment = store.get_latest_assessment(case_id)
+        incidents = len(assessment.get("correlations", [])) if assessment else 0
+
+        print("RANSOMEYE CASE DETAIL")
+        print("=====================\n")
+        print(f"Case ID: {case['case_id']}")
+        print(f"Name: {case['case_name']}")
+        print(f"Host: {case['host'] or '-'}")
+        print(f"Status: {case['status']}")
+        print(f"Severity: {case['severity']}")
+        print(f"Created: {case['created_at']}")
+        print("\n--- ANALYSIS SUMMARY ---")
+        print(f"Events: {len(events)}")
+        print(f"Findings: {len(findings)}")
+        print(f"Incidents: {incidents}")
+        if assessment:
+            print(f"Assessment Score: {assessment.get('score', 0)}")
+            print(f"Assessment Severity: {assessment.get('severity', 'SAFE')}")
+            print(f"Assessment Confidence: {assessment.get('confidence', 0.0)}")
+        else:
+            print("Threat Assessment: UNASSESSED")
+    finally:
+        store.close()
+
+
 def show_case_status(database_path: str | Path, case_id: str) -> None:
     store = EvidenceStore(database_path)
 
     try:
         case = store.get_case(case_id)
         if case is None:
-            print(f"Case not found: {case_id}")
-            return
+            raise KeyError(f"Case not found: {case_id}")
 
         print(f"Case: {case['case_id']}")
         print(f"Status: {case.get('status', 'OPEN')}")
@@ -885,9 +974,66 @@ def main() -> None:
     )
     case_subparsers = case_parser.add_subparsers(dest="case_command", required=True)
 
+    case_create_parser = case_subparsers.add_parser(
+        "create",
+        help="Create a new persistent case.",
+    )
+    case_create_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    case_create_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+    case_create_parser.add_argument(
+        "--name",
+        dest="case_name",
+        default=None,
+        help="Optional case name.",
+    )
+    case_create_parser.add_argument(
+        "--host",
+        dest="host",
+        default="",
+        help="Optional host name.",
+    )
+
+    case_list_parser = case_subparsers.add_parser(
+        "list",
+        help="List all stored cases.",
+    )
+    case_list_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+
+    case_show_parser = case_subparsers.add_parser(
+        "show",
+        help="Show details of a specific case.",
+    )
+    case_show_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    case_show_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+
     case_status_parser = case_subparsers.add_parser(
         "status",
-        help="Show the current case status.",
+        help="Show or update the current case status.",
     )
     case_status_parser.add_argument(
         "--database",
@@ -900,6 +1046,18 @@ def main() -> None:
         required=True,
         dest="case_id",
         help="Case identifier.",
+    )
+    case_status_parser.add_argument(
+        "--status",
+        dest="status",
+        default=None,
+        help="Optional new case status to update to.",
+    )
+    case_status_parser.add_argument(
+        "--note",
+        dest="note",
+        default="",
+        help="Optional note when updating case status.",
     )
 
     case_update_parser = case_subparsers.add_parser(
@@ -1487,23 +1645,66 @@ def main() -> None:
         )
         print(f"Report written to {output_path}")
     elif args.command == "case":
-        if args.case_command == "status":
-            show_case_status(
-                database_path=args.database,
-                case_id=args.case_id,
-            )
+        if args.case_command == "create":
+            try:
+                create_case(
+                    database_path=args.database,
+                    case_id=args.case_id,
+                    case_name=args.case_name,
+                    host=args.host,
+                )
+            except (ValueError, KeyError, sqlite3.Error) as exc:
+                parser.exit(1, f"{exc}\n")
+        elif args.case_command == "list":
+            try:
+                list_cases(database_path=args.database)
+            except (sqlite3.Error, OSError) as exc:
+                parser.exit(1, f"{exc}\n")
+        elif args.case_command == "show":
+            try:
+                show_case(
+                    database_path=args.database,
+                    case_id=args.case_id,
+                )
+            except (KeyError, ValueError, sqlite3.Error) as exc:
+                parser.exit(1, f"{exc}\n")
+        elif args.case_command == "status":
+            if getattr(args, "status", None):
+                try:
+                    update_case_status(
+                        database_path=args.database,
+                        case_id=args.case_id,
+                        status=args.status,
+                        note=args.note,
+                    )
+                except (ValueError, KeyError, sqlite3.Error) as exc:
+                    parser.exit(1, f"{exc}\n")
+            else:
+                try:
+                    show_case_status(
+                        database_path=args.database,
+                        case_id=args.case_id,
+                    )
+                except (KeyError, ValueError, sqlite3.Error) as exc:
+                    parser.exit(1, f"{exc}\n")
         elif args.case_command == "update":
-            update_case_status(
-                database_path=args.database,
-                case_id=args.case_id,
-                status=args.status,
-                note=args.note,
-            )
+            try:
+                update_case_status(
+                    database_path=args.database,
+                    case_id=args.case_id,
+                    status=args.status,
+                    note=args.note,
+                )
+            except (ValueError, KeyError, sqlite3.Error) as exc:
+                parser.exit(1, f"{exc}\n")
         elif args.case_command == "history":
-            print_case_history(
-                database_path=args.database,
-                case_id=args.case_id,
-            )
+            try:
+                print_case_history(
+                    database_path=args.database,
+                    case_id=args.case_id,
+                )
+            except (KeyError, ValueError, sqlite3.Error) as exc:
+                parser.exit(1, f"{exc}\n")
     elif args.command == "custody":
         if args.custody_command == "record":
             try:

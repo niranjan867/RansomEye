@@ -337,18 +337,37 @@ class EvidenceStore:
     def create_case(
         self,
         case_id: str,
-        case_name: str,
+        case_name: str = "",
         host: str = "",
     ) -> None:
+        if not case_id or not str(case_id).strip():
+            raise ValueError("Case ID must not be empty.")
+
+        existing = self.get_case(case_id)
+        if existing is not None:
+            raise ValueError(f"Case already exists: {case_id}")
+
         self.connection.execute(
             """
             INSERT INTO cases
                 (case_id, case_name, host, status, severity, created_at)
             VALUES (?, ?, ?, 'OPEN', 'SAFE', ?)
             """,
-            (case_id, case_name, host, _now()),
+            (case_id, case_name or case_id, host, _now()),
         )
         self.connection.commit()
+
+    def list_cases(self) -> list[dict[str, Any]]:
+        """Return all stored cases ordered by created_at DESC."""
+        rows = self.connection.execute(
+            """
+            SELECT *
+            FROM cases
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+
+        return [dict(row) for row in rows]
 
     def update_case_status(
         self,

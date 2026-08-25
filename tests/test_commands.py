@@ -1453,3 +1453,235 @@ def test_command_investigation_process(tmp_path, capsys):
             assert e.code == 1
     out, err = capsys.readouterr()
     assert "Process not found in case: 9999" in out
+
+
+# ==============================================================================
+# M23.6 — Real Case Management / Case Lifecycle Tests
+# ==============================================================================
+
+def test_case_create_command_success(tmp_path):
+    db_path = tmp_path / "test_case_mgmt.db"
+    res = _run_command([
+        "case", "create",
+        "--database", str(db_path),
+        "--case", "CASE-M236-01",
+        "--name", "Test Case M23.6",
+        "--host", "HOST-M236",
+    ])
+    assert res.returncode == 0
+    assert "RANSOMEYE CASE CREATED" in res.stdout
+    assert "CASE-M236-01" in res.stdout
+    assert "Test Case M23.6" in res.stdout
+
+    store = EvidenceStore(db_path)
+    c = store.get_case("CASE-M236-01")
+    store.close()
+    assert c is not None
+    assert c["case_name"] == "Test Case M23.6"
+    assert c["host"] == "HOST-M236"
+    assert c["status"] == "OPEN"
+
+
+def test_case_create_duplicate_rejected(tmp_path):
+    db_path = tmp_path / "test_case_mgmt.db"
+    store = EvidenceStore(db_path)
+    store.create_case("CASE-DUP-01", "Initial Case")
+    store.close()
+
+    res = _run_command([
+        "case", "create",
+        "--database", str(db_path),
+        "--case", "CASE-DUP-01",
+    ])
+    assert res.returncode != 0
+    assert "already exists" in res.stderr.lower() or "already exists" in res.stdout.lower()
+
+
+def test_case_list_command(tmp_path):
+    db_path = tmp_path / "test_case_mgmt.db"
+    store = EvidenceStore(db_path)
+    store.create_case("CASE-LIST-01", "First Case", host="HOST-1")
+    store.create_case("CASE-LIST-02", "Second Case", host="HOST-2")
+    store.close()
+
+    res = _run_command([
+        "case", "list",
+        "--database", str(db_path),
+    ])
+    assert res.returncode == 0
+    assert "RANSOMEYE CASES" in res.stdout
+    assert "CASE-LIST-01" in res.stdout
+    assert "CASE-LIST-02" in res.stdout
+
+
+def test_case_show_command_success(tmp_path):
+    db_path = tmp_path / "test_case_mgmt.db"
+    store = EvidenceStore(db_path)
+    store.create_case("CASE-SHOW-01", "Show Case Test", host="HOST-SHOW")
+    store.close()
+
+    res = _run_command([
+        "case", "show",
+        "--database", str(db_path),
+        "--case", "CASE-SHOW-01",
+    ])
+    assert res.returncode == 0
+    assert "RANSOMEYE CASE DETAIL" in res.stdout
+    assert "Case ID: CASE-SHOW-01" in res.stdout
+    assert "Name: Show Case Test" in res.stdout
+    assert "Host: HOST-SHOW" in res.stdout
+    assert "Status: OPEN" in res.stdout
+
+
+def test_case_show_nonexistent_case(tmp_path):
+    db_path = tmp_path / "test_case_mgmt.db"
+    res = _run_command([
+        "case", "show",
+        "--database", str(db_path),
+        "--case", "NONEXISTENT-CASE",
+    ])
+    assert res.returncode != 0
+    assert "not found" in res.stderr.lower() or "not found" in res.stdout.lower()
+
+
+def test_case_status_update_and_query(tmp_path):
+    db_path = tmp_path / "test_case_mgmt.db"
+    store = EvidenceStore(db_path)
+    store.create_case("CASE-STAT-01", "Status Test")
+    store.close()
+
+    # Query status
+    res = _run_command([
+        "case", "status",
+        "--database", str(db_path),
+        "--case", "CASE-STAT-01",
+    ])
+    assert res.returncode == 0
+    assert "Status: OPEN" in res.stdout
+
+    # Update status
+    res_up = _run_command([
+        "case", "status",
+        "--database", str(db_path),
+        "--case", "CASE-STAT-01",
+        "--status", "CLOSED",
+        "--note", "Case resolved by analyst",
+    ])
+    assert res_up.returncode == 0
+
+    # Query updated status
+    res_after = _run_command([
+        "case", "status",
+        "--database", str(db_path),
+        "--case", "CASE-STAT-01",
+    ])
+    assert res_after.returncode == 0
+    assert "Status: CLOSED" in res_after.stdout
+
+    # Verify history in DB
+    store = EvidenceStore(db_path)
+    hist = store.get_case_history("CASE-STAT-01")
+    store.close()
+    assert len(hist) == 1
+    assert hist[0]["old_status"] == "OPEN"
+    assert hist[0]["new_status"] == "CLOSED"
+    assert hist[0]["note"] == "Case resolved by analyst"
+
+
+def test_case_status_invalid_rejected(tmp_path):
+    db_path = tmp_path / "test_case_mgmt.db"
+    store = EvidenceStore(db_path)
+    store.create_case("CASE-STAT-02", "Status Test 2")
+    store.close()
+
+    res = _run_command([
+        "case", "status",
+        "--database", str(db_path),
+        "--case", "CASE-STAT-02",
+        "--status", "INVALID_STATUS_NAME",
+    ])
+    assert res.returncode != 0
+
+
+def test_case_isolation(tmp_path):
+    db_path = tmp_path / "test_isolation.db"
+    store = EvidenceStore(db_path)
+    store.create_case("CASE-ISO-A", "Case A")
+    store.create_case("CASE-ISO-B", "Case B")
+    store.save_event("CASE-ISO-A", {
+        "event_id": "EVT-ISO-A-1",
+        "timestamp": "2026-08-08T10:00:00Z",
+        "source": "sysmon",
+        "event_type": "process_creation",
+        "process_name": "cmd.exe",
+        "pid": "100",
+    })
+    store.close()
+
+    # Case A has 1 event, Case B has 0 events
+    store = EvidenceStore(db_path)
+    events_a = store.get_case_events("CASE-ISO-A")
+    events_b = store.get_case_events("CASE-ISO-B")
+    store.close()
+
+    assert len(events_a) == 1
+    assert len(events_b) == 0
+
+    # Changing status of Case A does not change Case B
+    res = _run_command([
+        "case", "status",
+        "--database", str(db_path),
+        "--case", "CASE-ISO-A",
+        "--status", "CONTAINED",
+    ])
+    assert res.returncode == 0
+
+    store = EvidenceStore(db_path)
+    ca = store.get_case("CASE-ISO-A")
+    cb = store.get_case("CASE-ISO-B")
+    store.close()
+
+    assert ca["status"] == "CONTAINED"
+    assert cb["status"] == "OPEN"
+
+
+def test_ingest_into_explicitly_created_case(tmp_path):
+    db_path = tmp_path / "test_explicit_ingest.db"
+    store = EvidenceStore(db_path)
+    store.create_case("CASE-EXP-01", "Explicit Pre-created Case", host="HOST-EXP")
+    store.close()
+
+    # Create dummy JSON evidence file
+    evidence_file = tmp_path / "evidence.json"
+    evidence_file.write_text(json.dumps([
+        {
+            "event_id": "EVT-EXP-1",
+            "timestamp": "2026-08-08T12:00:00Z",
+            "source": "sysmon",
+            "event_type": "process_creation",
+            "process_name": "cmd.exe",
+            "pid": "1000",
+            "command_line": "cmd.exe /c vssadmin delete shadows /all /quiet",
+        }
+    ]))
+
+    res = _run_command([
+        "ingest",
+        "--database", str(db_path),
+        "--case", "CASE-EXP-01",
+        "--file", str(evidence_file),
+    ])
+    assert res.returncode == 0
+
+    store = EvidenceStore(db_path)
+    c = store.get_case("CASE-EXP-01")
+    events = store.get_case_events("CASE-EXP-01")
+    findings = store.get_case_findings("CASE-EXP-01")
+    assessment = store.get_latest_assessment("CASE-EXP-01")
+    store.close()
+
+    assert c["case_name"] == "Explicit Pre-created Case"
+    assert c["host"] == "HOST-EXP"
+    assert len(events) == 1
+    assert len(findings) >= 1
+    assert assessment is not None
