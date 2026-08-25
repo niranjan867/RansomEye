@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RansomEye - Analyst Console</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap"
+        rel="stylesheet">
+</head>
+
+<body>
+    <div id="app">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="logo-container">
+                <img src="logo.png" alt="RansomEye Logo">
+            </div>
+
+            <div class="case-context">
+                <label>Active Context</label>
+                <select id="case-select" class="case-select">
+                    <option value="">NO CASES AVAILABLE</option>
+                </select>
+            </div>
+
+            <nav class="sidebar-nav">
+                <a href="#" class="nav-item active" data-view="overview">Overview</a>
+                <a href="#" class="nav-item" data-view="monitor">Monitor</a>
+                <a href="#" class="nav-item" data-view="assessment">Threat Assessment</a>
+                <a href="#" class="nav-item" data-view="incidents">Incidents</a>
+                <a href="#" class="nav-item" data-view="findings">Findings</a>
+                <a href="#" class="nav-item" data-view="evidence">Evidence</a>
+                <a href="#" class="nav-item" data-view="timeline">Timeline</a>
+                <a href="#" class="nav-item" data-view="reconstruction">Reconstruction</a>
+                <a href="#" class="nav-item" data-view="reports">Reports</a>
+            </nav>
+
+            <div class="system-status">
+                <span class="status-dot"></span> ANALYST INVESTIGATION ONLINE
+            </div>
+        </aside>
+
+        <!-- Main Workspace -->
+        <main class="workspace">
+            <header class="topbar">
+                <div class="topbar-left">
+                    <span class="topbar-case-id" id="tb-case-id">NO CASE SELECTED</span>
+                    <span class="badge" id="tb-status">UNKNOWN</span>
+                    <span class="badge" id="tb-severity">UNKNOWN</span>
+                </div>
+                <div class="topbar-right">
+                    <span class="mono" id="tb-host"
+                        style="color: var(--re-text-muted); font-size: 12px; margin-right: 16px;"></span>
+                    <button class="btn" id="btn-refresh">Refresh</button>
+                    <button class="btn btn-primary" id="btn-top-report">Generate Report</button>
+                </div>
+            </header>
+
+            <div class="view-container" id="view-container">
+                <!-- Views Injected Here -->
+            </div>
+        </main>
+
+        <!-- Detail Drawer (Right Panel) -->
+        <aside id="detail-drawer" class="detail-drawer">
+            <div class="drawer-header">
+                <h3 class="drawer-title" id="drawer-title">Inspection</h3>
+                <button class="drawer-close" id="drawer-close">&times;</button>
+            </div>
+            <div class="drawer-content" id="drawer-content">
+                <!-- Dynamic Content -->
+            </div>
+        </aside>
+    </div>
+
+    <!-- VIEWS TEMPLATES -->
+
+    <!-- 1. Overview -->
+    <template id="tpl-overview">
+        <div class="view-header">
+            <h2 class="view-title">Dashboard Overview</h2>
+            <p class="view-subtitle" id="overview-subtitle">Select a case to begin investigation, or ingest new evidence
+                via CLI.</p>
+        </div>
+
+        <div class="grid-overview">
+            <div class="stat-card accent">
+                <span class="stat-label">Threat Score</span>
+                <span class="stat-val" id="ov-score">-</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Severity</span>
+                <span class="stat-val" id="ov-severity">-</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Confidence</span>
+                <span class="stat-val" id="ov-confidence">-</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Incidents</span>
+                <span class="stat-val" id="ov-incidents">-</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Findings</span>
+                <span class="stat-val" id="ov-findings">-</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Evidence</span>
+                <span class="stat-val" id="ov-evidence">-</span>
+            </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--spacing-xl);">
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Active Incidents</span>
+                </div>
+                <div class="panel-body no-padding">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Incident ID</th>
+                                <th>Severity</th>
+                                <th>Events</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ov-incidents-tbody">
+                            <tr>
+                                <td colspan="3" style="text-align: center;">No data available</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Recent Security Activity</span>
+                </div>
+                <div class="panel-body no-padding">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>Event Type</th>
+                                <th>Process</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ov-activity-tbody">
+                            <tr>
+                                <td colspan="3" style="text-align: center;">No data available</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- 2. Monitor -->
+    <template id="tpl-monitor">
+        <div class="view-header">
+            <h2 class="view-title">System Monitor</h2>
+            <p class="view-subtitle">RansomEye currently analyzes and investigates ingested endpoint evidence.
+                Continuous endpoint collection is a future integration layer.</p>
+        </div>
+
+        <div class="grid-overview">
+            <div class="stat-card">
+                <span class="stat-label">Analysis Engine</span>
+                <span class="stat-val text-success" style="font-size: 18px;">ONLINE</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Evidence Ingestion</span>
+                <span class="stat-val text-success" style="font-size: 18px;">READY</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Behavior Detection</span>
+                <span class="stat-val text-success" style="font-size: 18px;">ONLINE</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Correlation Engine</span>
+                <span class="stat-val text-success" style="font-size: 18px;">ONLINE</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Live Endpoint Collection</span>
+                <span class="stat-val text-warning" style="font-size: 18px;">NOT CONFIGURED</span>
+            </div>
+        </div>
+    </template>
+
+    <!-- 3. Threat Assessment -->
+    <template id="tpl-assessment">
+        <div class="view-header">
+            <h2 class="view-title">Threat Assessment</h2>
+            <p class="view-subtitle">Persisted assessment evaluation generated by the backend engine.</p>
+        </div>
+
+        <div class="panel" id="assessment-panel">
+            <div class="panel-body empty-state" id="assessment-empty">
+                <h3>Assessment Unavailable</h3>
+                <p>No assessment has been generated for this case.</p>
+            </div>
+        </div>
+    </template>
+
+    <!-- 4. Incidents -->
+    <template id="tpl-incidents">
+        <div class="view-header">
+            <h2 class="view-title">Incident Drill-down</h2>
+            <p class="view-subtitle">Correlated malicious behaviors grouped into high-confidence incidents.</p>
+        </div>
+        <div class="panel">
+            <div class="panel-body no-padding">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Incident ID</th>
+                            <th>Severity</th>
+                            <th>Start</th>
+                            <th>Duration (s)</th>
+                            <th>Findings</th>
+                            <th>Evidence</th>
+                        </tr>
+                    </thead>
+                    <tbody id="incidents-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </template>
+
+    <!-- 5. Findings -->
+    <template id="tpl-findings">
+        <div class="view-header">
+            <h2 class="view-title">Deterministic Findings</h2>
+            <p class="view-subtitle">Analyzed behaviors matching known malicious signatures or behaviors.</p>
+        </div>
+        <div class="panel">
+            <div class="panel-body no-padding">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Finding ID</th>
+                            <th>Type</th>
+                            <th>Technique</th>
+                            <th>Score</th>
+                            <th>Confidence</th>
+                        </tr>
+                    </thead>
+                    <tbody id="findings-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </template>
+
+    <!-- 6. Evidence Workspace -->
+    <template id="tpl-evidence">
+        <div class="view-header">
+            <h2 class="view-title">Evidence Workspace</h2>
+            <p class="view-subtitle">Search and inspect all persisted events.</p>
+        </div>
+        <div class="toolbar">
+            <input type="text" id="ev-search" class="input"
+                placeholder="Search events (e.g. vssadmin, event ID, hash...)">
+            <button class="btn btn-primary" id="btn-ev-search">Search Evidence</button>
+        </div>
+        <div class="panel mt-md">
+            <div class="panel-body no-padding">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Timestamp</th>
+                            <th>Type</th>
+                            <th>Process Name</th>
+                            <th>PID</th>
+                            <th>Event ID</th>
+                        </tr>
+                    </thead>
+                    <tbody id="evidence-tbody">
+                        <tr>
+                            <td colspan="5" style="text-align: center; padding: 32px;">Enter a query to search evidence.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </template>
+
+    <!-- 7. Timeline -->
+    <template id="tpl-timeline">
+        <div class="view-header">
+            <h2 class="view-title">Advanced Timeline</h2>
+            <p class="view-subtitle">Chronological sequence of security-relevant events.</p>
+        </div>
+        <div class="panel">
+            <div class="panel-body">
+                <div class="timeline-list" id="timeline-container">
+                    <div class="empty-state">No timeline data available.</div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- 8. Reconstruction -->
+    <template id="tpl-reconstruction">
+        <div class="view-header">
+            <h2 class="view-title">Attack Reconstruction</h2>
+            <p class="view-subtitle">Engine-reconstructed attack sequence stages.</p>
+        </div>
+        <div class="panel">
+            <div class="panel-body" id="reconstruction-container">
+                <div class="empty-state">
+                    <p>No reconstructed attack stages available for this case.</p>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- 9. Reports -->
+    <template id="tpl-reports">
+        <div class="view-header">
+            <h2 class="view-title">Case Report Generation</h2>
+            <p class="view-subtitle">Generate a comprehensive text report of the attack sequence and evidence.</p>
+        </div>
+        <div class="panel">
+            <div class="panel-body" style="text-align: center; padding: 48px 24px;">
+                <button class="btn btn-primary" id="btn-gen-report"
+                    style="font-size: 16px; padding: 12px 32px;">GENERATE CASE REPORT</button>
+                <div id="report-result" class="mt-xl hidden" style="text-align: left;">
+                    <p style="margin-bottom: 12px; font-weight: 600;">Report Generated: <span id="report-path"
+                            class="mono text-cyan"></span></p>
+                    <textarea id="report-content" class="code-block" rows="20" readonly></textarea>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <script src="app.js"></script>
+</body>
+
+</html>
