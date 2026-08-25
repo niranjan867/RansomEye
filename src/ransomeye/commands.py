@@ -603,6 +603,15 @@ def show_advanced_timeline(database_path: str | Path, case_id: str) -> None:
         print(e)
 
 
+def validate_investigation_command(database_path: str | Path, case_id: str) -> bool:
+    """Run investigation completeness and integrity validation."""
+    from ransomeye.investigation_validation import validate_investigation
+
+    result = validate_investigation(database_path, case_id)
+    print(result.render())
+    return result.passed
+
+
 def print_case_timeline(
     database_path: str | Path,
     case_id: str,
@@ -1448,6 +1457,23 @@ def main() -> None:
         help="Process GUID or PID.",
     )
 
+    investigation_validate_parser = investigation_subparsers.add_parser(
+        "validate",
+        help="Validate investigation completeness and integrity.",
+    )
+    investigation_validate_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    investigation_validate_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+
     ingest_parser = subparsers.add_parser(
         "ingest",
         help="Ingest JSON or Sysmon XML evidence into a case.",
@@ -1625,6 +1651,13 @@ def main() -> None:
                 database_path=args.database,
                 case_id=args.case_id,
             )
+        elif args.investigation_command == "validate":
+            passed = validate_investigation_command(
+                database_path=args.database,
+                case_id=args.case_id,
+            )
+            if not passed:
+                sys.exit(1)
     elif args.command == "timeline":
 
         print_case_timeline(
