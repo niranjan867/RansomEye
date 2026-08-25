@@ -612,6 +612,66 @@ def validate_investigation_command(database_path: str | Path, case_id: str) -> b
     return result.passed
 
 
+def run_collect_file_command(
+    database_path: str | Path,
+    case_id: str,
+    file_path: str | Path,
+    format_type: str = "auto",
+    case_name: str | None = None,
+    host: str | None = None,
+) -> dict[str, Any]:
+    """Execute continuous collection pipeline over an evidence file."""
+    from ransomeye.collectors.file import FileCollector
+    from ransomeye.collection import CollectionPipeline
+
+    collector = FileCollector(file_path=file_path, format_type=format_type)
+    pipeline = CollectionPipeline(
+        database_path=database_path,
+        case_id=case_id,
+        collector=collector,
+        case_name=case_name,
+        host=host,
+    )
+
+    collector.start()
+    try:
+        collector_events = list(collector.collect())
+        summary = pipeline.run_batch(collector_events)
+    finally:
+        collector.stop()
+
+    print("RansomEye evidence collection complete\n")
+    print(f"Collector: {collector.name}")
+    print(f"Database: {summary['database']}")
+    print(f"Case: {summary['case_id']}")
+    print(f"Input: {Path(file_path).name}\n")
+    print(f"Events collected: {summary['events_collected']}")
+    print(f"Events accepted: {summary['events_accepted']}")
+    print(f"Events rejected: {summary['events_rejected']}")
+    print(f"Duplicates: {summary['duplicates']}")
+    print(f"Findings: {summary['findings_count']}")
+    print(f"Correlations: {summary['correlations_count']}")
+    print(f"Score: {summary['score']}")
+    print(f"Severity: {summary['severity']}")
+    return summary
+
+
+def run_collect_status_command(database_path: str | Path, case_id: str) -> None:
+    """Print continuous collection status for a case."""
+    from ransomeye.collection import CollectionPipeline
+
+    pipeline = CollectionPipeline(database_path=database_path, case_id=case_id)
+    store = EvidenceStore(database_path)
+    try:
+        events = store.get_case_events(case_id)
+        pipeline.events_collected = len(events)
+        pipeline.events_accepted = len(events)
+    finally:
+        store.close()
+
+    print(pipeline.render_status())
+
+
 def print_case_timeline(
     database_path: str | Path,
     case_id: str,
@@ -1474,6 +1534,73 @@ def main() -> None:
         help="Case identifier.",
     )
 
+    collect_parser = subparsers.add_parser(
+        "collect",
+        help="Continuous evidence collection pipeline commands.",
+    )
+    collect_subparsers = collect_parser.add_subparsers(
+        dest="collect_command",
+        required=True,
+    )
+
+    collect_file_parser = collect_subparsers.add_parser(
+        "file",
+        help="Collect evidence from a local file through the collection pipeline.",
+    )
+    collect_file_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    collect_file_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+    collect_file_parser.add_argument(
+        "--file",
+        required=True,
+        dest="file_path",
+        type=Path,
+        help="Path to the evidence file to collect.",
+    )
+    collect_file_parser.add_argument(
+        "--format",
+        default="auto",
+        choices=["auto", "json", "sysmon-xml"],
+        dest="format_type",
+        help="Input format (default: auto).",
+    )
+    collect_file_parser.add_argument(
+        "--case-name",
+        dest="case_name",
+        help="Optional case display name.",
+    )
+    collect_file_parser.add_argument(
+        "--host",
+        dest="host",
+        help="Optional hostname.",
+    )
+
+    collect_status_parser = collect_subparsers.add_parser(
+        "status",
+        help="Display collection status for a case.",
+    )
+    collect_status_parser.add_argument(
+        "--database",
+        required=True,
+        type=Path,
+        help="Path to the RansomEye SQLite database.",
+    )
+    collect_status_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+
     ingest_parser = subparsers.add_parser(
         "ingest",
         help="Ingest JSON or Sysmon XML evidence into a case.",
@@ -1593,7 +1720,28 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "ingest":
+    if args.command == "collect":
+        if args.collect_command == "file":
+            try:
+                run_collect_file_command(
+                    database_path=args.database,
+                    case_id=args.case_id,
+                    file_path=args.file_path,
+                    format_type=args.format_type,
+                    case_name=getattr(args, "case_name", None),
+                    host=getattr(args, "host", None),
+                )
+            except (FileNotFoundError, ValueError, EvidenceValidationError, sqlite3.Error, OSError) as exc:
+                parser.exit(1, f"Collection failed: {exc}\n")
+        elif args.collect_command == "status":
+            try:
+                run_collect_status_command(
+                    database_path=args.database,
+                    case_id=args.case_id,
+                )
+            except (FileNotFoundError, ValueError, sqlite3.Error, OSError) as exc:
+                parser.exit(1, f"Collection status failed: {exc}\n")
+    elif args.command == "ingest":
         try:
             summary = ingest_evidence(
                 database_path=args.database,
