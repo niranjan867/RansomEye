@@ -1,28 +1,43 @@
+# Virtual environments
 .venv/
+venv/
+.release-venv/
+
+# Byte-compiled / cache files
 __pycache__/
-*.pyc
-*.log
-.env
-.env.*
-!.env.example
+*.py[cod]
+*$py.class
+.pytest_cache/
+.pytest-tmp/
+.pytest-temp/
+
+# Databases & local runtime data
+*.db
+*.sqlite
+*.sqlite3
+data/
 vol-cache/
 memory.raw
 *.raw
 *.mem
 *.dmp
 *.vmem
-data/evidence/
-data/uploads/
-data/output/
 
-data/
+# Environment & credentials
+.env
+.env.*
+!.env.example
 
-reports/
-.pytest-tmp/
-.pytest-temp/
-*.egg-info/
-exports/
+# Logs, exports & temporary reports
+*.log
 logs/
+reports/
+exports/
+*-pytest.txt
+report.txt
+
+# Packaging & build artifacts
+*.egg-info/
 .release-dist/
-.release-venv/
 build/
+dist/

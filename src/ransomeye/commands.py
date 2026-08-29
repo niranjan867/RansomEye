@@ -672,6 +672,108 @@ def run_collect_status_command(database_path: str | Path, case_id: str) -> None:
     print(pipeline.render_status())
 
 
+def run_collect_live_command(
+    database_path: str | Path,
+    case_id: str,
+    watch_dir: str | Path | None = None,
+    canary_dir: str | Path | None = None,
+    flush_interval: float = 2.0,
+    poll_interval: float = 1.0,
+    run_duration: float | None = None,
+) -> dict[str, Any]:
+    """Execute continuous live evidence collection across native live collectors."""
+    import time
+    from ransomeye.collectors.canary_collector import CanaryCollector
+    from ransomeye.collectors.composite import CompositeCollector
+    from ransomeye.collectors.live_file import LiveFileCollector
+    from ransomeye.collectors.live_network import LiveNetworkCollector
+    from ransomeye.collectors.live_process import LiveProcessCollector
+    from ransomeye.collection import CollectionPipeline
+
+    store = EvidenceStore(database_path)
+    try:
+        case = store.get_case(case_id)
+        if case is None:
+            raise KeyError(f"Case not found: {case_id}")
+    finally:
+        store.close()
+
+    safe_watch_dir = Path(watch_dir) if watch_dir else Path("data") / "live_watch"
+    safe_canary_dir = Path(canary_dir) if canary_dir else Path("data") / "live_canary"
+
+    safe_watch_dir.mkdir(parents=True, exist_ok=True)
+    safe_canary_dir.mkdir(parents=True, exist_ok=True)
+
+    pipeline = CollectionPipeline(
+        database_path=database_path,
+        case_id=case_id,
+        case_name=case.get("case_name") if case else case_id,
+        host=case.get("host") if case else "",
+    )
+
+    proc_col = LiveProcessCollector(
+        case_id=case_id,
+        on_event=pipeline.push,
+        poll_interval=poll_interval,
+        compute_exe_hash=True,
+    )
+    file_col = LiveFileCollector(
+        watch_paths=[str(safe_watch_dir)],
+        case_id=case_id,
+        on_event=pipeline.push,
+        compute_hash=True,
+    )
+    net_col = LiveNetworkCollector(
+        case_id=case_id,
+        on_event=pipeline.push,
+        poll_interval=poll_interval,
+    )
+    canary_col = CanaryCollector(
+        canary_dir=str(safe_canary_dir),
+        case_id=case_id,
+        on_event=pipeline.push,
+    )
+
+    composite = CompositeCollector(
+        collectors=[proc_col, file_col, net_col, canary_col],
+        name="CompositeLiveCollector",
+    )
+    pipeline.attach_collector(composite)
+
+    pipeline.start(streaming=True, flush_interval=flush_interval)
+
+    print("RansomEye Live Collection")
+    print("=========================")
+    print(f"Case: {case_id}")
+    print(f"Process: {proc_col.state.value}")
+    print(f"File: {file_col.state.value}")
+    print(f"Network: {net_col.state.value}")
+    print(f"Canary: {canary_col.state.value}")
+    print(f"Pipeline: {pipeline.state.value}")
+    print(f"Watch Directory: {safe_watch_dir}")
+    print(f"Canary Directory: {safe_canary_dir}\n")
+    print("Press Ctrl+C to stop collection.\n")
+
+    start_time = time.time()
+    try:
+        while True:
+            time.sleep(0.5)
+            if run_duration is not None and (time.time() - start_time) >= run_duration:
+                break
+    except KeyboardInterrupt:
+        print("\nStopping live collection...")
+    finally:
+        pipeline.stop()
+
+    summary = pipeline.status()
+    print("\nLive collection stopped cleanly.")
+    print(f"Events collected: {summary['events_collected']}")
+    print(f"Events accepted: {summary['events_accepted']}")
+    print(f"Events rejected: {summary['events_rejected']}")
+    print(f"Duplicates: {summary['duplicates']}")
+    return summary
+
+
 def print_case_timeline(
     database_path: str | Path,
     case_id: str,
@@ -1601,6 +1703,51 @@ def main() -> None:
         help="Case identifier.",
     )
 
+    collect_live_parser = collect_subparsers.add_parser(
+        "live",
+        help="Start native live end-to-end evidence collection for a case.",
+    )
+    collect_live_parser.add_argument(
+        "--database",
+        default=Path("data/ransomeye.db"),
+        type=Path,
+        help="Path to the RansomEye SQLite database (default: data/ransomeye.db).",
+    )
+    collect_live_parser.add_argument(
+        "--case",
+        required=True,
+        dest="case_id",
+        help="Case identifier.",
+    )
+    collect_live_parser.add_argument(
+        "--watch-dir",
+        dest="watch_dir",
+        type=Path,
+        default=None,
+        help="Directory to monitor for live filesystem activity (default: data/live_watch).",
+    )
+    collect_live_parser.add_argument(
+        "--canary-dir",
+        dest="canary_dir",
+        type=Path,
+        default=None,
+        help="Directory for decoy canary files (default: data/live_canary).",
+    )
+    collect_live_parser.add_argument(
+        "--flush-interval",
+        dest="flush_interval",
+        type=float,
+        default=2.0,
+        help="Streaming pipeline flush interval in seconds (default: 2.0).",
+    )
+    collect_live_parser.add_argument(
+        "--poll-interval",
+        dest="poll_interval",
+        type=float,
+        default=1.0,
+        help="Process and network polling interval in seconds (default: 1.0).",
+    )
+
     ingest_parser = subparsers.add_parser(
         "ingest",
         help="Ingest JSON or Sysmon XML evidence into a case.",
@@ -1741,6 +1888,18 @@ def main() -> None:
                 )
             except (FileNotFoundError, ValueError, sqlite3.Error, OSError) as exc:
                 parser.exit(1, f"Collection status failed: {exc}\n")
+        elif args.collect_command == "live":
+            try:
+                run_collect_live_command(
+                    database_path=args.database,
+                    case_id=args.case_id,
+                    watch_dir=getattr(args, "watch_dir", None),
+                    canary_dir=getattr(args, "canary_dir", None),
+                    flush_interval=getattr(args, "flush_interval", 2.0),
+                    poll_interval=getattr(args, "poll_interval", 1.0),
+                )
+            except (KeyError, FileNotFoundError, ValueError, sqlite3.Error, OSError) as exc:
+                parser.exit(1, f"Live collection failed: {exc}\n")
     elif args.command == "ingest":
         try:
             summary = ingest_evidence(
