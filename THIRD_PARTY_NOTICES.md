@@ -21,13 +21,40 @@ RansomEye applies the same MIT notice to material derived from `engine_12x/`.
 | `src/ransomeye/collectors/live_network.py` | `SentinelGuard/sentinelguard/monitors/network_monitor.py` | MIT (`SentinelGuard/LICENSE`) |
 | `src/ransomeye/collectors/live_process.py` | `SentinelGuard/sentinelguard/monitors/process_monitor.py` | MIT (`SentinelGuard/LICENSE`) |
 | `src/ransomeye/collectors/canary_collector.py` | `engine_12x/core/system_guard.py` | MIT (declared in root README) |
-| Script analysis (`src/ransomeye/script_analyzer.py`) | `ExtenderRem/backend/analyzers/doc_js_analyzer.py` | MIT (`ExtenderRem/LICENSE`) |
+| Script analysis (`src/ransomeye/script_analyzer.py`) | `ExtenderRem/backend/analyzers/doc_js_analyzer.py`, `ExtenderRem/backend/analyzers/ioc_extractor.py` | MIT (`ExtenderRem/LICENSE`) |
 
-The script analysis capability is an independent RansomEye implementation. Its
-design (script category taxonomy and the names of well-known Windows scripting
-objects and auto-execution entry points) was informed by ExtenderRem's
-`doc_js_analyzer.py`. No ExtenderRem code is copied; decoding, rules, scoring
-and MITRE ATT&CK mapping are RansomEye's own.
+The script analysis capability is predominantly an independent RansomEye
+implementation. Small portions were adapted from ExtenderRem under the MIT
+License above; the rest is new. For clarity:
+
+Adapted from ExtenderRem (reimplemented, not copied verbatim):
+- The idea of folding quoted string concatenation (`"a" + "b"`) and the
+  40-plus-character standalone Base64 candidate pattern, from
+  `doc_js_analyzer.py::deobfuscate_js`. RansomEye corrects that routine's
+  defects: UTF-16LE is decoded correctly, decoding is bounded (depth, decoded
+  size, candidate count and a SHA-256 seen-set) and deterministic.
+- Auto-execution entry-point names (AutoOpen, Document_Open, Workbook_Open,
+  Auto_Open) and scripting-object names (WScript.Shell, Shell.Application,
+  MSXML2.XMLHTTP, WinHttp.WinHttpRequest, ADODB.Stream), from
+  `doc_js_analyzer.py::SCRIPT_PATTERNS`. These are public Windows API facts.
+- The octet-validated IPv4 pattern, the reserved/loopback address filter and
+  the LOLBin command list, from `ioc_extractor.py`.
+
+Newly implemented by RansomEye (no ExtenderRem counterpart):
+- All bounded, deterministic multi-layer decoding: PowerShell -EncodedCommand
+  with UTF-16LE, FromBase64String extraction, in-memory gzip/deflate with a
+  hard output cap, literal char-code reconstruction, PowerShell backtick
+  normalization, recursive rescanning with depth/size/candidate limits and
+  cycle detection.
+- The entire rule catalog, its per-rule weights, severities, confidences and
+  MITRE ATT&CK techniques, and the additive (non-flat) scoring model.
+- Language detection, the never-"Safe" verdict model, Office-container and
+  PE rejection, path-safety checks, and the `ScriptAnalysisResult` surface.
+
+ExtenderRem code that was reviewed and rejected: the `deobfuscate_js` decoder
+itself (UTF-8-only, unbounded), the flat +30 scoring and blanket MITRE
+mapping in `ai_explainer.py`, the FastAPI upload route, and all
+network/threat-intelligence calls.
 
 ```
 MIT License

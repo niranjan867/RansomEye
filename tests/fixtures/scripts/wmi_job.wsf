@@ -1,0 +1,7 @@
+<job id="fixture">
+<script language="VBScript">
+Set wmi = GetObject("winmgmts:\\.\root\cimv2")
+Set proc = wmi.Get("Win32_Process")
+proc.Create "cmd.exe /c echo ransomeye-fixture", Null, Null, pid
+</script>
+</job>
