@@ -33,6 +33,11 @@ from ransomeye.investigation_validation import validate_investigation
 from ransomeye.phishing import MessagePayload, PhishingDetector, ingest_phishing_finding
 from ransomeye.reconstruction import reconstruct_attack
 from ransomeye.report import generate_case_report
+from ransomeye.script_analyzer import (
+    ScriptAnalysisError,
+    ScriptAnalyzer,
+    ingest_script_finding,
+)
 from ransomeye.static_analyzer import StaticAnalyzer, ingest_static_finding
 from ransomeye.storage import (
     EvidenceStore,
@@ -1089,6 +1094,79 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     finally:
                         store.close()
                 json_response(self, 200, {"analysis": res_dict, "assessment": res_dict, "finding_id": finding_id})
+
+            elif parts[0] == "script" and len(parts) > 1 and parts[1] == "analyze":
+                file_path = body.get("file_path")
+                text = body.get("text")
+                event_id = body.get("event_id")
+                case_id = body.get("case_id")
+                language = body.get("language")
+
+                provided = [
+                    name for name, value in
+                    (("file_path", file_path), ("text", text), ("event_id", event_id)) if value
+                ]
+                if len(provided) != 1:
+                    return error_response(self, 400, "Provide exactly one of file_path, text, or event_id")
+
+                analyzer = ScriptAnalyzer()
+                finding_ids = None
+
+                if event_id:
+                    if not case_id:
+                        return error_response(self, 400, "event_id requires case_id")
+                    _validate_safe_id(case_id, "case_id")
+                    if not DB_PATH or not DB_PATH.is_file():
+                        return error_response(self, 400, "Database not configured")
+                    store = _get_store()
+                    try:
+                        if store.get_case(case_id) is None:
+                            return error_response(self, 404, f"Case not found: {case_id}")
+                        event = store.get_event(case_id, event_id)
+                        if event is None:
+                            return error_response(self, 404, f"Event not found in case {case_id}: {event_id}")
+                        command_line = event.get("command_line")
+                        if not command_line or not str(command_line).strip():
+                            return error_response(self, 400, f"Event {event_id} has no command line to analyze")
+                        try:
+                            res = analyzer.analyze_text(str(command_line), file_name=event_id, language=language)
+                        except ScriptAnalysisError as exc:
+                            return error_response(self, 400, str(exc))
+                        finding_ids = ingest_script_finding(store, case_id, res, event_id=event_id)
+                    finally:
+                        store.close()
+
+                elif file_path:
+                    try:
+                        res = analyzer.analyze_file(file_path, language=language)
+                    except ScriptAnalysisError as exc:
+                        return error_response(self, 400, str(exc))
+                    except FileNotFoundError:
+                        return error_response(self, 400, f"Script file not found: {file_path}")
+                    if case_id:
+                        _validate_safe_id(case_id, "case_id")
+                        if not DB_PATH or not DB_PATH.is_file():
+                            return error_response(self, 400, "Database not configured")
+                        store = _get_store()
+                        try:
+                            if store.get_case(case_id) is None:
+                                return error_response(self, 404, f"Case not found: {case_id}")
+                            finding_ids = ingest_script_finding(store, case_id, res)
+                        finally:
+                            store.close()
+
+                else:  # text
+                    if case_id:
+                        return error_response(
+                            self, 400,
+                            "Pasted text cannot be added to a case; analyze a file or stored event instead",
+                        )
+                    try:
+                        res = analyzer.analyze_text(str(text), language=language)
+                    except ScriptAnalysisError as exc:
+                        return error_response(self, 400, str(exc))
+
+                json_response(self, 200, {"analysis": res.to_dict(), "finding_ids": finding_ids})
 
             else:
                 error_response(self, 404, "Unknown API POST endpoint")

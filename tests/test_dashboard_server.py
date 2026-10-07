@@ -882,3 +882,223 @@ def test_static_view_never_renders_analyzer_output_as_html():
     for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
         assert sink not in source, f"{sink} used in Static Analysis view"
     assert "${" not in source, "HTML/template string construction in Static Analysis view"
+
+
+# --------------------------------------------------------------------------- #
+# Stage 4: POST /api/script/analyze
+# --------------------------------------------------------------------------- #
+
+import base64 as _b64  # noqa: E402
+
+
+def _enc_command(inner: str = "Invoke-Expression $x") -> str:
+    return "powershell -enc " + _b64.b64encode(inner.encode("utf-16-le")).decode("ascii")
+
+
+def _script_url(running_server: str) -> str:
+    return f"{running_server}/api/script/analyze"
+
+
+def test_api_script_text_analysis(running_server):
+    code, res = _post_json(_script_url(running_server), {"text": "Invoke-Expression $x"})
+    assert code == 200, res
+    assert res["analysis"]["analysis_status"] == "complete"
+    assert "PS-IEX-003" in {i["rule_id"] for i in res["analysis"]["indicators"]}
+    assert res["finding_ids"] is None  # no case -> analysis only
+
+
+def test_api_script_file_analysis_without_case(running_server, tmp_path):
+    target = tmp_path / "s.ps1"
+    target.write_text("vssadmin delete shadows /all /quiet\n", encoding="utf-8")
+    code, res = _post_json(_script_url(running_server), {"file_path": str(target)})
+    assert code == 200, res
+    assert "REC-010" in {i["rule_id"] for i in res["analysis"]["indicators"]}
+    assert res["finding_ids"] is None
+
+
+def test_api_script_file_ingests_into_case(running_server, test_db_path, tmp_path):
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-API-SCRIPT", "api script")
+    store.close()
+
+    target = tmp_path / "mal.ps1"
+    target.write_text(f"{_enc_command()}\nvssadmin delete shadows /all /quiet\n", encoding="utf-8")
+    code, res = _post_json(_script_url(running_server), {
+        "file_path": str(target), "case_id": "CASE-API-SCRIPT",
+    })
+    assert code == 200, res
+    assert isinstance(res["finding_ids"], list) and res["finding_ids"]
+
+    store = EvidenceStore(test_db_path)
+    try:
+        events = store.get_case_events("CASE-API-SCRIPT")
+        findings = store.get_case_findings("CASE-API-SCRIPT")
+        custody = store.get_custody_events("CASE-API-SCRIPT")
+    finally:
+        store.close()
+    assert len(events) == 1 and events[0]["source"] == "script_analyzer"
+    assert len(findings) == len(res["finding_ids"])
+    assert [c["action"] for c in custody] == ["reviewed"]
+
+
+def test_api_script_file_ingest_is_idempotent(running_server, test_db_path, tmp_path):
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-API-IDEM", "idem")
+    store.close()
+    target = tmp_path / "idem.ps1"
+    target.write_text("Invoke-Expression $x\n", encoding="utf-8")
+
+    body = {"file_path": str(target), "case_id": "CASE-API-IDEM"}
+    first = _post_json(_script_url(running_server), body)[1]
+    second = _post_json(_script_url(running_server), body)[1]
+    assert first["finding_ids"] and second["finding_ids"] == []
+
+    store = EvidenceStore(test_db_path)
+    try:
+        assert len(store.get_case_events("CASE-API-IDEM")) == 1
+        assert len(store.get_case_findings("CASE-API-IDEM")) == len(first["finding_ids"])
+    finally:
+        store.close()
+
+
+def test_api_script_event_mode(running_server, test_db_path):
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-API-EVT", "evt")
+    store.save_event("CASE-API-EVT", {
+        "event_id": "EVT-API-1",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "source": "sysmon",
+        "event_type": "process_creation",
+        "process_name": "powershell.exe",
+        "command_line": _enc_command(),
+    })
+    store.close()
+
+    code, res = _post_json(_script_url(running_server), {
+        "event_id": "EVT-API-1", "case_id": "CASE-API-EVT",
+    })
+    assert code == 200, res
+    assert res["finding_ids"]
+
+    store = EvidenceStore(test_db_path)
+    try:
+        assert [e["event_id"] for e in store.get_case_events("CASE-API-EVT")] == ["EVT-API-1"]
+        assert store.get_custody_events("CASE-API-EVT") == []
+    finally:
+        store.close()
+
+
+def test_api_script_text_with_case_is_refused(running_server, test_db_path):
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-API-TXT", "txt")
+    store.close()
+    code, res = _post_json(_script_url(running_server), {
+        "text": "Invoke-Expression $x", "case_id": "CASE-API-TXT",
+    })
+    assert code == 400
+    assert "cannot be added to a case" in res["error"]
+
+    store = EvidenceStore(test_db_path)
+    try:
+        assert store.get_case_findings("CASE-API-TXT") == []
+    finally:
+        store.close()
+
+
+def test_api_script_requires_exactly_one_input(running_server):
+    code, res = _post_json(_script_url(running_server), {})
+    assert code == 400 and "exactly one" in res["error"]
+
+    code, res = _post_json(_script_url(running_server), {"text": "x", "file_path": "a.ps1"})
+    assert code == 400 and "exactly one" in res["error"]
+
+
+def test_api_script_event_requires_case(running_server):
+    code, res = _post_json(_script_url(running_server), {"event_id": "EVT-X"})
+    # event_id alone is the single input, but needs a case.
+    assert code == 400 and "requires case_id" in res["error"]
+
+
+def test_api_script_unknown_case(running_server, test_db_path, tmp_path):
+    # Database exists (with a different case), but the requested case is absent.
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-OTHER", "other")
+    store.close()
+    target = tmp_path / "s.ps1"
+    target.write_text("Invoke-Expression $x\n", encoding="utf-8")
+    code, res = _post_json(_script_url(running_server), {
+        "file_path": str(target), "case_id": "NO_SUCH_CASE",
+    })
+    assert code == 404 and "Case not found" in res["error"]
+
+
+def test_api_script_unknown_event(running_server, test_db_path):
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-API-NOEVT", "noevt")
+    store.close()
+    code, res = _post_json(_script_url(running_server), {
+        "event_id": "MISSING", "case_id": "CASE-API-NOEVT",
+    })
+    assert code == 404 and "Event not found" in res["error"]
+
+
+def test_api_script_missing_file(running_server, tmp_path):
+    code, res = _post_json(_script_url(running_server), {"file_path": str(tmp_path / "nope.ps1")})
+    assert code == 400 and "not found" in res["error"].lower()
+
+
+def test_api_script_unsupported_container_not_clean(running_server, tmp_path):
+    target = tmp_path / "doc.docm"
+    target.write_bytes(b"PK\x03\x04" + b"\x00" * 64)
+    code, res = _post_json(_script_url(running_server), {"file_path": str(target)})
+    assert code == 200
+    assert res["analysis"]["analysis_status"] == "unsupported_container"
+    assert res["analysis"]["severity"] == "NOT_ANALYZED"
+
+
+@pytest.mark.parametrize("bad_path", [
+    r"\\server\share\x.ps1",
+    r"\\?\C:\x.ps1",
+    r"\\.\PhysicalDrive0",
+])
+def test_api_script_unc_and_device_paths_rejected(running_server, bad_path):
+    code, res = _post_json(_script_url(running_server), {"file_path": bad_path})
+    assert code == 400 and "UNC" in res["error"]
+
+
+def test_api_script_invalid_language(running_server):
+    code, res = _post_json(_script_url(running_server), {"text": "x", "language": "perl"})
+    assert code == 400 and "Unsupported language" in res["error"]
+
+
+def test_api_script_malformed_json_body(running_server):
+    # Body that is not valid JSON is treated as empty -> exactly-one-input error.
+    req = urllib.request.Request(
+        _script_url(running_server), data=b"{not json", method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            code, res = resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        code, res = e.code, json.loads(e.read())
+    assert code == 400 and "exactly one" in res["error"]
+
+
+def test_api_script_response_is_deterministic(running_server):
+    body = {"text": f"{_enc_command()}\nvssadmin delete shadows"}
+    first = _post_json(_script_url(running_server), body)[1]["analysis"]
+    second = _post_json(_script_url(running_server), body)[1]["analysis"]
+    assert first == second
+
+
+def test_api_script_attacker_strings_are_json_data_not_markup(running_server):
+    # An attacker-controlled URL containing HTML must round-trip as JSON data,
+    # not break the response or appear interpreted.
+    payload = 'Invoke-WebRequest "http://evil.invalid/</script><img src=x onerror=alert(1)>"'
+    code, res = _post_json(_script_url(running_server), {"text": payload})
+    assert code == 200
+    blob = json.dumps(res)
+    assert "<img src=x" in blob  # preserved verbatim as data
+    # It is present only inside string values, never as a structural element.
+    assert res["analysis"]["analysis_status"] == "complete"
