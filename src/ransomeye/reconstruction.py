@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from ransomeye.investigation import Investigation
 from ransomeye.investigation_graph import InvestigationGraph, _get_process_id
+
+
+def _normalize_dt(dt: datetime | None) -> datetime | None:
+    """Normalize datetime to UTC for timezone-safe comparison."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
 
 
 @dataclass(frozen=True)
@@ -137,8 +147,8 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
             if not evs:
                 continue
 
-            min_time = min(e.timestamp for e in evs)
-            max_time = max(e.timestamp for e in evs)
+            min_time = min(evs, key=lambda e: _normalize_dt(e.timestamp)).timestamp
+            max_time = max(evs, key=lambda e: _normalize_dt(e.timestamp)).timestamp
 
             pids = set()
             for e in evs:
@@ -318,7 +328,7 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
         stages,
         key=lambda s: (
             s.timestamp is None,
-            s.timestamp,
+            _normalize_dt(s.timestamp),
             _get_stage_priority(s.stage_type),
             s.stage_id
         )

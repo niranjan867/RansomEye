@@ -355,14 +355,38 @@ def show_investigation_process(database_path: str | Path, case_id: str, process_
         process_nodes = graph.get_process_nodes()
         matched_nodes = []
 
-        target_id = f"PROCESS:{process_query}"
-        node = graph.get_node(target_id)
-        if node:
-            matched_nodes = [node]
-        else:
+        cleaned_query = process_query.strip()
+        if cleaned_query.startswith("PROCESS:"):
+            cleaned_query = cleaned_query[8:]
+        elif cleaned_query.startswith("guid:"):
+            cleaned_query = cleaned_query[5:]
+        elif cleaned_query.startswith("PID:"):
+            cleaned_query = cleaned_query[4:]
+
+        for cand in [
+            process_query,
+            f"PROCESS:{process_query}",
+            f"PROCESS:{cleaned_query}",
+            f"PROCESS:PID:{cleaned_query}",
+            f"PROCESS:{{{cleaned_query.strip('{}')}}}",
+            f"PROCESS:{cleaned_query.strip('{}')}",
+        ]:
+            node = graph.get_node(cand)
+            if node and node not in matched_nodes:
+                matched_nodes.append(node)
+                break
+
+        if not matched_nodes:
             for n in process_nodes:
-                if str(n.attributes.get("pid")) == str(process_query):
+                if str(n.attributes.get("pid")) == cleaned_query:
                     matched_nodes.append(n)
+            if not matched_nodes:
+                norm_q = cleaned_query.strip("{}").lower()
+                for n in process_nodes:
+                    node_guid = n.node_id.replace("PROCESS:", "").strip("{}").lower()
+                    attr_guid = str(n.attributes.get("guid", "")).strip("{}").lower()
+                    if node_guid == norm_q or attr_guid == norm_q:
+                        matched_nodes.append(n)
 
         if not matched_nodes:
             print(f"Process not found in case: {process_query}")
@@ -400,7 +424,6 @@ def show_investigation_process(database_path: str | Path, case_id: str, process_
                     timestamp = str(ev.timestamp)
                 if image_path != "unavailable" and command_line != "unavailable" and timestamp != "unavailable":
                     break
-        print(f"DEBUG: after loop image_path={image_path}")
         print("RANSOMEYE PROCESS PROFILE")
         print("=========================\n")
         print(f"Case: {case_id}")
@@ -1057,6 +1080,157 @@ def write_integrity_manifest(input_path: str | Path, output_path: str | Path) ->
 
 def verify_integrity_manifest(artifact_path: str | Path, manifest_path: str | Path) -> bool:
     return verify_manifest(Path(artifact_path), Path(manifest_path))
+
+
+def run_phishing_command(
+    text: str | None = None,
+    file_path: Path | None = None,
+    sender: str = "",
+    as_json: bool = False,
+    database_path: Path | None = None,
+    case_id: str | None = None,
+    export_path: Path | None = None,
+) -> int:
+    """Analyze a suspicious message, email, or SMS for phishing and fraud indicators."""
+    import re
+    from ransomeye.phishing import PhishingDetector, MessagePayload, ingest_phishing_finding
+
+    if not text and not file_path:
+        raise ValueError("Either --text or --file must be provided for phishing analysis.")
+
+    if file_path:
+        path = Path(file_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Message file not found: {path}")
+
+        if path.suffix.lower() == ".json":
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                payload = MessagePayload.from_dict(data)
+            except Exception as e:
+                raise ValueError(f"Failed to parse JSON message: {e}")
+        elif path.suffix.lower() in (".eml", ".msg"):
+            payload = MessagePayload.from_email_file(path)
+        else:
+            raw_content = path.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"^(From|Subject|To):", raw_content, re.MULTILINE):
+                try:
+                    payload = MessagePayload.from_email_bytes(path.read_bytes())
+                except Exception:
+                    payload = MessagePayload.from_text(raw_content, sender=sender)
+            else:
+                payload = MessagePayload.from_text(raw_content, sender=sender)
+    else:
+        payload = MessagePayload.from_text(str(text), sender=sender)
+
+    detector = PhishingDetector()
+    result = detector.analyze(payload)
+
+    if database_path and case_id:
+        store = EvidenceStore(database_path)
+        try:
+            case = store.get_case(case_id)
+            if not case:
+                raise KeyError(f"Case not found: {case_id}")
+            finding_id = ingest_phishing_finding(
+                store=store,
+                case_id=case_id,
+                result=result,
+                source_artifact=str(file_path.name if file_path else "cli_text"),
+            )
+            if not as_json:
+                print(f"[+] Phishing finding ingested into case {case_id}: finding_id={finding_id}\n")
+        finally:
+            store.close()
+
+    if as_json:
+        output_str = json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+        print(output_str)
+    else:
+        output_str = result.to_summary_text()
+        print(output_str)
+
+    if export_path:
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        if as_json or export_path.suffix.lower() == ".json":
+            export_path.write_text(json.dumps(result.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        else:
+            export_path.write_text(output_str, encoding="utf-8")
+        if not as_json:
+            print(f"\n[+] Report exported to: {export_path}")
+
+    return 0
+
+
+def run_dashboard_command(
+    database_path: Path | None = None,
+    host: str = "127.0.0.1",
+    port: int = 8080,
+) -> int:
+    """Launch the RansomEye HTTP Analyst Dashboard server."""
+    import ransomeye.dashboard_server as ds
+
+    if database_path:
+        ds.DB_PATH = Path(database_path)
+    elif os.environ.get("RANSOMEYE_DB"):
+        ds.DB_PATH = Path(os.environ["RANSOMEYE_DB"])
+    elif Path("data/ransomeye.db").is_file():
+        ds.DB_PATH = Path("data/ransomeye.db")
+
+    ds.run_server(host=host, port=port)
+    return 0
+
+
+def run_static_analysis_command(
+    file_path: Path,
+    as_json: bool = False,
+    database_path: Path | None = None,
+    case_id: str | None = None,
+    export_path: Path | None = None,
+) -> int:
+    """Perform non-executing static analysis of a file or executable binary."""
+    from ransomeye.static_analyzer import StaticAnalyzer, ingest_static_finding
+
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Target file not found: {path}")
+
+    analyzer = StaticAnalyzer()
+    result = analyzer.analyze_file(path)
+
+    if database_path and case_id:
+        store = EvidenceStore(database_path)
+        try:
+            case = store.get_case(case_id)
+            if not case:
+                raise KeyError(f"Case not found: {case_id}")
+            finding_id = ingest_static_finding(
+                store=store,
+                case_id=case_id,
+                result=result,
+            )
+            if not as_json:
+                print(f"[+] Static analysis finding ingested into case {case_id}: finding_id={finding_id}\n")
+        finally:
+            store.close()
+
+    if as_json:
+        output_str = json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+        print(output_str)
+    else:
+        output_str = result.to_summary_text()
+        print(output_str)
+
+    if export_path:
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        if as_json or export_path.suffix.lower() == ".json":
+            export_path.write_text(json.dumps(result.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        else:
+            export_path.write_text(output_str, encoding="utf-8")
+        if not as_json:
+            print(f"\n[+] Report exported to: {export_path}")
+
+    return 0
 
 
 def main() -> None:
@@ -1865,6 +2039,99 @@ def main() -> None:
         help="Event identifier.",
     )
 
+    phishing_parser = subparsers.add_parser(
+        "phishing",
+        help="Analyze messages, emails, or SMS for phishing and financial fraud indicators.",
+    )
+    phishing_parser.add_argument(
+        "--text",
+        help="Raw text or SMS message body to analyze.",
+    )
+    phishing_parser.add_argument(
+        "--file",
+        type=Path,
+        help="Path to an email (.eml, .txt) or JSON message payload file.",
+    )
+    phishing_parser.add_argument(
+        "--sender",
+        default="",
+        help="Optional sender address or caller ID for text analysis.",
+    )
+    phishing_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output analysis verdict in JSON format.",
+    )
+    phishing_parser.add_argument(
+        "--database",
+        type=Path,
+        help="Optional path to RansomEye database to ingest findings into a case.",
+    )
+    phishing_parser.add_argument(
+        "--case",
+        dest="case_id",
+        help="Optional case ID to link phishing findings with endpoint investigation.",
+    )
+    phishing_parser.add_argument(
+        "--export",
+        type=Path,
+        help="Optional file path to export analysis report.",
+    )
+
+    dashboard_parser = subparsers.add_parser(
+        "dashboard",
+        help="Launch the local RansomEye analyst console HTTP server.",
+    )
+    dashboard_parser.add_argument(
+        "--database",
+        type=Path,
+        default=Path("data/ransomeye.db"),
+        help="Path to the RansomEye SQLite database (default: data/ransomeye.db).",
+    )
+    dashboard_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host address to bind dashboard server (default: 127.0.0.1).",
+    )
+    dashboard_parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Port to serve the analyst console (default: 8080).",
+    )
+
+    static_parser = subparsers.add_parser(
+        "static",
+        help="Perform non-executing static analysis and PE inspection on a file.",
+    )
+    static_parser.add_argument(
+        "--file",
+        required=True,
+        dest="file_path",
+        type=Path,
+        help="Path to executable, script, or suspicious file to analyze.",
+    )
+    static_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output static analysis findings in JSON format.",
+    )
+    static_parser.add_argument(
+        "--database",
+        type=Path,
+        help="Optional path to RansomEye database to ingest findings into a case.",
+    )
+    static_parser.add_argument(
+        "--case",
+        dest="case_id",
+        help="Optional case ID to link static findings with endpoint case.",
+    )
+    static_parser.add_argument(
+        "--export",
+        type=Path,
+        help="Optional file path to export analysis report.",
+    )
+
     args = parser.parse_args()
 
     if args.command == "collect":
@@ -2394,6 +2661,39 @@ def main() -> None:
             parser.exit(1, f"{exc}\n")
         finally:
             store.close()
+    elif args.command == "phishing":
+        try:
+            run_phishing_command(
+                text=args.text,
+                file_path=args.file,
+                sender=args.sender,
+                as_json=args.json,
+                database_path=args.database,
+                case_id=args.case_id,
+                export_path=args.export,
+            )
+        except (FileNotFoundError, ValueError, KeyError, sqlite3.Error, OSError) as exc:
+            parser.exit(1, f"Phishing analysis failed: {exc}\n")
+    elif args.command == "dashboard":
+        try:
+            run_dashboard_command(
+                database_path=args.database,
+                host=args.host,
+                port=args.port,
+            )
+        except Exception as exc:
+            parser.exit(1, f"Dashboard server error: {exc}\n")
+    elif args.command == "static":
+        try:
+            run_static_analysis_command(
+                file_path=args.file_path,
+                as_json=args.json,
+                database_path=args.database,
+                case_id=args.case_id,
+                export_path=args.export,
+            )
+        except (FileNotFoundError, ValueError, KeyError, sqlite3.Error, OSError) as exc:
+            parser.exit(1, f"Static analysis failed: {exc}\n")
 
 if __name__ == "__main__":
     main()

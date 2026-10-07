@@ -14,13 +14,33 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from ransomeye.advanced_timeline import build_advanced_timeline
 from ransomeye.collection import CollectionPipeline
-from ransomeye.commands import run_collect_file_command
+from ransomeye.commands import (
+    ingest_evidence,
+    run_collect_file_command,
+    verify_integrity_manifest,
+    write_integrity_manifest,
+)
+from ransomeye.export import (
+    export_case,
+    get_lock_owner_status,
+    read_export_lock,
+    remove_export_lock,
+)
+from ransomeye.integrity import sha256_file
 from ransomeye.investigation import load_investigation
 from ransomeye.investigation_graph import build_investigation_graph
 from ransomeye.investigation_validation import validate_investigation
+from ransomeye.phishing import MessagePayload, PhishingDetector, ingest_phishing_finding
 from ransomeye.reconstruction import reconstruct_attack
 from ransomeye.report import generate_case_report
-from ransomeye.storage import EvidenceStore
+from ransomeye.static_analyzer import StaticAnalyzer, ingest_static_finding
+from ransomeye.storage import (
+    EvidenceStore,
+    backup_database,
+    check_database_integrity,
+    restore_database,
+)
+from ransomeye.timeline import build_process_tree, get_case_timeline
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +145,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def handle_api_get(self, path: str, parsed_path: Any) -> None:
         """Route GET API requests."""
-        parts = path.split("/")[2:]  # Drop ['', 'api']
+        parts = [unquote(p) for p in path.split("/")[2:]]  # Drop ['', 'api']
 
         try:
             if parts[0] == "cases":
@@ -133,8 +153,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     json_response(self, 200, {"cases": []})
                     return
                 store = _get_store()
-                cases = store.connection.execute("SELECT * FROM cases ORDER BY created_at DESC").fetchall()
-                json_response(self, 200, {"cases": [dict(c) for c in cases]})
+                try:
+                    cases = store.connection.execute("SELECT * FROM cases ORDER BY created_at DESC").fetchall()
+                    case_list = []
+                    for c in cases:
+                        cd = dict(c)
+                        cid = cd.get("case_id")
+                        try:
+                            ev_c = store.connection.execute("SELECT COUNT(*) FROM events WHERE case_id = ?", (cid,)).fetchone()[0]
+                            fn_c = store.connection.execute("SELECT COUNT(*) FROM findings WHERE case_id = ?", (cid,)).fetchone()[0]
+                            ass = store.get_latest_assessment(cid)
+                            inc_c = len(ass.get("correlations", [])) if ass else 0
+                            cd["events_count"] = ev_c
+                            cd["findings_count"] = fn_c
+                            cd["incidents_count"] = inc_c
+                        except Exception:
+                            cd["events_count"] = 0
+                            cd["findings_count"] = 0
+                            cd["incidents_count"] = 0
+                        case_list.append(cd)
+                    json_response(self, 200, {"cases": case_list})
+                finally:
+                    store.close()
                 return
 
             if parts[0] == "collect" and len(parts) > 1 and parts[1] == "status":
@@ -178,6 +218,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if parts[0] == "case" and len(parts) > 1:
                 case_id = parts[1]
                 _validate_safe_id(case_id, "case_id")
+                if len(parts) > 2 and parts[2] == "history":
+                    history_rows = store.get_case_history(case_id)
+                    history = []
+                    for h in history_rows:
+                        item = dict(h)
+                        item["status"] = h.get("new_status")
+                        item["timestamp"] = h.get("changed_at")
+                        item["notes"] = h.get("note")
+                        history.append(item)
+                    return json_response(self, 200, {"case_id": case_id, "history": history})
+
                 case = store.connection.execute("SELECT * FROM cases WHERE case_id = ?", (case_id,)).fetchone()
                 if not case:
                     return error_response(self, 404, f"Case not found: {case_id}")
@@ -297,8 +348,85 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     }
                 })
 
+            elif parts[0] == "evidence" and len(parts) > 1:
+                case_id = parts[1]
+                _validate_safe_id(case_id, "case_id")
+                case = store.get_case(case_id)
+                if not case:
+                    return error_response(self, 404, f"Case not found: {case_id}")
+
+                if len(parts) > 2 and parts[2] == "search":
+                    qp = parse_qs(parsed_path.query)
+                    q = qp.get("q", [""])[0]
+                    etype = qp.get("event_type", [""])[0]
+                    pname = qp.get("process_name", [""])[0]
+                    pid_val = qp.get("pid", [""])[0]
+                    pguid = qp.get("process_guid", [""])[0]
+
+                    if q:
+                        results = store.search_events(case_id, q)
+                    else:
+                        results = store.get_case_events(case_id)
+
+                    if etype:
+                        results = [e for e in results if str(e.get("event_type", "")).lower() == etype.lower()]
+                    if pname:
+                        results = [e for e in results if pname.lower() in str(e.get("process_name", "")).lower()]
+                    if pid_val:
+                        results = [e for e in results if str(e.get("pid", "")) == str(pid_val)]
+                    if pguid:
+                        results = [e for e in results if pguid.strip("{}").lower() in str(e.get("process_guid", "")).strip("{}").lower()]
+
+                    return json_response(self, 200, {"results": results[:200]})
+
+                elif len(parts) > 3 and parts[3] == "trace":
+                    event_id = parts[2]
+                    event = store.get_event(case_id, event_id)
+                    if not event:
+                        return error_response(self, 404, f"Event not found in case {case_id}: {event_id}")
+
+                    timeline = get_case_timeline(DB_PATH, case_id)
+                    proc_tree = build_process_tree(timeline)
+                    nodes = proc_tree.get("nodes", {})
+
+                    pid_v = str(event.get("pid")) if event.get("pid") is not None else None
+                    current_p = nodes.get(pid_v) if pid_v else None
+                    parent_p = None
+                    if current_p and current_p.get("parent_pid"):
+                        parent_p = nodes.get(str(current_p.get("parent_pid")))
+
+                    findings = store.get_event_findings(case_id, event_id)
+                    finding_ids = [str(f.get("finding_id")) for f in findings]
+                    assessment = store.get_latest_assessment(case_id)
+                    matched_corrs = []
+                    if assessment and assessment.get("correlations"):
+                        for corr in assessment["correlations"]:
+                            corr_fids = [str(x) for x in corr.get("finding_ids", [])]
+                            if any(fid in corr_fids for fid in finding_ids) or (event_id in corr.get("evidence_ids", [])):
+                                matched_corrs.append(corr)
+
+                    return json_response(self, 200, {
+                        "event": event,
+                        "trace": {
+                            "parent_process": parent_p,
+                            "current_process": current_p,
+                            "findings": findings,
+                            "incidents": matched_corrs,
+                        }
+                    })
+
+                elif len(parts) > 2:
+                    event_id = parts[2]
+                    event = store.get_event(case_id, event_id)
+                    if not event:
+                        return error_response(self, 404, f"Event not found in case {case_id}: {event_id}")
+                    return json_response(self, 200, {"event": event})
+
+                results = store.get_case_events(case_id)
+                return json_response(self, 200, {"results": results[:200]})
+
             elif parts[0] == "process" and len(parts) > 2:
-                case_id, process_query = parts[1], parts[2]
+                case_id, process_query = parts[1], parts[2].strip()
                 _validate_safe_id(case_id, "case_id")
                 case = store.get_case(case_id)
                 if not case:
@@ -307,24 +435,65 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 investigation = load_investigation(DB_PATH, case_id)
                 graph = build_investigation_graph(investigation)
 
-                target_id = f"PROCESS:{process_query}"
-                node = graph.get_node(target_id)
-                matched_nodes = [node] if node else [n for n in graph.get_process_nodes() if str(n.attributes.get("pid")) == str(process_query)]
+                cleaned_query = process_query
+                if cleaned_query.startswith("PROCESS:"):
+                    cleaned_query = cleaned_query[8:]
+                elif cleaned_query.startswith("guid:"):
+                    cleaned_query = cleaned_query[5:]
+                elif cleaned_query.startswith("PID:"):
+                    cleaned_query = cleaned_query[4:]
 
-                if not matched_nodes:
+                target_node = None
+                for cand in [
+                    process_query,
+                    f"PROCESS:{process_query}",
+                    f"PROCESS:{cleaned_query}",
+                    f"PROCESS:PID:{cleaned_query}",
+                    f"PROCESS:{{{cleaned_query.strip('{}')}}}",
+                    f"PROCESS:{cleaned_query.strip('{}')}",
+                ]:
+                    target_node = graph.get_node(cand)
+                    if target_node:
+                        break
+
+                if not target_node:
+                    process_nodes = graph.get_process_nodes()
+                    for n in process_nodes:
+                        if str(n.attributes.get("pid")) == cleaned_query:
+                            target_node = n
+                            break
+                    if not target_node:
+                        norm_q = cleaned_query.strip("{}").lower()
+                        for n in process_nodes:
+                            node_guid = n.node_id.replace("PROCESS:", "").strip("{}").lower()
+                            attr_guid = str(n.attributes.get("guid", "")).strip("{}").lower()
+                            if node_guid == norm_q or attr_guid == norm_q:
+                                target_node = n
+                                break
+
+                if not target_node:
                     return error_response(self, 404, f"Process not found in case {case_id}: {process_query}")
 
-                target_node = matched_nodes[0]
                 pid = target_node.attributes.get("pid")
                 guid = target_node.node_id.replace("PROCESS:", "") if not target_node.node_id.startswith("PROCESS:PID:") else "unavailable"
 
                 image_path = target_node.attributes.get("image") or target_node.attributes.get("image_path") or "unavailable"
                 command_line = target_node.attributes.get("command_line") or "unavailable"
+                if target_node.attributes.get("process_name") and image_path == "unavailable":
+                    image_path = target_node.attributes.get("process_name")
+
+                norm_node_guid = guid.strip("{}").lower() if guid != "unavailable" else None
 
                 for ev in investigation.evidence:
-                    if ev.process_guid == guid or (str(ev.pid) == str(pid) and (guid == "unavailable" or ev.process_guid == guid)):
+                    ev_guid = ev.process_guid.strip("{}").lower() if ev.process_guid else None
+                    matches_guid = bool(norm_node_guid and ev_guid and ev_guid == norm_node_guid)
+                    matches_pid = bool(pid is not None and str(ev.pid) == str(pid))
+
+                    if matches_guid or (matches_pid and (guid == "unavailable" or matches_guid)):
                         if getattr(ev, "image_path", None) and image_path == "unavailable":
                             image_path = ev.image_path
+                        elif getattr(ev, "process_name", None) and image_path == "unavailable":
+                            image_path = ev.process_name
                         if ev.command_line and command_line == "unavailable":
                             command_line = ev.command_line
 
@@ -404,6 +573,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     ]
                 })
 
+            elif parts[0] == "tree" and len(parts) > 1:
+                case_id = parts[1]
+                _validate_safe_id(case_id, "case_id")
+                case = store.get_case(case_id)
+                if not case:
+                    return error_response(self, 404, f"Case not found: {case_id}")
+                timeline = get_case_timeline(DB_PATH, case_id)
+                proc_tree = build_process_tree(timeline)
+                json_response(self, 200, {"tree": proc_tree})
+
             elif parts[0] == "reconstruction" and len(parts) > 1:
                 case_id = parts[1]
                 _validate_safe_id(case_id, "case_id")
@@ -457,6 +636,100 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "issues": [{"category": i.category, "message": i.message, "severity": i.severity} for i in val_res.issues],
                 })
 
+            elif parts[0] == "investigation" and len(parts) > 1:
+                case_id = parts[1]
+                _validate_safe_id(case_id, "case_id")
+                case = store.get_case(case_id)
+                if not case:
+                    return error_response(self, 404, f"Case not found: {case_id}")
+
+                investigation = load_investigation(DB_PATH, case_id)
+                if len(parts) > 2 and parts[2] == "graph":
+                    graph = build_investigation_graph(investigation)
+                    nodes = [{"node_id": n.node_id, "node_type": n.node_type, "label": n.label, "attributes": n.attributes} for n in graph.nodes.values()]
+                    edges = [{"edge_id": e.edge_id, "source_id": e.source_id, "target_id": e.target_id, "relationship": e.relationship, "evidence_ids": list(e.evidence_ids)} for e in graph.edges]
+                    return json_response(self, 200, {"nodes": nodes, "edges": edges})
+                elif len(parts) > 2 and parts[2] == "tree":
+                    tree = build_process_tree(investigation.timeline)
+                    return json_response(self, 200, {"tree": tree})
+                elif len(parts) > 2 and parts[2] == "validation":
+                    val_res = validate_investigation(DB_PATH, case_id)
+                    return json_response(self, 200, {
+                        "case_id": case_id,
+                        "passed": val_res.passed,
+                        "validation": {
+                            "valid": val_res.passed,
+                            "passed": val_res.passed,
+                            "checks_performed": "Complete",
+                            "errors": [i.message for i in val_res.issues if i.severity == "ERROR"],
+                            "issues": [{"category": i.category, "message": i.message, "severity": i.severity} for i in val_res.issues],
+                        },
+                        "rendered": val_res.render(),
+                        "issues": [{"category": i.category, "message": i.message, "severity": i.severity} for i in val_res.issues],
+                    })
+
+                s = investigation.summary
+                json_response(self, 200, {
+                    "case_id": s.case_id,
+                    "summary": {
+                        "case_id": s.case_id,
+                        "case_name": s.case_name,
+                        "host": s.host,
+                        "status": s.status,
+                        "total_nodes": s.process_count + s.evidence_count,
+                        "total_edges": s.correlation_count + s.finding_count,
+                        "evidence_count": s.evidence_count,
+                        "finding_count": s.finding_count,
+                        "correlation_count": s.correlation_count,
+                        "process_count": s.process_count,
+                        "threat_score": s.threat_score,
+                        "severity": s.severity,
+                        "confidence": s.confidence,
+                    },
+                    "investigation": {
+                        "case_id": s.case_id,
+                        "case_name": s.case_name,
+                        "host": s.host,
+                        "status": s.status,
+                        "evidence_count": s.evidence_count,
+                        "finding_count": s.finding_count,
+                        "correlation_count": s.correlation_count,
+                        "process_count": s.process_count,
+                        "threat_score": s.threat_score,
+                        "severity": s.severity,
+                        "confidence": s.confidence,
+                        "first_activity": s.first_activity,
+                        "last_activity": s.last_activity,
+                    }
+                })
+
+            elif parts[0] == "custody" and len(parts) > 1:
+                case_id = parts[1]
+                _validate_safe_id(case_id, "case_id")
+                case = store.get_case(case_id)
+                if not case:
+                    return error_response(self, 404, f"Case not found: {case_id}")
+                events = store.get_custody_events(case_id)
+                json_response(self, 200, {"case_id": case_id, "custody_events": events, "entries": events})
+
+            elif parts[0] == "export" and len(parts) > 1 and parts[1] == "lock":
+                qs = parse_qs(parsed_path.query)
+                output_param = qs.get("output", [""])[0] or qs.get("output_dir", [""])[0] or qs.get("case_id", [""])[0] or "exports"
+                try:
+                    lock_info = read_export_lock(Path(output_param))
+                    owner_status = get_lock_owner_status(lock_info)
+                    json_response(self, 200, {"locked": lock_info is not None, "lock": lock_info, "owner_status": owner_status.value})
+                except FileNotFoundError:
+                    json_response(self, 200, {"locked": False, "lock": None, "owner_status": "NONE"})
+
+            elif parts[0] == "database" and len(parts) > 1 and parts[1] in ("check", "status"):
+                is_ok = check_database_integrity(DB_PATH)
+                json_response(self, 200, {
+                    "status": "OK" if is_ok else "CORRUPTED",
+                    "ok": is_ok,
+                    "database": str(DB_PATH.resolve()),
+                })
+
             else:
                 error_response(self, 404, "Unknown API endpoint")
 
@@ -471,7 +744,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def handle_api_post(self, path: str, parsed_path: Any) -> None:
         """Route POST API requests."""
-        parts = path.split("/")[2:]  # Drop ['', 'api']
+        parts = [unquote(p) for p in path.split("/")[2:]]  # Drop ['', 'api']
 
         content_len = int(self.headers.get("Content-Length", 0))
         post_data = self.rfile.read(content_len).decode("utf-8") if content_len > 0 else "{}"
@@ -555,22 +828,289 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "summary": summary,
                 })
 
+            elif parts[0] == "cases" or (parts[0] == "case" and len(parts) > 1 and parts[1] == "create"):
+                if not DB_PATH:
+                    return error_response(self, 400, "Database not configured")
+                case_id = body.get("case_id")
+                case_name = body.get("case_name")
+                host = body.get("host")
+                if not case_id:
+                    return error_response(self, 400, "case_id is required")
+                _validate_safe_id(case_id, "case_id")
+                store = EvidenceStore(DB_PATH)
+                try:
+                    existing = store.get_case(case_id)
+                    if existing:
+                        return error_response(self, 400, f"Case already exists: {case_id}")
+                    store.create_case(case_id, case_name, host)
+                    created = store.get_case(case_id)
+                finally:
+                    store.close()
+                json_response(self, 201, {"message": "Case created", "case": created})
+
+            elif parts[0] == "case" and len(parts) > 2 and parts[2] in ("status", "update"):
+                if not DB_PATH or not DB_PATH.is_file():
+                    return error_response(self, 400, "Database not configured")
+                case_id = parts[1]
+                _validate_safe_id(case_id, "case_id")
+                status = body.get("status")
+                note = body.get("notes") or body.get("note")
+                if not status:
+                    return error_response(self, 400, "status is required")
+                status_raw = str(status).upper().strip()
+                status_map = {
+                    "IN_PROGRESS": "TRIAGED",
+                    "INVESTIGATING": "TRIAGED",
+                    "ARCHIVED": "CLOSED",
+                }
+                status_normalized = status_map.get(status_raw, status_raw)
+                store = _get_store()
+                try:
+                    store.update_case_status(case_id, status_normalized, note or "")
+                    updated = store.get_case(case_id)
+                finally:
+                    store.close()
+                json_response(self, 200, {"message": "Case status updated", "case": updated, "status": status_normalized})
+
+            elif parts[0] == "ingest":
+                if not DB_PATH:
+                    return error_response(self, 400, "Database not configured")
+                case_id = body.get("case_id")
+                file_path = body.get("file_path")
+                format_type = body.get("format_type", "auto")
+                case_name = body.get("case_name")
+                host = body.get("host")
+                if not case_id or not file_path:
+                    return error_response(self, 400, "case_id and file_path are required")
+                _validate_safe_id(case_id, "case_id")
+                target_file = Path(file_path).resolve()
+                if not target_file.is_file():
+                    return error_response(self, 400, f"Evidence file not found: {file_path}")
+                summary = ingest_evidence(
+                    database_path=DB_PATH,
+                    case_id=case_id,
+                    file_path=target_file,
+                    format_type=format_type,
+                    case_name=case_name,
+                    host=host,
+                )
+                events_ingested = summary.get("events_accepted", summary.get("events_read", summary.get("events_ingested", 0))) if isinstance(summary, dict) else 0
+                findings_generated = summary.get("findings_count", summary.get("findings_generated", 0)) if isinstance(summary, dict) else 0
+                incidents_correlated = summary.get("correlations_count", summary.get("incidents_correlated", 0)) if isinstance(summary, dict) else 0
+                json_response(self, 200, {
+                    "message": "Ingestion complete",
+                    "summary": summary,
+                    "events_ingested": events_ingested,
+                    "findings_generated": findings_generated,
+                    "incidents_correlated": incidents_correlated,
+                })
+
+            elif parts[0] == "custody" and len(parts) > 1:
+                if not DB_PATH or not DB_PATH.is_file():
+                    return error_response(self, 400, "Database not configured")
+                case_id = parts[1]
+                _validate_safe_id(case_id, "case_id")
+                artifact_path = body.get("artifact_path") or body.get("artifact")
+                sha256 = body.get("sha256")
+                act_raw = (body.get("action") or "created").lower().strip()
+                action = act_raw if act_raw in ("created", "verified", "exported", "reviewed") else (
+                    "created" if act_raw in ("collected", "create", "new") else
+                    "reviewed" if act_raw in ("transferred", "transfer", "analyzed") else
+                    "exported" if act_raw in ("archived", "archive", "export") else "created"
+                )
+                analyst = body.get("analyst", "analyst")
+                note = body.get("notes") or body.get("note")
+                if not artifact_path:
+                    return error_response(self, 400, "artifact_path is required")
+                art_p = Path(artifact_path).resolve()
+                if not sha256:
+                    if art_p.is_file():
+                        sha256 = sha256_file(art_p)
+                    else:
+                        sha256 = "0" * 64
+                store = _get_store()
+                try:
+                    store.record_custody_event(case_id, str(art_p), sha256, action, analyst, note or "")
+                finally:
+                    store.close()
+                entry_dict = {
+                    "case_id": case_id,
+                    "artifact": str(art_p),
+                    "action": body.get("action", action),
+                    "action_db": action,
+                    "analyst": analyst,
+                    "sha256": sha256,
+                    "notes": note,
+                }
+                json_response(self, 201, {"message": "Custody event recorded", "entry": entry_dict})
+
+            elif parts[0] == "integrity" and len(parts) > 1:
+                if parts[1] == "hash":
+                    input_path = body.get("input_path") or body.get("target_path")
+                    output_path = body.get("output_path") or body.get("manifest_path")
+                    if not input_path:
+                        return error_response(self, 400, "input_path is required")
+                    in_p = Path(input_path).resolve()
+                    if not in_p.exists():
+                        return error_response(self, 400, f"Input path not found: {input_path}")
+                    out_p = Path(output_path).resolve() if output_path else None
+                    manifest_path = write_integrity_manifest(in_p, out_p)
+                    content = Path(manifest_path).read_text(encoding="utf-8")
+                    json_response(self, 200, {"manifest_path": str(manifest_path), "content": content})
+                elif parts[1] == "verify":
+                    artifact_path = body.get("artifact_path") or body.get("target_path")
+                    manifest_path = body.get("manifest_path")
+                    if not artifact_path or not manifest_path:
+                        return error_response(self, 400, "artifact_path and manifest_path are required")
+                    art_p = Path(artifact_path).resolve()
+                    man_p = Path(manifest_path).resolve()
+                    if not art_p.exists():
+                        return error_response(self, 400, f"Artifact not found: {artifact_path}")
+                    if not man_p.is_file():
+                        return error_response(self, 400, f"Manifest not found: {manifest_path}")
+                    verified = verify_integrity_manifest(art_p, man_p)
+                    json_response(self, 200, {
+                        "verified": verified,
+                        "artifact": str(art_p),
+                        "manifest": str(man_p),
+                        "status": "MATCHED" if verified else "FAILED",
+                    })
+                else:
+                    error_response(self, 404, "Unknown integrity endpoint")
+
+            elif parts[0] == "export":
+                if len(parts) > 1 and parts[1] == "unlock":
+                    output_path = body.get("output_path") or body.get("output_dir") or "exports"
+                    force = bool(body.get("force", True))
+                    break_lock = bool(body.get("break_lock", True))
+                    try:
+                        removed = remove_export_lock(Path(output_path), force=force, break_lock=break_lock)
+                    except FileNotFoundError:
+                        removed = False
+                    json_response(self, 200, {"message": "Export lock removed", "removed_lock": removed})
+                else:
+                    if not DB_PATH or not DB_PATH.is_file():
+                        return error_response(self, 400, "Database not configured")
+                    case_id = body.get("case_id")
+                    output_path = body.get("output_path") or body.get("output_dir")
+                    if not case_id or not output_path:
+                        return error_response(self, 400, "case_id and output_path are required")
+                    _validate_safe_id(case_id, "case_id")
+                    exported = export_case(DB_PATH, case_id, Path(output_path))
+                    json_response(self, 200, {
+                        "message": "Export completed successfully",
+                        "export_path": str(exported),
+                        "exported_path": str(exported),
+                    })
+
+            elif parts[0] == "database" and len(parts) > 1:
+                if not DB_PATH:
+                    return error_response(self, 400, "Database not configured")
+                if parts[1] == "check":
+                    if not DB_PATH.is_file():
+                        EvidenceStore(DB_PATH).close()
+                    is_ok = check_database_integrity(DB_PATH)
+                    json_response(self, 200, {"status": "OK" if is_ok else "CORRUPTED", "ok": is_ok, "database": str(DB_PATH.resolve())})
+                elif parts[1] == "backup":
+                    if not DB_PATH.is_file():
+                        EvidenceStore(DB_PATH).close()
+                    output_path = body.get("output_path") or body.get("backup_path")
+                    out_p = Path(output_path) if output_path else None
+                    backup_p = backup_database(DB_PATH, out_p)
+                    json_response(self, 200, {"message": "Database backup created", "backup_path": str(backup_p)})
+                elif parts[1] == "restore":
+                    confirm = bool(body.get("confirm", True))
+                    if not confirm:
+                        return error_response(self, 400, "Database restore requires explicit confirmation (confirm: true)")
+                    backup_path = body.get("backup_path")
+                    target_path = body.get("target_path")
+                    if not backup_path:
+                        return error_response(self, 400, "backup_path is required")
+                    b_p = Path(backup_path).resolve()
+                    if not b_p.is_file():
+                        return error_response(self, 400, f"Backup file not found: {backup_path}")
+                    t_p = Path(target_path).resolve() if target_path else DB_PATH
+                    restored_p = restore_database(b_p, t_p)
+                    json_response(self, 200, {"message": "Database restored successfully", "status": "OK", "restored_path": str(restored_p)})
+                else:
+                    error_response(self, 404, "Unknown database endpoint")
+
+            elif parts[0] == "static" and len(parts) > 1 and parts[1] == "analyze":
+                file_path = body.get("file_path")
+                case_id = body.get("case_id")
+                if not file_path:
+                    return error_response(self, 400, "file_path is required")
+                f_p = Path(file_path).resolve()
+                if not f_p.is_file():
+                    return error_response(self, 400, f"Target file not found: {file_path}")
+                analyzer = StaticAnalyzer()
+                res = analyzer.analyze_file(f_p)
+                res_dict = res.to_dict()
+                finding_id = None
+                if case_id and DB_PATH and DB_PATH.is_file():
+                    _validate_safe_id(case_id, "case_id")
+                    store = _get_store()
+                    try:
+                        finding_id = ingest_static_finding(store, case_id, res, f_p.name)
+                    finally:
+                        store.close()
+                json_response(self, 200, {"analysis": res_dict, "finding_id": finding_id})
+
+            elif parts[0] == "phishing" and len(parts) > 1 and parts[1] == "analyze":
+                text = body.get("text") or body.get("body") or ""
+                sender = body.get("sender") or ""
+                subject = body.get("subject") or ""
+                file_path = body.get("file_path")
+                case_id = body.get("case_id")
+                if file_path:
+                    f_p = Path(file_path).resolve()
+                    if not f_p.is_file():
+                        return error_response(self, 400, f"Message file not found: {file_path}")
+                    raw = f_p.read_text(encoding="utf-8", errors="replace")
+                    if f_p.suffix.lower() == ".eml":
+                        payload = MessagePayload.from_eml(raw, sender=sender)
+                    else:
+                        payload = MessagePayload.from_text(raw, sender=sender)
+                else:
+                    if not text and not subject:
+                        return error_response(self, 400, "text or file_path is required")
+                    payload = MessagePayload.from_dict({"text": str(text), "sender": sender, "subject": subject})
+                detector = PhishingDetector()
+                res = detector.analyze(payload)
+                res_dict = res.to_dict()
+                res_dict["threat_level"] = (res_dict.get("risk_level") or "LOW").upper()
+                finding_id = None
+                if case_id and DB_PATH and DB_PATH.is_file():
+                    _validate_safe_id(case_id, "case_id")
+                    store = _get_store()
+                    try:
+                        source = f_p.name if file_path else "analyst_console_text"
+                        finding_id = ingest_phishing_finding(store, case_id, res, source)
+                    finally:
+                        store.close()
+                json_response(self, 200, {"analysis": res_dict, "assessment": res_dict, "finding_id": finding_id})
+
             else:
                 error_response(self, 404, "Unknown API POST endpoint")
 
         except ValueError as exc:
             error_response(self, 400, str(exc))
+        except FileNotFoundError as exc:
+            error_response(self, 404, str(exc))
+        except FileExistsError as exc:
+            error_response(self, 409, str(exc))
         except Exception as exc:
             logger.exception("API POST Error")
             error_response(self, 500, str(exc))
 
 
-def run_server(port: int = 8080) -> None:
-    """Run the HTTP dashboard server."""
-    server_address = ("", port)
+def run_server(host: str = "127.0.0.1", port: int = 8080) -> None:
+    """Run the HTTP dashboard server securely on specified host and port."""
+    server_address = (host, port)
     httpd = ThreadingHTTPServer(server_address, DashboardHandler)
     db_msg = f"Using database: {DB_PATH.absolute()}" if DB_PATH else "WARNING: No database configured. Dashboard will show empty state."
-    print(f"Starting RansomEye dashboard on http://localhost:{port}")
+    display_host = "localhost" if host in ("127.0.0.1", "") else host
+    print(f"Starting RansomEye dashboard on http://{display_host}:{port}")
     print(db_msg)
     httpd.serve_forever()
 
@@ -579,7 +1119,8 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="RansomEye Analyst Dashboard")
     parser.add_argument("--database", "-d", help="Path to the RansomEye SQLite database")
-    parser.add_argument("--port", "-p", type=int, default=8080, help="Port to run the dashboard on")
+    parser.add_argument("--host", "-H", default="127.0.0.1", help="Host address to bind the dashboard server (default: 127.0.0.1)")
+    parser.add_argument("--port", "-p", type=int, default=8080, help="Port to run the dashboard on (default: 8080)")
     args = parser.parse_args()
 
     if args.database:
@@ -587,4 +1128,4 @@ if __name__ == "__main__":
     elif os.environ.get("RANSOMEYE_DB"):
         DB_PATH = Path(os.environ["RANSOMEYE_DB"])
 
-    run_server(args.port)
+    run_server(host=args.host, port=args.port)

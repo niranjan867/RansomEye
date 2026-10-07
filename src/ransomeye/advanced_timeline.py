@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from ransomeye.investigation import Investigation
 from ransomeye.investigation_graph import InvestigationGraph
 from ransomeye.reconstruction import AttackSequence, AttackStage
+
+
+def _normalize_dt(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
 
 
 @dataclass(frozen=True)
@@ -295,7 +304,7 @@ def build_advanced_timeline(
         entries,
         key=lambda e: (
             e.timestamp is None,
-            e.timestamp,
+            _normalize_dt(e.timestamp),
             _priority(e),
             e.entry_id
         )

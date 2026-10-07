@@ -29,15 +29,32 @@
             </div>
 
             <nav class="sidebar-nav">
+                <div class="nav-section-title">Core Operations</div>
                 <a href="#" class="nav-item active" data-view="overview">Overview</a>
+                <a href="#" class="nav-item" data-view="cases">Cases</a>
                 <a href="#" class="nav-item" data-view="monitor">Monitor</a>
+
+                <div class="nav-section-title">Analysis & Investigation</div>
                 <a href="#" class="nav-item" data-view="assessment">Threat Assessment</a>
                 <a href="#" class="nav-item" data-view="incidents">Incidents</a>
                 <a href="#" class="nav-item" data-view="findings">Findings</a>
                 <a href="#" class="nav-item" data-view="evidence">Evidence</a>
+                <a href="#" class="nav-item" data-view="investigation">Investigation</a>
                 <a href="#" class="nav-item" data-view="timeline">Timeline</a>
+                <a href="#" class="nav-item" data-view="tree">Process Tree</a>
                 <a href="#" class="nav-item" data-view="reconstruction">Reconstruction</a>
                 <a href="#" class="nav-item" data-view="reports">Reports</a>
+
+                <div class="nav-section-title">DFIR Operations</div>
+                <a href="#" class="nav-item" data-view="collection">Collection & Ingest</a>
+                <a href="#" class="nav-item" data-view="integrity">Integrity Verification</a>
+                <a href="#" class="nav-item" data-view="custody">Chain of Custody</a>
+                <a href="#" class="nav-item" data-view="export">Case Export</a>
+                <a href="#" class="nav-item" data-view="database">Database Maintenance</a>
+
+                <div class="nav-section-title">Specialized Analyzers</div>
+                <a href="#" class="nav-item" data-view="static">Static Analysis</a>
+                <a href="#" class="nav-item" data-view="phishing">Phishing Analysis</a>
             </nav>
 
             <div class="system-status">
@@ -340,6 +357,475 @@
             </div>
         </div>
     </template>
+
+    <!-- Cases Management -->
+    <template id="tpl-cases">
+        <div class="view-header">
+            <h2 class="view-title">Case Management</h2>
+            <p class="view-subtitle">Create, list, inspect, and update investigation cases.</p>
+        </div>
+        <div class="sub-toolbar">
+            <div style="display: flex; gap: var(--spacing-md); flex: 1;">
+                <input type="text" id="cases-search" class="input" placeholder="Search cases by ID, name, host..." style="max-width: 320px;">
+                <select id="cases-filter-status" class="input" style="max-width: 180px;">
+                    <option value="">All Statuses</option>
+                    <option value="OPEN">OPEN</option>
+                    <option value="IN_PROGRESS">IN_PROGRESS</option>
+                    <option value="CLOSED">CLOSED</option>
+                    <option value="ARCHIVED">ARCHIVED</option>
+                </select>
+            </div>
+            <button class="btn btn-primary" id="btn-create-case-modal">+ New Case</button>
+        </div>
+        <div class="panel">
+            <div class="panel-body no-padding">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Case ID</th>
+                            <th>Case Name</th>
+                            <th>Host</th>
+                            <th>Status</th>
+                            <th>Severity</th>
+                            <th>Created</th>
+                            <th>Events</th>
+                            <th>Findings</th>
+                            <th>Incidents</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="cases-tbody">
+                        <tr><td colspan="10" style="text-align: center; padding: 32px;">Loading cases...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </template>
+
+    <!-- Investigation Hub -->
+    <template id="tpl-investigation">
+        <div class="view-header">
+            <h2 class="view-title">Investigation Hub</h2>
+            <p class="view-subtitle">High-level investigation graph, validation findings, and attack synthesis.</p>
+        </div>
+        <div class="grid-overview">
+            <div class="stat-card accent">
+                <span class="stat-label">Investigation Status</span>
+                <span class="stat-val" id="inv-status">-</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Graph Nodes</span>
+                <span class="stat-val" id="inv-nodes">-</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Graph Edges</span>
+                <span class="stat-val" id="inv-edges">-</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Validation Status</span>
+                <span class="stat-val" id="inv-valid-status">-</span>
+            </div>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--spacing-xl);">
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Investigation Graph Entities</span>
+                </div>
+                <div class="panel-body" id="inv-graph-summary">
+                    <p style="color: var(--re-text-muted);">Loading graph summary...</p>
+                </div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Investigation Validation Checks</span>
+                </div>
+                <div class="panel-body" id="inv-validation-summary">
+                    <p style="color: var(--re-text-muted);">Loading validation checks...</p>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Process Tree -->
+    <template id="tpl-tree">
+        <div class="view-header">
+            <h2 class="view-title">Process Execution Tree</h2>
+            <p class="view-subtitle">Hierarchical execution tree reconstructed from process creation events.</p>
+        </div>
+        <div class="panel">
+            <div class="panel-body">
+                <div id="tree-container">
+                    <div class="empty-state">Loading process tree...</div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Collection & Ingestion -->
+    <template id="tpl-collection">
+        <div class="view-header">
+            <h2 class="view-title">Evidence Collection & Ingestion</h2>
+            <p class="view-subtitle">Ingest offline forensic evidence files or inspect live collection status.</p>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--spacing-xl);">
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Ingest Evidence File</span>
+                </div>
+                <div class="panel-body">
+                    <div class="form-group">
+                        <label class="form-label">Target Case ID</label>
+                        <input type="text" id="ingest-case-id" class="form-control mono" placeholder="e.g. CASE-001">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Evidence File Path (JSON / CSV)</label>
+                        <input type="text" id="ingest-file-path" class="form-control" placeholder="Absolute or relative path to evidence file">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Format</label>
+                        <select id="ingest-format" class="form-control">
+                            <option value="">Auto-Detect</option>
+                            <option value="json">JSON Lines / JSON</option>
+                            <option value="csv">CSV Table</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-primary" id="btn-submit-ingest">Start Ingestion</button>
+                    <div id="ingest-feedback" class="mt-md hidden"></div>
+                </div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Live Collector Status</span>
+                </div>
+                <div class="panel-body">
+                    <div id="collect-status-display" class="prop-list">
+                        <div class="prop-item"><span class="prop-key">Status</span><span class="prop-val" id="col-status-val">Loading...</span></div>
+                        <div class="prop-item"><span class="prop-key">Collector</span><span class="prop-val" id="col-name-val">-</span></div>
+                        <div class="prop-item"><span class="prop-key">Details</span><span class="prop-val" id="col-details-val">-</span></div>
+                    </div>
+                    <div class="mt-lg" style="display: flex; gap: var(--spacing-md);">
+                        <button class="btn btn-success" id="btn-collect-start">Start Live Collection</button>
+                        <button class="btn btn-danger" id="btn-collect-stop">Stop Live Collection</button>
+                    </div>
+                    <div id="collect-feedback" class="mt-md hidden"></div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Integrity Verification -->
+    <template id="tpl-integrity">
+        <div class="view-header">
+            <h2 class="view-title">Evidence Integrity Verification</h2>
+            <p class="view-subtitle">Generate SHA-256 manifests and verify cryptographic integrity of case evidence.</p>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--spacing-xl);">
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Generate Integrity Manifest (HASH)</span>
+                </div>
+                <div class="panel-body">
+                    <p style="color: var(--re-text-secondary); margin-bottom: 16px;">Calculate SHA-256 digests for all files in target directory and record to an integrity manifest.</p>
+                    <div class="form-group">
+                        <label class="form-label">Target Directory / File</label>
+                        <input type="text" id="hash-target-path" class="form-control" placeholder="e.g. data/evidence or samples/">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Manifest Output Path (Optional)</label>
+                        <input type="text" id="hash-manifest-path" class="form-control" placeholder="Default: <target>/integrity_manifest.json">
+                    </div>
+                    <button class="btn btn-primary" id="btn-run-hash">Generate Manifest</button>
+                    <div id="hash-feedback" class="mt-md hidden"></div>
+                </div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Verify Manifest (VERIFY)</span>
+                </div>
+                <div class="panel-body">
+                    <p style="color: var(--re-text-secondary); margin-bottom: 16px;">Verify current evidence directory against a previously generated SHA-256 manifest.</p>
+                    <div class="form-group">
+                        <label class="form-label">Target Directory / File</label>
+                        <input type="text" id="verify-target-path" class="form-control" placeholder="Target directory to verify">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Manifest Path</label>
+                        <input type="text" id="verify-manifest-path" class="form-control" placeholder="Path to manifest JSON file">
+                    </div>
+                    <button class="btn btn-primary" id="btn-run-verify">Verify Integrity</button>
+                    <div id="verify-feedback" class="mt-md hidden"></div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Chain of Custody -->
+    <template id="tpl-custody">
+        <div class="view-header">
+            <h2 class="view-title">Chain of Custody</h2>
+            <p class="view-subtitle">Append-only cryptographic chain of custody records for case artifacts.</p>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 2fr; gap: var(--spacing-xl);">
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Record Custody Entry</span>
+                </div>
+                <div class="panel-body">
+                    <div class="form-group">
+                        <label class="form-label">Artifact Path / Identifier</label>
+                        <input type="text" id="custody-artifact" class="form-control" placeholder="e.g. evidence/disk_image.raw">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Action</label>
+                        <select id="custody-action" class="form-control">
+                            <option value="COLLECTED">COLLECTED</option>
+                            <option value="TRANSFERRED">TRANSFERRED</option>
+                            <option value="ANALYZED">ANALYZED</option>
+                            <option value="EXPORTED">EXPORTED</option>
+                            <option value="ARCHIVED">ARCHIVED</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Analyst Name / ID</label>
+                        <input type="text" id="custody-analyst" class="form-control" placeholder="e.g. Lead Analyst">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Notes</label>
+                        <textarea id="custody-notes" class="form-control" rows="3" placeholder="Chain of custody transfer notes..."></textarea>
+                    </div>
+                    <button class="btn btn-primary" id="btn-record-custody">Record Entry</button>
+                    <div id="custody-feedback" class="mt-md hidden"></div>
+                </div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Custody Ledger</span>
+                </div>
+                <div class="panel-body no-padding">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>Artifact</th>
+                                <th>Action</th>
+                                <th>Analyst</th>
+                                <th>SHA-256</th>
+                                <th>Notes</th>
+                            </tr>
+                        </thead>
+                        <tbody id="custody-tbody">
+                            <tr><td colspan="6" style="text-align: center; padding: 32px;">No custody entries.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Case Export -->
+    <template id="tpl-export">
+        <div class="view-header">
+            <h2 class="view-title">Case Export & Lock Management</h2>
+            <p class="view-subtitle">Package case evidence, findings, and metadata into a secure bundle with concurrency controls.</p>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--spacing-xl);">
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Export Case Bundle</span>
+                </div>
+                <div class="panel-body">
+                    <div class="form-group">
+                        <label class="form-label">Output Directory</label>
+                        <input type="text" id="export-out-dir" class="form-control" placeholder="Default: ./exports">
+                    </div>
+                    <button class="btn btn-primary" id="btn-run-export">Export Case Bundle</button>
+                    <div id="export-feedback" class="mt-md hidden"></div>
+                </div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Export Concurrency Lock</span>
+                </div>
+                <div class="panel-body">
+                    <div id="export-lock-info" class="prop-list">
+                        <div class="prop-item"><span class="prop-key">Lock Status</span><span class="prop-val" id="lock-status-val">Checking...</span></div>
+                        <div class="prop-item"><span class="prop-key">Owner / PID</span><span class="prop-val" id="lock-owner-val">-</span></div>
+                        <div class="prop-item"><span class="prop-key">Acquired At</span><span class="prop-val" id="lock-time-val">-</span></div>
+                    </div>
+                    <div class="mt-lg">
+                        <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--re-text-secondary); margin-bottom: 12px;">
+                            <input type="checkbox" id="confirm-unlock"> Confirm force release of export lock
+                        </label>
+                        <button class="btn btn-danger" id="btn-force-unlock" disabled>Release Lock</button>
+                    </div>
+                    <div id="unlock-feedback" class="mt-md hidden"></div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Database Maintenance -->
+    <template id="tpl-database">
+        <div class="view-header">
+            <h2 class="view-title">Database Maintenance</h2>
+            <p class="view-subtitle">Execute SQLite integrity checks, online backups, and safe database restore.</p>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--spacing-lg);">
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Integrity Check</span>
+                </div>
+                <div class="panel-body">
+                    <p style="color: var(--re-text-secondary); margin-bottom: 16px;">Run PRAGMA integrity_check against active SQLite database.</p>
+                    <button class="btn btn-primary" id="btn-db-check">Run Integrity Check</button>
+                    <div id="db-check-result" class="mt-md hidden"></div>
+                </div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Online Backup</span>
+                </div>
+                <div class="panel-body">
+                    <p style="color: var(--re-text-secondary); margin-bottom: 16px;">Perform safe point-in-time online backup using SQLite backup API.</p>
+                    <div class="form-group">
+                        <label class="form-label">Backup Destination Path</label>
+                        <input type="text" id="db-backup-path" class="form-control" placeholder="e.g. backups/ransomeye_backup.db">
+                    </div>
+                    <button class="btn btn-primary" id="btn-db-backup">Create Backup</button>
+                    <div id="db-backup-result" class="mt-md hidden"></div>
+                </div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Database Restore</span>
+                </div>
+                <div class="panel-body">
+                    <p style="color: var(--re-critical); margin-bottom: 16px;">Restore database from a verified backup. Active connections must be closed.</p>
+                    <div class="form-group">
+                        <label class="form-label">Source Backup Path</label>
+                        <input type="text" id="db-restore-path" class="form-control" placeholder="Path to backup .db file">
+                    </div>
+                    <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--re-text-secondary); margin-bottom: 12px;">
+                        <input type="checkbox" id="confirm-db-restore"> Confirm overwrite of active database
+                    </label>
+                    <button class="btn btn-danger" id="btn-db-restore" disabled>Restore Database</button>
+                    <div id="db-restore-result" class="mt-md hidden"></div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Static Analysis -->
+    <template id="tpl-static">
+        <div class="view-header">
+            <h2 class="view-title">Static File & PE Analysis</h2>
+            <p class="view-subtitle">Inspect portable executables, entropy, sections, and suspicious indicators without execution.</p>
+        </div>
+        <div class="panel">
+            <div class="panel-header">
+                <span class="panel-title">Artifact Static Inspection</span>
+            </div>
+            <div class="panel-body">
+                <div class="toolbar">
+                    <input type="text" id="static-file-path" class="input" placeholder="Path to executable or binary artifact (e.g. samples/sample.exe)">
+                    <button class="btn btn-primary" id="btn-run-static">Analyze Artifact</button>
+                </div>
+                <div id="static-feedback" class="mt-md hidden"></div>
+                <div id="static-results" class="mt-xl hidden">
+                    <div class="grid-overview">
+                        <div class="stat-card">
+                            <span class="stat-label">File Type</span>
+                            <span class="stat-val" id="static-type" style="font-size: 18px;">-</span>
+                        </div>
+                        <div class="stat-card">
+                            <span class="stat-label">File Size</span>
+                            <span class="stat-val mono" id="static-size" style="font-size: 18px;">-</span>
+                        </div>
+                        <div class="stat-card">
+                            <span class="stat-label">Entropy</span>
+                            <span class="stat-val mono" id="static-entropy" style="font-size: 18px;">-</span>
+                        </div>
+                        <div class="stat-card">
+                            <span class="stat-label">Suspicious Indicators</span>
+                            <span class="stat-val text-critical" id="static-indicator-count" style="font-size: 18px;">0</span>
+                        </div>
+                    </div>
+                    <div class="prop-list mb-lg">
+                        <div class="prop-item"><span class="prop-key">Target Path</span><span class="prop-val mono" id="static-path">-</span></div>
+                        <div class="prop-item"><span class="prop-key">SHA-256</span><span class="prop-val mono text-cyan" id="static-sha256">-</span></div>
+                        <div class="prop-item"><span class="prop-key">Suspicious Indicators</span><div id="static-indicators" style="display: flex; gap: 8px; flex-wrap: wrap;"></div></div>
+                    </div>
+                    <div id="static-pe-section" class="panel mt-lg">
+                        <div class="panel-header"><span class="panel-title">PE Sections & Imports</span></div>
+                        <div class="panel-body no-padding">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Section Name</th>
+                                        <th>Virtual Size</th>
+                                        <th>Raw Size</th>
+                                        <th>Entropy</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="static-sections-tbody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Phishing Analysis -->
+    <template id="tpl-phishing">
+        <div class="view-header">
+            <h2 class="view-title">Phishing & Social Engineering Analysis</h2>
+            <p class="view-subtitle">Inspect email headers, message payloads, and suspicious URLs defensively without external network queries.</p>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--spacing-xl);">
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Analyze Message / Content</span>
+                </div>
+                <div class="panel-body">
+                    <div class="form-group">
+                        <label class="form-label">Subject (Optional)</label>
+                        <input type="text" id="phishing-subject" class="form-control" placeholder="e.g. Urgent: Account Verification Required">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Sender / From (Optional)</label>
+                        <input type="text" id="phishing-sender" class="form-control" placeholder="e.g. security-team@fake-domain.com">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Message Body / Headers</label>
+                        <textarea id="phishing-body" class="form-control" rows="8" placeholder="Paste email content, raw headers, or suspicious text here..."></textarea>
+                    </div>
+                    <button class="btn btn-primary" id="btn-run-phishing">Analyze Message</button>
+                    <div id="phishing-feedback" class="mt-md hidden"></div>
+                </div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Phishing Assessment Results</span>
+                </div>
+                <div class="panel-body" id="phishing-results">
+                    <div class="empty-state">Submit a message to perform analysis.</div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Reusable Modal Container -->
+    <div id="app-modal" class="modal-overlay hidden">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h3 class="modal-title" id="modal-title">Modal Title</h3>
+                <button class="modal-close" id="modal-close">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body"></div>
+            <div class="modal-footer" id="modal-footer"></div>
+        </div>
+    </div>
 
     <script src="app.js"></script>
 </body>

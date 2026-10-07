@@ -1685,3 +1685,45 @@ def test_ingest_into_explicitly_created_case(tmp_path):
     assert len(events) == 1
     assert len(findings) >= 1
     assert assessment is not None
+
+
+def test_cli_static_command_execution(tmp_path):
+    target_file = tmp_path / "test_artifact.bin"
+    target_file.write_text("MZ\x00\x00Sample static analysis file content https://c2-ransom.example.org", encoding="utf-8")
+
+    db_path = tmp_path / "test_static_cli.db"
+    store = EvidenceStore(db_path)
+    store.create_case("CASE-STATIC-CLI", "Static CLI Test Case")
+    store.close()
+
+    res = _run_command([
+        "static",
+        "--file", str(target_file),
+        "--database", str(db_path),
+        "--case", "CASE-STATIC-CLI",
+        "--json",
+    ])
+    assert res.returncode == 0
+    data = json.loads(res.stdout)
+    assert data["file_name"] == "test_artifact.bin"
+    assert "sha256" in data
+
+
+def test_cli_dashboard_command_dispatch(monkeypatch, tmp_path):
+    import ransomeye.commands as commands
+
+    server_called = []
+
+    def mock_run_server(host="127.0.0.1", port=8080):
+        server_called.append((host, port))
+
+    import ransomeye.dashboard_server as ds
+    monkeypatch.setattr(ds, "run_server", mock_run_server)
+
+    ret = commands.run_dashboard_command(
+        database_path=tmp_path / "test_dash.db",
+        host="127.0.0.1",
+        port=9090,
+    )
+    assert ret == 0
+    assert server_called == [("127.0.0.1", 9090)]

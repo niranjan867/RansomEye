@@ -411,7 +411,7 @@ def test_dashboard_report_security_checks(running_server, test_db_path):
 
 
 def test_dashboard_process_missing_graph_node_behavior(running_server, test_db_path):
-    """Test process profile endpoints for missing graph nodes and preserving PID=2000 metadata."""
+    """Test process profile endpoints for existing graph nodes, missing graph nodes, and case isolation."""
     from ransomeye.evidence import EvidenceEvent
 
     store = EvidenceStore(test_db_path)
@@ -439,14 +439,63 @@ def test_dashboard_process_missing_graph_node_behavior(running_server, test_db_p
     assert str(data["event"]["pid"]) == "2000"
     assert data["event"]["process_guid"] == "{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}"
 
-    # 2. Process GUID with no graph node returns 404 cleanly (frontend handles as PROCESS PROFILE UNAVAILABLE)
+    # 2. Existing process GUID with percent-encoding resolves successfully (200 OK)
+    req_proc = urllib.request.urlopen(f"{running_server}/api/process/PROC-CASE-A/%7BAAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA%7D")
+    assert req_proc.status == 200
+    proc_data = json.loads(req_proc.read().decode("utf-8"))
+    assert str(proc_data["process"]["pid"]) == "2000"
+    assert proc_data["process"]["name"] == "powershell.exe"
+
+    # 3. Non-existent process GUID returns 404 cleanly (frontend handles as PROCESS PROFILE UNAVAILABLE)
     with pytest.raises(urllib.error.HTTPError) as exc_info:
-        urllib.request.urlopen(f"{running_server}/api/process/PROC-CASE-A/%7BAAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA%7D")
+        urllib.request.urlopen(f"{running_server}/api/process/PROC-CASE-A/%7BNONEXIST-9999-9999-9999-999999999999%7D")
     assert exc_info.value.code == 404
 
-    # 3. Case isolation: Process in PROC-CASE-A requested under PROC-CASE-B returns 404
+    # 4. Case isolation: Process in PROC-CASE-A requested under PROC-CASE-B returns 404
     with pytest.raises(urllib.error.HTTPError) as exc_info:
         urllib.request.urlopen(f"{running_server}/api/process/PROC-CASE-B/%7BAAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA%7D")
+    assert exc_info.value.code == 404
+
+
+def test_dashboard_process_guid_resolution_regression(running_server, test_db_path):
+    """Regression test: GET /api/process/CASE-RANSOMWARE-DEMO/%7B11111111-2222-3333-4444-555555555555%7D returns 200."""
+    sample_file = Path("samples/ransomware_like_activity.json")
+    assert sample_file.exists(), "Sample ransomware activity file must exist"
+
+    summary = ingest_evidence(
+        database_path=test_db_path,
+        case_id="CASE-RANSOMWARE-DEMO",
+        file_path=sample_file,
+        format_type="auto",
+        case_name="Ransomware Demo Case",
+        host="VICTIM-PC",
+    )
+    assert summary["events_accepted"] > 0
+
+    # 1. Percent-encoded braced GUID (%7B...%7D) resolves with 200 OK
+    req = urllib.request.urlopen(f"{running_server}/api/process/CASE-RANSOMWARE-DEMO/%7B11111111-2222-3333-4444-555555555555%7D")
+    assert req.status == 200
+    data = json.loads(req.read().decode("utf-8"))
+    assert data["process"]["name"] == "simulated_encryptor.exe"
+    assert str(data["process"]["pid"]) == "7777"
+    assert data["process"]["guid"] == "{11111111-2222-3333-4444-555555555555}"
+    assert data["process"]["command_line"] == "simulated_encryptor.exe --simulate"
+
+    # 2. Raw unbraced GUID resolves with 200 OK
+    req_unbraced = urllib.request.urlopen(f"{running_server}/api/process/CASE-RANSOMWARE-DEMO/11111111-2222-3333-4444-555555555555")
+    assert req_unbraced.status == 200
+    data_unbraced = json.loads(req_unbraced.read().decode("utf-8"))
+    assert str(data_unbraced["process"]["pid"]) == "7777"
+
+    # 3. PID query resolves with 200 OK
+    req_pid = urllib.request.urlopen(f"{running_server}/api/process/CASE-RANSOMWARE-DEMO/7777")
+    assert req_pid.status == 200
+    data_pid = json.loads(req_pid.read().decode("utf-8"))
+    assert data_pid["process"]["name"] == "simulated_encryptor.exe"
+
+    # 4. Unknown process returns 404
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(f"{running_server}/api/process/CASE-RANSOMWARE-DEMO/%7B99999999-9999-9999-9999-999999999999%7D")
     assert exc_info.value.code == 404
 
 
@@ -549,3 +598,223 @@ def test_dashboard_evidence_search_queries(running_server, test_db_path):
     assert req_insp.status == 200
     data_insp = json.loads(req_insp.read().decode("utf-8"))
     assert data_insp["event"]["event_id"] == win_path_id
+
+
+def _post_json(url: str, payload: dict) -> tuple[int, dict]:
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8"))
+
+
+def test_dashboard_case_lifecycle_and_history(running_server, test_db_path):
+    """Test case creation, listing, status update, and history tracking."""
+    # 1. Create case
+    code, res = _post_json(f"{running_server}/api/cases", {
+        "case_id": "CASE-TEST-LIFECYCLE",
+        "case_name": "Lifecycle Test Case",
+        "host": "WIN-SRV-TEST"
+    })
+    assert code == 201
+    assert res["case"]["case_id"] == "CASE-TEST-LIFECYCLE"
+
+    # 2. List cases
+    req = urllib.request.urlopen(f"{running_server}/api/cases")
+    assert req.status == 200
+    cases_data = json.loads(req.read().decode("utf-8"))
+    found = [c for c in cases_data["cases"] if c["case_id"] == "CASE-TEST-LIFECYCLE"]
+    assert len(found) == 1
+    assert found[0]["status"] == "OPEN"
+
+    # 3. Update status
+    code, res = _post_json(f"{running_server}/api/case/CASE-TEST-LIFECYCLE/status", {
+        "status": "TRIAGED",
+        "notes": "Analyst investigating suspicious activity"
+    })
+    assert code == 200
+    assert res["status"] == "TRIAGED"
+
+    # 4. View history
+    req = urllib.request.urlopen(f"{running_server}/api/case/CASE-TEST-LIFECYCLE/history")
+    assert req.status == 200
+    hist_data = json.loads(req.read().decode("utf-8"))
+    assert len(hist_data["history"]) >= 1
+    assert hist_data["history"][-1]["status"] == "TRIAGED"
+
+
+def test_dashboard_investigation_and_tree(running_server, test_db_path, tmp_path):
+    """Test investigation summary, graph, process tree, and validation endpoints."""
+    # Ingest evidence
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-INV-01", "Investigation Case", "HOST-INV")
+    store.close()
+
+    ev_file = tmp_path / "inv_events.json"
+    ev_file.write_text(json.dumps([
+        {
+            "event_id": "INV-EV-1",
+            "timestamp": "2026-08-25T11:00:00Z",
+            "source": "sysmon",
+            "event_type": "process_create",
+            "process_name": "cmd.exe",
+            "pid": 5001,
+            "process_guid": "{5001-0000-0000-0000}",
+            "command_line": "cmd.exe /c whoami"
+        }
+    ]), encoding="utf-8")
+
+    code, res = _post_json(f"{running_server}/api/ingest", {
+        "case_id": "CASE-INV-01",
+        "file_path": str(ev_file)
+    })
+    assert code == 200
+    assert res["events_ingested"] == 1
+
+    # 1. Summary
+    req = urllib.request.urlopen(f"{running_server}/api/investigation/CASE-INV-01")
+    assert req.status == 200
+    inv = json.loads(req.read().decode("utf-8"))
+    assert inv["case_id"] == "CASE-INV-01"
+
+    # 2. Graph
+    req = urllib.request.urlopen(f"{running_server}/api/investigation/CASE-INV-01/graph")
+    assert req.status == 200
+    graph = json.loads(req.read().decode("utf-8"))
+    assert "nodes" in graph
+    assert "edges" in graph
+
+    # 3. Process Tree
+    req = urllib.request.urlopen(f"{running_server}/api/tree/CASE-INV-01")
+    assert req.status == 200
+    tree_data = json.loads(req.read().decode("utf-8"))
+    assert "tree" in tree_data
+
+    # 4. Validation
+    req = urllib.request.urlopen(f"{running_server}/api/investigation/CASE-INV-01/validation")
+    assert req.status == 200
+    val_data = json.loads(req.read().decode("utf-8"))
+    assert "validation" in val_data
+
+
+def test_dashboard_custody_and_integrity(running_server, test_db_path, tmp_path):
+    """Test custody ledger recording and integrity manifest hash/verify endpoints."""
+    # Custody
+    code, res = _post_json(f"{running_server}/api/cases", {
+        "case_id": "CASE-CUSTODY-01",
+        "case_name": "Custody Case"
+    })
+    assert code == 201
+
+    sample_art = tmp_path / "sample_artifact.bin"
+    sample_art.write_bytes(b"forensic evidence sample 12345")
+
+    code, res = _post_json(f"{running_server}/api/custody/CASE-CUSTODY-01", {
+        "artifact": str(sample_art),
+        "action": "COLLECTED",
+        "analyst": "Forensic Analyst Alpha",
+        "notes": "Disk image collected at scene"
+    })
+    assert code == 201
+    assert res["entry"]["action"] == "COLLECTED"
+
+    req = urllib.request.urlopen(f"{running_server}/api/custody/CASE-CUSTODY-01")
+    assert req.status == 200
+    custody_data = json.loads(req.read().decode("utf-8"))
+    assert len(custody_data["entries"]) == 1
+    assert custody_data["entries"][0]["analyst"] == "Forensic Analyst Alpha"
+
+    # Integrity Hash
+    man_path = tmp_path / "test_manifest.txt"
+    code, res = _post_json(f"{running_server}/api/integrity/hash", {
+        "target_path": str(sample_art),
+        "manifest_path": str(man_path)
+    })
+    assert code == 200
+    assert "manifest_path" in res
+
+    # Integrity Verify (should pass)
+    code, res = _post_json(f"{running_server}/api/integrity/verify", {
+        "target_path": str(sample_art),
+        "manifest_path": str(man_path)
+    })
+    assert code == 200
+    assert res["verified"] is True
+
+
+def test_dashboard_export_and_lock(running_server, test_db_path, tmp_path):
+    """Test export generation and concurrency lock management."""
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-EXPORT-01", "Export Case")
+    store.close()
+
+    out_dir = tmp_path / "exports"
+    code, res = _post_json(f"{running_server}/api/export", {
+        "case_id": "CASE-EXPORT-01",
+        "output_dir": str(out_dir)
+    })
+    assert code == 200
+    assert "export_path" in res
+
+    # Check lock
+    req = urllib.request.urlopen(f"{running_server}/api/export/lock?case_id=CASE-EXPORT-01")
+    assert req.status == 200
+    lock_info = json.loads(req.read().decode("utf-8"))
+    assert "locked" in lock_info
+
+    # Safe unlock
+    code, res = _post_json(f"{running_server}/api/export/unlock", {
+        "case_id": "CASE-EXPORT-01"
+    })
+    assert code == 200
+
+
+def test_dashboard_database_maintenance(running_server, test_db_path, tmp_path):
+    """Test database integrity check, online backup, and safe restore endpoints."""
+    # 1. Check
+    code, res = _post_json(f"{running_server}/api/database/check", {})
+    assert code == 200
+    assert res["status"] == "OK"
+
+    # 2. Backup
+    bkp_path = tmp_path / "backup_test.db"
+    code, res = _post_json(f"{running_server}/api/database/backup", {
+        "backup_path": str(bkp_path)
+    })
+    assert code == 200
+    assert bkp_path.is_file()
+
+    # 3. Restore
+    code, res = _post_json(f"{running_server}/api/database/restore", {
+        "backup_path": str(bkp_path),
+        "target_path": str(tmp_path / "restored_test.db"),
+        "confirm": True
+    })
+    assert code == 200
+    assert res["status"] == "OK"
+
+
+def test_dashboard_static_and_phishing_analysis(running_server, tmp_path):
+    """Test static PE analyzer and phishing message analysis endpoints."""
+    # Static analysis on a small file
+    test_exe = tmp_path / "test_artifact.exe"
+    test_exe.write_bytes(b"MZ\x90\x00" + b"\x00" * 200)
+
+    code, res = _post_json(f"{running_server}/api/static/analyze", {
+        "file_path": str(test_exe)
+    })
+    assert code == 200
+    assert "analysis" in res
+    assert "sha256" in res["analysis"]
+
+    # Phishing analysis
+    code, res = _post_json(f"{running_server}/api/phishing/analyze", {
+        "subject": "Urgent password reset required immediately",
+        "sender": "support@bank-security-login.xyz",
+        "body": "Dear customer, your account has been suspended. Click here to verify your credentials: http://phish.xyz/login"
+    })
+    assert code == 200
+    assert "assessment" in res
+    assert res["assessment"]["threat_level"] in ("HIGH", "CRITICAL", "MEDIUM", "LOW", "SUSPICIOUS")
