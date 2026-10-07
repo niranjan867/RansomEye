@@ -1122,3 +1122,147 @@ def _mixed_script_offset(text: str) -> int | None:
         if any(_script_of(ch) in ("CYRILLIC", "GREEK") for ch in word if not ch.isascii()):
             return match.start()
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Evidence / Finding integration
+# --------------------------------------------------------------------------- #
+
+SCRIPT_EVENT_SOURCE = "script_analyzer"
+SCRIPT_EVENT_TYPE = "file_stream_hash"
+SCRIPT_ANALYST = "ransomeye-script-analyzer"
+SCRIPT_FINDING_PREFIX = "script_"
+
+_RULE_ID_IN_REASON = re.compile(r"^\[([A-Z0-9][A-Z0-9-]*)\]")
+
+
+def _script_event_id(case_id: str, artifact_sha256: str, resolved_path: str) -> str:
+    seed = f"{case_id}|{artifact_sha256}|{resolved_path}"
+    return "EVT-SCRIPT-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:20]
+
+
+def _representative_indicators(result: ScriptAnalysisResult) -> list[ScriptIndicator]:
+    """One indicator per rule_id: the earliest by (layer, line) since indicators are pre-sorted."""
+    chosen: dict[str, ScriptIndicator] = {}
+    for indicator in result.indicators:
+        chosen.setdefault(indicator.rule_id, indicator)
+    return [chosen[rule_id] for rule_id in sorted(chosen)]
+
+
+def _finding_for_indicator(
+    result: ScriptAnalysisResult, indicator: ScriptIndicator
+) -> dict[str, Any]:
+    excerpt = indicator.excerpt or indicator.title
+    reason = (
+        f"[{indicator.rule_id}] {indicator.title} "
+        f"(layer {indicator.layer_index}, line {indicator.line}): {excerpt} "
+        f"| artifact sha256={result.sha256[:16]}"
+    )
+    return {
+        "type": f"{SCRIPT_FINDING_PREFIX}{indicator.category}",
+        "score": indicator.weight,
+        "confidence": indicator.confidence,
+        "technique": indicator.technique,
+        "reason": reason,
+    }
+
+
+def _existing_rule_ids(store: Any, case_id: str, event_id: str) -> set[str]:
+    present: set[str] = set()
+    for finding in store.get_event_findings(case_id, event_id):
+        match = _RULE_ID_IN_REASON.match(finding.get("reason", ""))
+        if match:
+            present.add(match.group(1))
+    return present
+
+
+def ingest_script_finding(
+    store: Any,
+    case_id: str,
+    result: ScriptAnalysisResult,
+    *,
+    event_id: str | None = None,
+) -> list[int]:
+    """Persist script-analysis findings into an EvidenceStore case.
+
+    File-artifact mode (``event_id`` is None): creates one deterministic,
+    case-scoped ``file_stream_hash`` evidence event for the artifact (timestamped
+    with the file's last-modified time, with the artifact SHA-256 preserved in
+    metadata), one finding per distinct triggered rule linked to that event, and
+    one ``reviewed`` chain-of-custody record. Requires ``result.file_path`` to
+    reference an existing file.
+
+    Stored-event mode (``event_id`` given): creates findings only, linked to the
+    existing event in the case. No new evidence event and no custody record are
+    created. Used to annotate a stored process-creation event's command line.
+
+    Idempotent: a rule already recorded against the target event is not
+    duplicated on re-ingest. Returns the finding IDs created by this call.
+    """
+    from datetime import datetime, timezone
+
+    if event_id is not None:
+        if store.get_event(case_id, event_id) is None:
+            raise ValueError(f"Event not found in case {case_id}: {event_id}")
+        target_event_id = event_id
+    else:
+        if not result.file_path:
+            raise ValueError(
+                "File-artifact ingest requires result.file_path. Pass event_id= to "
+                "annotate a stored command-line event; do not persist pasted text."
+            )
+        path = Path(result.file_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Artifact file not found: {result.file_path}")
+
+        resolved = str(path.resolve())
+        target_event_id = _script_event_id(case_id, result.sha256, resolved)
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+
+        store.save_event(
+            case_id,
+            {
+                "event_id": target_event_id,
+                "case_id": case_id,
+                "timestamp": mtime,
+                "source": SCRIPT_EVENT_SOURCE,
+                "event_type": SCRIPT_EVENT_TYPE,
+                "file_path": resolved,
+                "hashes": f"SHA256={result.sha256},SHA1={result.sha1},MD5={result.md5}",
+                "confidence": 0.90,
+                "metadata": {
+                    "observation": "static_script_analysis",
+                    "sha256": result.sha256,
+                    "file_size": result.file_size,
+                    "language": result.language,
+                    "analyzer_version": result.analyzer_version,
+                    "analysis_status": result.analysis_status,
+                    "score": result.score,
+                    "severity": result.severity,
+                },
+            },
+        )
+        store.record_custody_event(
+            case_id=case_id,
+            artifact_path=resolved,
+            sha256=result.sha256,
+            action="reviewed",
+            analyst=SCRIPT_ANALYST,
+            note=(
+                f"Script analysis: language={result.language}, status={result.analysis_status}, "
+                f"severity={result.severity}, score={result.score}"
+            ),
+        )
+
+    already = _existing_rule_ids(store, case_id, target_event_id)
+    created: list[int] = []
+    for indicator in _representative_indicators(result):
+        if indicator.rule_id in already:
+            continue
+        finding_id = store.save_finding(
+            case_id,
+            _finding_for_indicator(result, indicator),
+            event_ids=[target_event_id],
+        )
+        created.append(finding_id)
+    return created

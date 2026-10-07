@@ -576,3 +576,241 @@ def test_dataclasses_are_exported():
     assert ScriptIndicator.__dataclass_fields__
     assert DecodedLayer.__dataclass_fields__
     assert ScriptAnalysisResult.__dataclass_fields__
+
+
+# --------------------------------------------------------------------------- #
+# Stage 2: evidence / finding integration (temporary SQLite databases)
+# --------------------------------------------------------------------------- #
+
+import os  # noqa: E402
+
+from ransomeye.script_analyzer import ingest_script_finding  # noqa: E402
+from ransomeye.storage import EvidenceStore  # noqa: E402
+
+
+def _malicious_script() -> str:
+    # Inert: encoded cradle + shadow-copy deletion text. Never executed.
+    inner = "Invoke-Expression $x"
+    return f"powershell -enc {_b64_utf16le(inner)}\nvssadmin delete shadows /all /quiet\n"
+
+
+@pytest.fixture
+def case_store(tmp_path):
+    store = EvidenceStore(tmp_path / "script-stage2.db")
+    store.create_case("CASE-SCRIPT-1", "Script Stage 2")
+    try:
+        yield store
+    finally:
+        store.close()
+
+
+def _write_script(tmp_path, name="payload.ps1", mtime=1_600_000_000) -> Path:
+    target = tmp_path / name
+    target.write_text(_malicious_script(), encoding="utf-8")
+    os.utime(target, (mtime, mtime))
+    return target
+
+
+def test_file_ingest_creates_event_findings_and_custody(case_store, tmp_path):
+    target = _write_script(tmp_path)
+    result = ScriptAnalyzer().analyze_file(target)
+    ids = ingest_script_finding(case_store, "CASE-SCRIPT-1", result)
+
+    assert len(ids) == len(result.rule_ids) > 0
+
+    events = case_store.get_case_events("CASE-SCRIPT-1")
+    assert len(events) == 1
+    event = events[0]
+    assert event["source"] == "script_analyzer"
+    assert event["event_type"] == "file_stream_hash"
+    assert event["event_id"].startswith("EVT-SCRIPT-")
+
+    findings = case_store.get_case_findings("CASE-SCRIPT-1")
+    assert {f["finding_type"] for f in findings} == {
+        f"script_{sa._RULES_BY_ID[r].category}" for r in result.rule_ids
+    }
+    for finding in findings:
+        assert finding["event_ids"] == [event["event_id"]]
+
+    custody = case_store.get_custody_events("CASE-SCRIPT-1")
+    assert [c["action"] for c in custody] == ["reviewed"]
+    assert custody[0]["sha256"] == result.sha256
+    assert custody[0]["analyst"] == "ransomeye-script-analyzer"
+
+
+def test_event_timestamp_is_mtime_not_analysis_time(case_store, tmp_path):
+    from datetime import datetime, timezone
+
+    mtime = 1_600_000_000
+    target = _write_script(tmp_path, mtime=mtime)
+    result = ScriptAnalyzer().analyze_file(target)
+    ingest_script_finding(case_store, "CASE-SCRIPT-1", result)
+
+    stored = case_store.get_case_events("CASE-SCRIPT-1")[0]["timestamp"]
+    expected = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+    assert stored == expected
+
+
+def test_artifact_sha256_preserved_in_metadata(case_store, tmp_path):
+    target = _write_script(tmp_path)
+    result = ScriptAnalyzer().analyze_file(target)
+    ingest_script_finding(case_store, "CASE-SCRIPT-1", result)
+
+    event = case_store.get_event("CASE-SCRIPT-1", case_store.get_case_events("CASE-SCRIPT-1")[0]["event_id"])
+    meta = event["metadata_json"]
+    assert meta["sha256"] == result.sha256
+    assert meta["language"] == "powershell"
+    assert meta["analyzer_version"] == sa.ANALYZER_VERSION
+    assert meta["analysis_status"] == sa.STATUS_COMPLETE
+
+
+def test_reingest_is_idempotent(case_store, tmp_path):
+    target = _write_script(tmp_path)
+    result = ScriptAnalyzer().analyze_file(target)
+
+    first = ingest_script_finding(case_store, "CASE-SCRIPT-1", result)
+    second = ingest_script_finding(case_store, "CASE-SCRIPT-1", result)
+
+    assert first and second == []
+    assert len(case_store.get_case_events("CASE-SCRIPT-1")) == 1
+    assert len(case_store.get_case_findings("CASE-SCRIPT-1")) == len(first)
+    # Custody is append-only, so a second review is legitimately recorded again.
+    assert len(case_store.get_custody_events("CASE-SCRIPT-1")) == 2
+
+
+def test_event_id_is_deterministic(tmp_path):
+    target = _write_script(tmp_path)
+    result = ScriptAnalyzer().analyze_file(target)
+
+    ids = []
+    for _ in range(2):
+        store = EvidenceStore(tmp_path / f"det-{len(ids)}.db")
+        store.create_case("C", "c")
+        ingest_script_finding(store, "C", result)
+        ids.append(store.get_case_events("C")[0]["event_id"])
+        store.close()
+    assert ids[0] == ids[1]
+
+
+def test_same_artifact_in_two_cases_distinct_events(case_store, tmp_path):
+    target = _write_script(tmp_path)
+    result = ScriptAnalyzer().analyze_file(target)
+
+    case_store.create_case("CASE-SCRIPT-2", "Second case")
+    ingest_script_finding(case_store, "CASE-SCRIPT-1", result)
+    ingest_script_finding(case_store, "CASE-SCRIPT-2", result)
+
+    first = case_store.get_case_events("CASE-SCRIPT-1")[0]["event_id"]
+    second = case_store.get_case_events("CASE-SCRIPT-2")[0]["event_id"]
+    assert first != second
+
+
+def test_command_line_mode_links_without_new_evidence(case_store):
+    # A stored process-creation event with a malicious command line.
+    enc = _b64_utf16le("Invoke-Expression $x")
+    case_store.save_event("CASE-SCRIPT-1", {
+        "event_id": "EVT-PROC-1",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "source": "sysmon",
+        "event_type": "process_creation",
+        "process_name": "powershell.exe",
+        "command_line": f"powershell -enc {enc}",
+    })
+
+    result = ScriptAnalyzer().analyze_text(f"powershell -enc {enc}", "cmdline")
+    ids = ingest_script_finding(case_store, "CASE-SCRIPT-1", result, event_id="EVT-PROC-1")
+
+    assert ids
+    # No new evidence event was created.
+    assert [e["event_id"] for e in case_store.get_case_events("CASE-SCRIPT-1")] == ["EVT-PROC-1"]
+    # No custody record for command-line mode.
+    assert case_store.get_custody_events("CASE-SCRIPT-1") == []
+    for finding in case_store.get_case_findings("CASE-SCRIPT-1"):
+        assert finding["event_ids"] == ["EVT-PROC-1"]
+
+
+def test_command_line_mode_unknown_event_rejected(case_store):
+    result = ScriptAnalyzer().analyze_text("Invoke-Expression $x", "cmdline")
+    with pytest.raises(ValueError, match="Event not found"):
+        ingest_script_finding(case_store, "CASE-SCRIPT-1", result, event_id="NOPE")
+
+
+def test_file_mode_requires_path(case_store):
+    result = ScriptAnalyzer().analyze_text("Invoke-Expression $x", "inline")
+    with pytest.raises(ValueError, match="requires result.file_path"):
+        ingest_script_finding(case_store, "CASE-SCRIPT-1", result)
+
+
+def test_file_mode_missing_file_raises(case_store, tmp_path):
+    target = _write_script(tmp_path)
+    result = ScriptAnalyzer().analyze_file(target)
+    target.unlink()
+    with pytest.raises(FileNotFoundError):
+        ingest_script_finding(case_store, "CASE-SCRIPT-1", result)
+
+
+def test_pasted_text_without_case_is_not_persisted(tmp_path):
+    # Analysis alone writes nothing; persistence only happens through ingest_script_finding.
+    store = EvidenceStore(tmp_path / "unused.db")
+    store.create_case("C", "c")
+    try:
+        ScriptAnalyzer().analyze_text(_malicious_script(), "pasted")
+        assert store.get_case_findings("C") == []
+        assert store.get_case_events("C") == []
+    finally:
+        store.close()
+
+
+def test_findings_load_in_investigation(case_store, tmp_path):
+    from ransomeye.investigation import load_investigation
+
+    target = _write_script(tmp_path)
+    result = ScriptAnalyzer().analyze_file(target)
+    ingest_script_finding(case_store, "CASE-SCRIPT-1", result)
+    db_path = case_store.database_path
+    case_store.close()
+
+    investigation = load_investigation(db_path, "CASE-SCRIPT-1")
+    assert len(investigation.findings) == len(result.rule_ids)
+    assert len(investigation.evidence) == 1
+
+
+def test_report_shows_script_findings_in_traceability(case_store, tmp_path):
+    from ransomeye.report import generate_case_report
+
+    target = _write_script(tmp_path)
+    result = ScriptAnalyzer().analyze_file(target)
+    ingest_script_finding(case_store, "CASE-SCRIPT-1", result)
+    db_path = case_store.database_path
+    case_store.close()
+
+    report = generate_case_report(db_path, "CASE-SCRIPT-1")
+    assert "EVIDENCE TRACEABILITY" in report
+    assert "script_" in report
+    assert "REC-010" in report  # shadow-copy deletion rule id appears in a finding reason
+
+
+def test_command_line_finding_correlates_with_stored_behavior_finding(case_store):
+    from ransomeye.correlation import correlate_findings
+
+    enc = _b64_utf16le("Invoke-Expression $x")
+    event = {
+        "event_id": "EVT-PROC-9",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "source": "sysmon",
+        "event_type": "process_creation",
+        "process_name": "powershell.exe",
+        "command_line": f"powershell -enc {enc}",
+    }
+    case_store.save_event("CASE-SCRIPT-1", event)
+    result = ScriptAnalyzer().analyze_text(event["command_line"], "cmdline")
+    ingest_script_finding(case_store, "CASE-SCRIPT-1", result, event_id="EVT-PROC-9")
+
+    # A script finding and a behaviour-style finding on the same event must merge.
+    findings = [
+        {"finding_id": "F-behaviour", "event_ids": ["EVT-PROC-9"], "case_id": "CASE-SCRIPT-1"},
+        {"finding_id": "F-script", "event_ids": ["EVT-PROC-9"], "case_id": "CASE-SCRIPT-1"},
+    ]
+    incidents = correlate_findings(findings, evidence=[event])
+    assert len(incidents) == 1
+    assert "shared_evidence" in incidents[0].correlation_reasons
