@@ -54,6 +54,7 @@
 
                 <div class="nav-section-title">Specialized Analyzers</div>
                 <a href="#" class="nav-item" data-view="static">Static Analysis</a>
+                <a href="#" class="nav-item" data-view="script">Script Analysis</a>
                 <a href="#" class="nav-item" data-view="phishing">Phishing Analysis</a>
             </nav>
 
@@ -770,6 +771,76 @@
                                 <tbody id="static-sections-tbody"></tbody>
                             </table>
                         </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Script Analysis -->
+    <template id="tpl-script">
+        <div class="view-header">
+            <h2 class="view-title">Script & Command-Line Analysis</h2>
+            <p class="view-subtitle">Statically decode and inspect PowerShell, VBScript, VBA, JScript, HTA, WSF and batch scripts without executing them. No network queries.</p>
+        </div>
+        <div style="display: grid; grid-template-columns: 420px 1fr; gap: var(--spacing-xl); align-items: start;">
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Analyze Script</span>
+                </div>
+                <div class="panel-body">
+                    <div class="tabs">
+                        <div class="tab active" id="script-tab-file" role="button" tabindex="0">File on this computer</div>
+                        <div class="tab" id="script-tab-paste" role="button" tabindex="0">Paste text</div>
+                    </div>
+
+                    <div class="tab-content active" id="script-pane-file">
+                        <div class="form-group">
+                            <label class="form-label">Script file path</label>
+                            <input type="text" id="script-file-path" class="form-control" placeholder="e.g. C:\Users\Public\suspicious.ps1">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Add results to case (optional)</label>
+                            <select id="script-file-case" class="form-control"></select>
+                        </div>
+                    </div>
+
+                    <div class="tab-content" id="script-pane-paste">
+                        <div class="form-group">
+                            <label class="form-label">Script or command-line text</label>
+                            <textarea id="script-text" class="form-control" rows="9" placeholder="Paste a script or a single command line here..."></textarea>
+                        </div>
+                        <div class="alert" id="script-paste-note" style="font-size: 12px;">Pasted text is analysis-only and is never added to a case. Analyze a file or a stored event to keep findings traceable to evidence.</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Language</label>
+                        <select id="script-language" class="form-control">
+                            <option value="auto">Auto-detect</option>
+                            <option value="powershell">PowerShell</option>
+                            <option value="vbscript">VBScript</option>
+                            <option value="vba">VBA (exported source)</option>
+                            <option value="jscript">JScript</option>
+                            <option value="hta">HTA</option>
+                            <option value="wsf">WSF</option>
+                            <option value="batch">Batch / CMD</option>
+                            <option value="command_line">Command line</option>
+                        </select>
+                    </div>
+
+                    <button class="btn btn-primary" id="btn-run-script">Analyze</button>
+                    <div id="script-feedback" class="mt-md hidden"></div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Analysis Result</span>
+                </div>
+                <div class="panel-body" id="script-results">
+                    <div class="empty-state">
+                        <h3>No analysis yet</h3>
+                        <p>Choose a script file or paste script text, then select Analyze. Office documents (.docm, .xlsm) and program files are reported as not analyzed, never as safe.</p>
                     </div>
                 </div>
             </div>

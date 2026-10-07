@@ -218,7 +218,7 @@ function switchView(viewName) {
     renderCurrentView();
 }
 
-const GLOBAL_VIEWS = ['cases', 'monitor', 'collection', 'integrity', 'database', 'static', 'phishing'];
+const GLOBAL_VIEWS = ['cases', 'monitor', 'collection', 'integrity', 'database', 'static', 'script', 'phishing'];
 
 function renderCurrentView() {
     if (!state.currentCaseId && !GLOBAL_VIEWS.includes(state.currentView)) {
@@ -262,6 +262,7 @@ function renderCurrentView() {
         case 'export': initExport(); break;
         case 'database': initDatabase(); break;
         case 'static': initStatic(); break;
+        case 'script': initScript(); break;
         case 'phishing': initPhishing(); break;
     }
 }
@@ -1369,6 +1370,253 @@ function initStatic() {
             fbStatic.classList.remove('hidden');
             resBox.classList.add('hidden');
         }
+    });
+}
+
+// ==========================================
+// 17b. Script Analysis
+// ==========================================
+// All analyzer output (file paths, excerpts, decoded previews, IOCs, rule
+// reasons, MITRE strings, error messages) is attacker-controlled and is only
+// ever placed into the DOM via textContent / safe element construction.
+function scriptEl(tag, opts = {}, children = []) {
+    const node = document.createElement(tag);
+    if (opts.className) node.className = opts.className;
+    if (opts.text != null) node.textContent = String(opts.text);
+    if (opts.title != null) node.title = String(opts.title);
+    if (opts.attrs) for (const [k, v] of Object.entries(opts.attrs)) node.setAttribute(k, String(v));
+    if (opts.style) node.style.cssText = opts.style;
+    for (const child of children) if (child) node.appendChild(child);
+    return node;
+}
+
+const SCRIPT_SEVERITY_META = {
+    NONE: { label: 'No indicators found', badge: 'low' },
+    LOW: { label: 'Low', badge: 'low' },
+    MEDIUM: { label: 'Medium', badge: 'medium' },
+    HIGH: { label: 'High', badge: 'high' },
+    CRITICAL: { label: 'Critical', badge: 'critical' },
+};
+
+const SCRIPT_CATEGORY_PHRASES = {
+    download: 'downloads content from the internet',
+    execution: 'runs further commands or code',
+    obfuscation: 'hides what it really does through encoding or obfuscation',
+    defense_evasion: 'tries to weaken or evade security controls',
+    recovery_inhibition: 'attempts to destroy backups or recovery data',
+    impact: 'shows file-encryption or destruction behaviour',
+    persistence: 'tries to keep itself running across reboots',
+    lolbin: 'abuses a built-in Windows tool to run code',
+    auto_execution: 'is set to run automatically when a document opens',
+};
+
+function scriptPlainSummary(analysis) {
+    const cats = [];
+    for (const ind of analysis.indicators || []) {
+        const phrase = SCRIPT_CATEGORY_PHRASES[ind.category];
+        if (phrase && !cats.includes(phrase)) cats.push(phrase);
+    }
+    if (cats.length === 0) {
+        return 'No known malicious patterns were found. Static analysis cannot prove a script is safe.';
+    }
+    const joined = cats.length === 1 ? cats[0]
+        : cats.slice(0, -1).join(', ') + ' and ' + cats[cats.length - 1];
+    return `This script ${joined}.`;
+}
+
+function scriptKv(key, value, opts = {}) {
+    return scriptEl('div', { className: 'prop-item' }, [
+        scriptEl('span', { className: 'prop-key', text: key }),
+        scriptEl('span', { className: 'prop-val' + (opts.mono ? ' mono' : ''), text: value == null ? '-' : value }),
+    ]);
+}
+
+function scriptSection(title, startOpen, bodyNodes) {
+    const details = scriptEl('details', { style: 'margin-top: 16px;' });
+    if (startOpen) details.open = true;
+    const summary = scriptEl('summary', { style: 'cursor: pointer; font-weight: 600; color: var(--re-text-secondary);' });
+    summary.textContent = title;
+    details.appendChild(summary);
+    const wrap = scriptEl('div', { style: 'margin-top: 12px;' }, bodyNodes);
+    details.appendChild(wrap);
+    return details;
+}
+
+function renderScriptResult(container, analysis, findingIds) {
+    container.replaceChildren();
+    const status = analysis.analysis_status;
+
+    if (status !== 'complete') {
+        const warn = (analysis.warnings && analysis.warnings[0]) || 'This content type is not supported by script analysis.';
+        container.appendChild(scriptEl('div', { className: 'empty-state' }, [
+            scriptEl('h3', { text: 'Not analyzed' }),
+            scriptEl('p', { text: warn }),
+            scriptEl('p', { style: 'color: var(--re-text-muted); font-size: 12px;',
+                text: 'This is never reported as safe. For program files use Static Analysis.' }),
+        ]));
+        return;
+    }
+
+    const sev = String(analysis.severity || 'NONE').toUpperCase();
+    const meta = SCRIPT_SEVERITY_META[sev] || SCRIPT_SEVERITY_META.NONE;
+
+    // Verdict card
+    const verdict = scriptEl('div', { className: 'panel', style: 'padding: 16px; margin-bottom: 16px;' });
+    const verdictHead = scriptEl('div', { style: 'display: flex; align-items: center; gap: 12px; flex-wrap: wrap;' }, [
+        scriptEl('span', { className: 'badge ' + meta.badge, text: meta.label, style: 'font-size: 13px;' }),
+        scriptEl('span', { className: 'mono', text: `Score ${analysis.score}/100`, style: 'color: var(--re-text-secondary);' }),
+        scriptEl('span', { className: 'mono', text: `Confidence ${(Number(analysis.confidence) * 100).toFixed(0)}%`, style: 'color: var(--re-text-secondary);' }),
+    ]);
+    verdict.appendChild(verdictHead);
+    verdict.appendChild(scriptEl('p', { style: 'margin-top: 10px;', text: scriptPlainSummary(analysis) }));
+    const advice = (analysis.indicators && analysis.indicators.length)
+        ? 'Do not run this file. Treat it as suspicious and investigate.'
+        : 'No known malicious patterns were found. Static analysis cannot guarantee the file is safe.';
+    verdict.appendChild(scriptEl('p', { style: 'margin-top: 4px; color: var(--re-text-muted); font-size: 12px;', text: advice }));
+    container.appendChild(verdict);
+
+    // Key facts
+    container.appendChild(scriptEl('div', { className: 'prop-list mb-lg' }, [
+        scriptKv('Language', analysis.language),
+        scriptKv('File size', `${analysis.file_size} bytes`, { mono: true }),
+        scriptKv('SHA-256', analysis.sha256, { mono: true }),
+        scriptKv('Decoded layers', String((analysis.decoded_layers || []).length), { mono: true }),
+        scriptKv('MITRE techniques', (analysis.techniques || []).join(', ') || 'None', { mono: true }),
+    ]));
+
+    // Traceability
+    if (Array.isArray(findingIds)) {
+        const msg = findingIds.length
+            ? `Added to case: ${findingIds.length} finding(s) created (IDs ${findingIds.join(', ')}). See the Findings and Evidence views.`
+            : 'Already recorded against this evidence; no new findings were added.';
+        container.appendChild(scriptEl('div', { className: 'alert alert-success mb-lg', text: msg }));
+    }
+
+    // Indicators
+    const indicators = analysis.indicators || [];
+    const highOpen = indicators.some(i => i.severity === 'high' || i.severity === 'critical');
+    const indRows = indicators.map(ind => scriptEl('tr', {}, [
+        scriptEl('td', { className: 'mono', text: ind.rule_id }),
+        scriptEl('td', { text: ind.title }),
+        scriptEl('td', {}, [scriptEl('span', { className: 'badge ' + (SCRIPT_SEVERITY_META[String(ind.severity).toUpperCase()] || { badge: 'low' }).badge, text: ind.severity })]),
+        scriptEl('td', { className: 'mono', text: ind.technique }),
+        scriptEl('td', { className: 'mono', text: `${ind.layer_index}/${ind.line}` }),
+        scriptEl('td', { className: 'mono', text: ind.excerpt, title: ind.excerpt }),
+    ]));
+    const indBody = [];
+    if (indRows.length) {
+        const table = scriptEl('table', { className: 'data-table' }, [
+            scriptEl('thead', {}, [scriptEl('tr', {}, [
+                scriptEl('th', { text: 'Rule' }), scriptEl('th', { text: 'Title' }),
+                scriptEl('th', { text: 'Severity' }), scriptEl('th', { text: 'MITRE' }),
+                scriptEl('th', { text: 'Layer/Line' }), scriptEl('th', { text: 'Excerpt' }),
+            ])]),
+            scriptEl('tbody', {}, indRows),
+        ]);
+        indBody.push(table);
+    } else {
+        indBody.push(scriptEl('div', { className: 'empty-state', text: 'No indicators matched.' }));
+    }
+    container.appendChild(scriptSection(`Indicators (${indicators.length})`, highOpen || indicators.length > 0, indBody));
+
+    // Decoded layers
+    const layers = analysis.decoded_layers || [];
+    if (layers.length) {
+        const layerNodes = layers.map(layer => {
+            const head = scriptEl('div', { className: 'mono', style: 'color: var(--re-text-secondary); font-size: 12px;',
+                text: `#${layer.index} depth ${layer.depth} from #${layer.parent_index} · ${layer.method} · ${layer.size} bytes · ${layer.is_text ? layer.encoding : 'binary'}` });
+            const sha = scriptEl('div', { className: 'mono', style: 'color: var(--re-text-muted); font-size: 11px; word-break: break-all;', text: `sha256 ${layer.sha256}` });
+            const pre = scriptEl('pre', { style: 'white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; background: var(--re-surface-hover); padding: 10px; border-radius: 6px; margin-top: 6px;' });
+            pre.textContent = layer.is_text ? (layer.preview || '') : '(binary payload)';
+            return scriptEl('div', { style: 'margin-bottom: 14px;' }, [head, sha, pre]);
+        });
+        container.appendChild(scriptSection(`Decoded layers (${layers.length})`, false, layerNodes));
+    }
+
+    // IOCs
+    const iocs = analysis.iocs || {};
+    const iocNodes = [];
+    for (const [name, values] of Object.entries(iocs)) {
+        if (!values || !values.length) continue;
+        iocNodes.push(scriptEl('div', { style: 'margin-bottom: 8px;' }, [
+            scriptEl('div', { className: 'prop-key', text: name.replace(/_/g, ' ') }),
+            scriptEl('div', { className: 'mono', style: 'word-break: break-all; font-size: 12px;', text: values.join('\n') }),
+        ]));
+    }
+    if (iocNodes.length) container.appendChild(scriptSection('Indicators of compromise', false, iocNodes));
+}
+
+function initScript() {
+    const tabFile = document.getElementById('script-tab-file');
+    const tabPaste = document.getElementById('script-tab-paste');
+    const paneFile = document.getElementById('script-pane-file');
+    const panePaste = document.getElementById('script-pane-paste');
+    const filePathInp = document.getElementById('script-file-path');
+    const textInp = document.getElementById('script-text');
+    const caseSel = document.getElementById('script-file-case');
+    const langSel = document.getElementById('script-language');
+    const btnRun = document.getElementById('btn-run-script');
+    const fb = document.getElementById('script-feedback');
+    const results = document.getElementById('script-results');
+
+    let mode = 'file';
+
+    // Populate the case selector from already-loaded cases.
+    caseSel.replaceChildren(scriptEl('option', { text: 'No case (analysis only)', attrs: { value: '' } }));
+    for (const c of (state.cases || [])) {
+        const label = c.case_name && c.case_name !== c.case_id ? `${c.case_id} — ${c.case_name}` : c.case_id;
+        caseSel.appendChild(scriptEl('option', { text: label, attrs: { value: c.case_id } }));
+    }
+    if (state.currentCaseId) caseSel.value = state.currentCaseId;
+
+    function selectMode(next) {
+        mode = next;
+        tabFile.classList.toggle('active', next === 'file');
+        tabPaste.classList.toggle('active', next === 'paste');
+        paneFile.classList.toggle('active', next === 'file');
+        panePaste.classList.toggle('active', next === 'paste');
+    }
+    tabFile.addEventListener('click', () => selectMode('file'));
+    tabPaste.addEventListener('click', () => selectMode('paste'));
+
+    function showError(message) {
+        fb.className = 'alert alert-error mt-md';
+        fb.textContent = message;              // textContent: server/analyzer messages are untrusted
+        fb.classList.remove('hidden');
+    }
+
+    btnRun.addEventListener('click', async () => {
+        fb.classList.add('hidden');
+        const body = { language: langSel.value };
+
+        if (mode === 'file') {
+            const fpath = filePathInp.value.trim();
+            if (!fpath) { showError('A script file path is required.'); return; }
+            body.file_path = fpath;
+            const cid = caseSel.value;
+            if (cid) body.case_id = cid;
+        } else {
+            const text = textInp.value;
+            if (!text.trim()) { showError('Paste some script text to analyze.'); return; }
+            body.text = text;   // paste mode never sends case_id
+        }
+
+        btnRun.textContent = 'Analyzing...';
+        btnRun.disabled = true;
+        const res = await api('/script/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        btnRun.textContent = 'Analyze';
+        btnRun.disabled = false;
+
+        if (!res || res._error || !res.analysis) {
+            showError(res ? res.message : 'Script analysis failed.');
+            results.replaceChildren(scriptEl('div', { className: 'empty-state', text: 'Analysis could not be completed.' }));
+            return;
+        }
+        renderScriptResult(results, res.analysis, res.finding_ids);
     });
 }
 

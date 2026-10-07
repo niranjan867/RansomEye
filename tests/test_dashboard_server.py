@@ -1102,3 +1102,44 @@ def test_api_script_attacker_strings_are_json_data_not_markup(running_server):
     assert "<img src=x" in blob  # preserved verbatim as data
     # It is present only inside string values, never as a structural element.
     assert res["analysis"]["analysis_status"] == "complete"
+
+
+def _script_view_source() -> str:
+    app_js = (Path(dashboard_server.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+    start = app_js.index("function scriptEl(")
+    end = app_js.index("\n// ==", app_js.index("function initScript("))
+    return app_js[start:end]
+
+
+def test_script_view_never_uses_html_sinks():
+    """XSS regression: the Script Analysis view must build DOM nodes, not HTML strings."""
+    source = _script_view_source()
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+        assert sink not in source, f"{sink} used in Script Analysis view"
+
+
+def test_script_view_reads_fields_the_api_returns(running_server):
+    """Top-level analysis fields the view reads must exist in the API response."""
+    code, res = _post_json(_script_url(running_server), {"text": f"{_enc_command()}\nvssadmin delete shadows"})
+    assert code == 200
+    analysis = res["analysis"]
+    for key in ("analysis_status", "severity", "score", "confidence", "language",
+                "file_size", "sha256", "decoded_layers", "indicators", "techniques", "iocs", "warnings"):
+        assert key in analysis, key
+    assert "finding_ids" in res
+    ind = analysis["indicators"][0]
+    for key in ("rule_id", "title", "severity", "technique", "layer_index", "line", "excerpt", "category"):
+        assert key in ind, key
+    layer = analysis["decoded_layers"][0]
+    for key in ("index", "depth", "parent_index", "method", "size", "is_text", "encoding", "preview", "sha256"):
+        assert key in layer, key
+
+
+def test_script_view_registered_in_nav_and_router():
+    static_dir = Path(dashboard_server.__file__).parent / "static"
+    html = (static_dir / "index.html").read_text(encoding="utf-8")
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    assert 'data-view="script"' in html
+    assert 'id="tpl-script"' in html
+    assert "case 'script': initScript();" in app_js
+    assert "'script'" in app_js.split("const GLOBAL_VIEWS")[1].split("]")[0]
