@@ -1143,3 +1143,104 @@ def test_script_view_registered_in_nav_and_router():
     assert 'id="tpl-script"' in html
     assert "case 'script': initScript();" in app_js
     assert "'script'" in app_js.split("const GLOBAL_VIEWS")[1].split("]")[0]
+
+
+# --------------------------------------------------------------------------- #
+# Phishing Analysis view: XSS hardening regression
+# --------------------------------------------------------------------------- #
+
+# Inert, non-executing markup/scheme probes. These never run anything; they are
+# plain strings used to assert the dashboard treats message content as data.
+_PHISH_XSS_PROBES = [
+    "<u>x</u>",
+    "<img src=x onerror=alert(1)>",
+    "<script>alert(1)</script>",
+    "\"><img src=x onerror=alert(1)>",
+    "javascript:alert(1)",
+    "data:text/html,<script>alert(1)</script>",
+]
+
+
+def _phishing_view_source() -> str:
+    app_js = (Path(dashboard_server.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+    start = app_js.index("const PHISH_BADGE")
+    end = app_js.index("\n// ==", app_js.index("function initPhishing("))
+    return app_js[start:end]
+
+
+def test_phishing_view_never_uses_html_sinks():
+    """XSS regression: the Phishing Analysis view must build DOM nodes, not HTML strings."""
+    source = _phishing_view_source()
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"):
+        assert sink not in source, f"{sink} used in Phishing Analysis view"
+
+
+def test_phishing_view_renders_urls_as_inert_text_not_links():
+    """URLs are plain text, never anchors -- so no javascript:/data: scheme can execute."""
+    source = _phishing_view_source()
+    assert "createElement('a')" not in source and 'createElement("a")' not in source
+    assert "href" not in source
+
+
+def test_phishing_view_reads_fields_the_api_returns(running_server):
+    """Top-level assessment fields the view reads must exist in the API response."""
+    code, res = _post_json(f"{running_server}/api/phishing/analyze", {
+        "subject": "Urgent: verify your account",
+        "sender": "security@paypal.com.account-update.xyz",
+        "body": "Update your KYC immediately at http://1.2.3.4/login to avoid suspension.",
+    })
+    assert code == 200, res
+    a = res["assessment"]
+    for key in ("score", "risk_level", "threat_level", "confidence",
+                "mitre_techniques", "indicators", "extracted_urls",
+                "attachment_findings", "recommendations"):
+        assert key in a, key
+    assert a["indicators"], "expected at least one indicator"
+    ind = a["indicators"][0]
+    for key in ("rule_id", "category", "severity", "description", "matched_evidence"):
+        assert key in ind, key
+    assert a["extracted_urls"], "expected at least one extracted URL"
+    u = a["extracted_urls"][0]
+    for key in ("url", "hostname", "is_ip_hostname", "is_brand_subdomain",
+                "is_punycode", "is_shortener", "has_suspicious_tld"):
+        assert key in u, key
+
+
+def test_phishing_api_accepts_attacker_markup_and_stays_structured(running_server):
+    """Probe-laden messages must not break the API; the response stays valid structured JSON."""
+    for probe in _PHISH_XSS_PROBES:
+        code, res = _post_json(f"{running_server}/api/phishing/analyze", {
+            "subject": f"alert {probe}",
+            "sender": f"{probe}@evil.example",
+            "body": f"verify {probe} now at http://evil.example.xyz/path",
+        })
+        assert code == 200, (probe, res)
+        a = res.get("assessment")
+        assert isinstance(a, dict), (probe, res)
+        # Returned collections are JSON arrays/strings -- structured data, not markup.
+        assert isinstance(a["indicators"], list)
+        assert isinstance(a["extracted_urls"], list)
+        for u in a["extracted_urls"]:
+            assert isinstance(u.get("url"), str)
+
+
+def test_phishing_api_url_with_executable_scheme_is_plain_string(running_server):
+    """A URL carrying a javascript:-style scheme is returned as a string value only."""
+    code, res = _post_json(f"{running_server}/api/phishing/analyze", {
+        "body": "Click http://evil.example.xyz/path?next=javascript:alert1 to verify your kyc",
+    })
+    assert code == 200, res
+    urls = res["assessment"]["extracted_urls"]
+    assert urls, "expected an extracted URL"
+    # The view renders this via textContent, so the scheme can never execute.
+    assert all(isinstance(u["url"], str) for u in urls)
+
+
+def test_phishing_view_registered_in_nav_and_router():
+    static_dir = Path(dashboard_server.__file__).parent / "static"
+    html = (static_dir / "index.html").read_text(encoding="utf-8")
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    assert 'data-view="phishing"' in html
+    assert 'id="tpl-phishing"' in html
+    assert "case 'phishing': initPhishing();" in app_js
+    assert "'phishing'" in app_js.split("const GLOBAL_VIEWS")[1].split("]")[0]

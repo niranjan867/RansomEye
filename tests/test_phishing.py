@@ -294,3 +294,58 @@ def test_cli_phishing_case_ingest(tmp_path: Path) -> None:
     findings = store.get_case_findings("CASE-CLI-01")
     assert len(findings) == 1
     store.close()
+
+
+# --------------------------------------------------------------------------- #
+# XSS hardening: attacker-controlled markup must be preserved as inert string
+# data by the analyzer. The dashboard renders it via textContent / safe DOM
+# construction, never as HTML, so none of these probes can create live DOM.
+# --------------------------------------------------------------------------- #
+
+_XSS_PROBES = [
+    "<u>x</u>",
+    "<img src=x onerror=alert(1)>",
+    "<script>alert(1)</script>",
+    "\"><img src=x onerror=alert(1)>",
+    "javascript:alert(1)",
+    "data:text/html,<script>alert(1)</script>",
+]
+
+
+def test_attachment_filename_markup_preserved_as_data():
+    """Markup in an attachment filename round-trips verbatim as string data."""
+    for probe in _XSS_PROBES:
+        fname = f"{probe}.exe"
+        payload = MessagePayload.from_dict({"text": "see attached", "attachments": [fname]})
+        result = PhishingDetector().analyze(payload)
+        names = [a["filename"] for a in result.attachment_findings]
+        assert fname in names
+        # Serializes (as the dashboard server does) with the bytes preserved.
+        assert fname in json.dumps(result.to_dict(), default=str)
+
+
+def test_extracted_url_is_string_data():
+    """Extracted URLs are returned as plain strings (the view renders them inert)."""
+    payload = MessagePayload.from_dict({
+        "text": "verify your kyc at http://evil.example.xyz/login now",
+    })
+    result = PhishingDetector().analyze(payload)
+    urls = result.to_dict()["extracted_urls"]
+    assert urls
+    assert all(isinstance(u["url"], str) for u in urls)
+
+
+def test_message_fields_of_pure_markup_analyze_to_structured_data():
+    """A message whose subject/sender/body are attacker markup analyzes cleanly."""
+    for probe in _XSS_PROBES:
+        payload = MessagePayload.from_dict({
+            "subject": probe,
+            "sender": f"{probe}@evil.example",
+            "text": f"{probe} verify your account {probe}",
+        })
+        result = PhishingDetector().analyze(payload)
+        d = result.to_dict()
+        # Structured, serializable result -- no markup becomes structure.
+        assert isinstance(json.dumps(d, default=str), str)
+        assert isinstance(d["indicators"], list)
+        assert isinstance(d["extracted_urls"], list)

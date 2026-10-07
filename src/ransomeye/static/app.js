@@ -1623,6 +1623,143 @@ function initScript() {
 // ==========================================
 // 18. Phishing Analysis
 // ==========================================
+// Every phishing field the view shows (subject, sender, indicator text,
+// matched evidence, extracted URLs/domains, attachment filenames, MITRE
+// strings, recommendations) is derived from an attacker-controlled message and
+// is only ever placed into the DOM via textContent / safe element construction
+// (the shared scriptEl/scriptKv/scriptSection helpers) -- never as an HTML
+// string. URLs are rendered as inert text, so no scheme is ever executable.
+const PHISH_BADGE = {
+    benign: 'low', low: 'low', medium: 'medium',
+    suspicious: 'high', high: 'high', critical: 'critical',
+};
+
+function phishBadge(severity) {
+    return 'badge ' + (PHISH_BADGE[String(severity || '').toLowerCase()] || 'medium');
+}
+
+function phishUrlFlags(u) {
+    const flags = [];
+    if (u.is_ip_hostname) flags.push('RAW_IP');
+    if (u.is_brand_subdomain) flags.push('BRAND_IN_SUBDOMAIN');
+    if (u.is_punycode) flags.push('PUNYCODE');
+    if (u.is_shortener) flags.push('SHORTENER');
+    if (u.has_suspicious_tld) flags.push('SUSPICIOUS_TLD');
+    return flags;
+}
+
+function renderPhishingResult(container, a) {
+    container.replaceChildren();
+
+    const sev = String(a.threat_level || a.risk_level || a.severity || 'LOW').toUpperCase();
+    const score = a.score != null ? a.score : (a.risk_score != null ? a.risk_score : '-');
+    const indicators = a.indicators || a.reasons || [];
+    const urls = a.extracted_urls || a.urls || [];
+    const attachments = a.attachment_findings || [];
+    const techniques = a.mitre_techniques || a.techniques || [];
+    const recommendations = a.recommendations || [];
+    const critical = sev === 'HIGH' || sev === 'CRITICAL';
+    const valCls = 'stat-val ' + (critical ? 'text-critical' : 'text-warning');
+
+    // Overview stat cards (same layout as before)
+    container.appendChild(scriptEl('div', { className: 'grid-overview' }, [
+        scriptEl('div', { className: 'stat-card' }, [
+            scriptEl('span', { className: 'stat-label', text: 'Risk Score' }),
+            scriptEl('span', { className: valCls, text: String(score) }),
+        ]),
+        scriptEl('div', { className: 'stat-card' }, [
+            scriptEl('span', { className: 'stat-label', text: 'Threat Level' }),
+            scriptEl('span', { className: valCls, text: sev }),
+        ]),
+        scriptEl('div', { className: 'stat-card' }, [
+            scriptEl('span', { className: 'stat-label', text: 'Indicators' }),
+            scriptEl('span', { className: 'stat-val mono', text: String(indicators.length) }),
+        ]),
+    ]));
+
+    // Key facts
+    container.appendChild(scriptEl('div', { className: 'prop-list mb-lg' }, [
+        scriptKv('Confidence', a.confidence || '-'),
+        scriptKv('MITRE techniques', techniques.join(', ') || 'None', { mono: true }),
+    ]));
+
+    // Detected indicators
+    const indRows = indicators.map(ind => {
+        // The API returns indicator objects; tolerate a plain string too.
+        if (ind && typeof ind === 'object') {
+            return scriptEl('tr', {}, [
+                scriptEl('td', { className: 'mono', text: ind.rule_id }),
+                scriptEl('td', {}, [scriptEl('span', { className: phishBadge(ind.severity), text: ind.severity })]),
+                scriptEl('td', { text: ind.description }),
+                scriptEl('td', { className: 'mono', text: ind.matched_evidence, title: ind.matched_evidence }),
+            ]);
+        }
+        return scriptEl('tr', {}, [
+            scriptEl('td', { className: 'mono', text: '-' }),
+            scriptEl('td', {}, [scriptEl('span', { className: phishBadge(sev), text: sev.toLowerCase() })]),
+            scriptEl('td', { text: String(ind) }),
+            scriptEl('td', { className: 'mono', text: '' }),
+        ]);
+    });
+    const indBody = [];
+    if (indRows.length) {
+        indBody.push(scriptEl('table', { className: 'data-table' }, [
+            scriptEl('thead', {}, [scriptEl('tr', {}, [
+                scriptEl('th', { text: 'Rule' }), scriptEl('th', { text: 'Severity' }),
+                scriptEl('th', { text: 'Description' }), scriptEl('th', { text: 'Matched evidence' }),
+            ])]),
+            scriptEl('tbody', {}, indRows),
+        ]));
+    } else {
+        indBody.push(scriptEl('div', { className: 'empty-state', text: 'No high-risk indicators detected.' }));
+    }
+    container.appendChild(scriptSection(`Detected indicators (${indicators.length})`, indicators.length > 0, indBody));
+
+    // Extracted URLs / domains -- inert text only, never clickable or markup.
+    if (urls.length) {
+        const urlNodes = urls.map(u => {
+            const raw = (u && typeof u === 'object') ? (u.url || u.hostname || '') : u;
+            const flags = (u && typeof u === 'object') ? phishUrlFlags(u) : [];
+            const line = scriptEl('div', { style: 'margin-bottom: 6px; word-break: break-all;' }, [
+                scriptEl('span', { className: 'mono', style: 'font-size: 11px;', text: raw }),
+            ]);
+            if (flags.length) {
+                line.appendChild(scriptEl('span', {
+                    className: 'mono',
+                    style: 'color: var(--re-text-muted); font-size: 11px;',
+                    text: `  [${flags.join(', ')}]`,
+                }));
+            }
+            return line;
+        });
+        container.appendChild(scriptSection(`Extracted URLs / domains (${urls.length})`, false, urlNodes));
+    }
+
+    // Attachment findings
+    if (attachments.length) {
+        const attRows = attachments.map(att => scriptEl('tr', {}, [
+            scriptEl('td', { className: 'mono', text: att.filename, title: att.filename }),
+            scriptEl('td', {}, [scriptEl('span', { className: phishBadge(att.risk), text: att.risk })]),
+            scriptEl('td', { text: att.reason }),
+        ]));
+        container.appendChild(scriptSection(`Attachments (${attachments.length})`, false, [
+            scriptEl('table', { className: 'data-table' }, [
+                scriptEl('thead', {}, [scriptEl('tr', {}, [
+                    scriptEl('th', { text: 'Filename' }), scriptEl('th', { text: 'Risk' }), scriptEl('th', { text: 'Reason' }),
+                ])]),
+                scriptEl('tbody', {}, attRows),
+            ]),
+        ]));
+    }
+
+    // Recommendations
+    if (recommendations.length) {
+        const list = scriptEl('ul', { style: 'margin: 0; padding-left: 18px;' },
+            recommendations.map(r => scriptEl('li', { text: r })));
+        container.appendChild(scriptSection(`Recommendations (${recommendations.length})`, false, [list]));
+    }
+}
+
 function initPhishing() {
     const subjInp = document.getElementById('phishing-subject');
     const sendInp = document.getElementById('phishing-sender');
@@ -1658,40 +1795,7 @@ function initPhishing() {
 
         if (res && !res._error && res.assessment) {
             fbPhish.classList.add('hidden');
-            const a = res.assessment;
-            const sev = (a.threat_level || a.severity || 'LOW').toUpperCase();
-            const score = a.score !== undefined ? a.score : (a.risk_score !== undefined ? a.risk_score : '-');
-            const indics = a.indicators || a.reasons || [];
-            const urls = a.extracted_urls || a.urls || [];
-
-            resBox.innerHTML = `
-                <div class="grid-overview">
-                    <div class="stat-card">
-                        <span class="stat-label">Risk Score</span>
-                        <span class="stat-val ${sev === 'HIGH' || sev === 'CRITICAL' ? 'text-critical' : 'text-warning'}">${score}</span>
-                    </div>
-                    <div class="stat-card">
-                        <span class="stat-label">Threat Level</span>
-                        <span class="stat-val ${sev === 'HIGH' || sev === 'CRITICAL' ? 'text-critical' : 'text-warning'}">${sev}</span>
-                    </div>
-                    <div class="stat-card">
-                        <span class="stat-label">Indicators</span>
-                        <span class="stat-val mono">${indics.length}</span>
-                    </div>
-                </div>
-                <div class="prop-list">
-                    <div class="prop-item"><span class="prop-key">Detected Indicators</span>
-                        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                            ${indics.length > 0 ? indics.map(i => `<span class="badge ${sev === 'HIGH' || sev === 'CRITICAL' ? 'critical' : 'high'}">${i}</span>`).join('') : '<span class="badge low">No high-risk keywords detected</span>'}
-                        </div>
-                    </div>
-                    ${urls.length > 0 ? `
-                        <div class="prop-item mt-md"><span class="prop-key">Extracted URLs / Domains</span>
-                            <div class="prop-val mono" style="font-size: 11px;">${urls.join('<br>')}</div>
-                        </div>
-                    ` : ''}
-                </div>
-            `;
+            renderPhishingResult(resBox, res.assessment);
         } else {
             fbPhish.className = 'alert alert-error mt-md';
             fbPhish.textContent = res ? res.message : 'Phishing analysis failed.';
