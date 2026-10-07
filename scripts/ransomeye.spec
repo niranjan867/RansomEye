@@ -39,6 +39,7 @@ hiddenimports = [
     "ransomeye.report",
     "ransomeye.sysmon_reader",
     "ransomeye.static_analyzer",
+    "ransomeye.script_analyzer",
     "ransomeye.entropy",
     "ransomeye.dashboard_server",
     "ransomeye.collection",
