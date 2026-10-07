@@ -1233,6 +1233,112 @@ def run_static_analysis_command(
     return 0
 
 
+def _export_report_no_overwrite(export_path: Path, content: str) -> None:
+    """Write a report to disk, refusing to overwrite an existing file (O_EXCL)."""
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(export_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as exc:
+        raise FileExistsError(f"Export destination already exists: {export_path}") from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+    except Exception:
+        export_path.unlink(missing_ok=True)
+        raise
+
+
+def run_script_analysis_command(
+    file_path: Path | None = None,
+    text: str | None = None,
+    event_id: str | None = None,
+    language: str | None = None,
+    as_json: bool = False,
+    database_path: Path | None = None,
+    case_id: str | None = None,
+    export_path: Path | None = None,
+) -> int:
+    """Statically analyze a script, command line, or stored event's command line.
+
+    Exactly one input source is used: a file, inline text, or a stored event id.
+    Persistence rules follow the approved design: a file artifact or a stored
+    event may be linked into a case; pasted text is never persisted. Returns 0
+    when analysis completes (at any severity) and raises on input or operational
+    errors, which the CLI maps to exit code 1.
+    """
+    from ransomeye.script_analyzer import ScriptAnalyzer, ingest_script_finding
+
+    provided = [name for name, value in
+                (("--file", file_path), ("--text", text), ("--event", event_id)) if value]
+    if len(provided) != 1:
+        raise ValueError("Provide exactly one of --file, --text, or --event.")
+
+    want_persist = bool(database_path and case_id)
+    analyzer = ScriptAnalyzer()
+    created: list[int] | None = None
+
+    if event_id is not None:
+        if not (database_path and case_id):
+            raise ValueError("--event requires --database and --case.")
+        store = EvidenceStore(database_path)
+        try:
+            if store.get_case(case_id) is None:
+                raise KeyError(f"Case not found: {case_id}")
+            event = store.get_event(case_id, event_id)
+            if event is None:
+                raise KeyError(f"Event not found in case {case_id}: {event_id}")
+            command_line = event.get("command_line")
+            if not command_line or not str(command_line).strip():
+                raise ValueError(f"Event {event_id} has no command line to analyze.")
+            result = analyzer.analyze_text(str(command_line), file_name=event_id, language=language)
+            created = ingest_script_finding(store, case_id, result, event_id=event_id)
+        finally:
+            store.close()
+
+    elif file_path is not None:
+        path = Path(file_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Script file not found: {path}")
+        result = analyzer.analyze_file(path, language=language)
+        if want_persist:
+            store = EvidenceStore(database_path)
+            try:
+                if store.get_case(case_id) is None:
+                    raise KeyError(f"Case not found: {case_id}")
+                created = ingest_script_finding(store, case_id, result)
+            finally:
+                store.close()
+
+    else:
+        if want_persist:
+            raise ValueError(
+                "Pasted --text cannot be added to a case. Analyze a --file or a "
+                "stored --event so the finding stays traceable to evidence."
+            )
+        result = analyzer.analyze_text(str(text), language=language)
+
+    if created is not None and not as_json:
+        print(f"[+] Script findings ingested into case {case_id}: {len(created)} finding(s) {created}\n")
+
+    if as_json:
+        output_str = json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+    else:
+        output_str = result.to_summary_text()
+    print(output_str)
+
+    if export_path:
+        export_content = (
+            json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+            if as_json or Path(export_path).suffix.lower() == ".json"
+            else output_str
+        )
+        _export_report_no_overwrite(Path(export_path), export_content)
+        if not as_json:
+            print(f"\n[+] Report exported to: {export_path}")
+
+    return 0
+
+
 def main() -> None:
     if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
         try:
@@ -2132,6 +2238,53 @@ def main() -> None:
         help="Optional file path to export analysis report.",
     )
 
+    script_parser = subparsers.add_parser(
+        "script",
+        help="Statically analyze a script, command line, or stored event without executing it.",
+    )
+    script_input_group = script_parser.add_mutually_exclusive_group(required=True)
+    script_input_group.add_argument(
+        "--file",
+        dest="file_path",
+        type=Path,
+        help="Path to a script file (.ps1, .vbs, .js, .hta, .wsf, .bat, exported VBA, etc.).",
+    )
+    script_input_group.add_argument(
+        "--text",
+        help="Inline script or command-line text to analyze (never persisted).",
+    )
+    script_input_group.add_argument(
+        "--event",
+        dest="event_id",
+        help="Analyze the command line of a stored event (requires --database and --case).",
+    )
+    script_parser.add_argument(
+        "--language",
+        default="auto",
+        choices=["auto", "powershell", "vbscript", "vba", "jscript", "hta", "wsf", "batch", "command_line"],
+        help="Force the script language instead of auto-detecting it.",
+    )
+    script_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output script analysis findings in JSON format.",
+    )
+    script_parser.add_argument(
+        "--database",
+        type=Path,
+        help="Optional path to RansomEye database to ingest findings into a case.",
+    )
+    script_parser.add_argument(
+        "--case",
+        dest="case_id",
+        help="Optional case ID to link script findings with endpoint investigation.",
+    )
+    script_parser.add_argument(
+        "--export",
+        type=Path,
+        help="Optional file path to export the analysis report (will not overwrite an existing file).",
+    )
+
     args = parser.parse_args()
 
     if args.command == "collect":
@@ -2694,6 +2847,22 @@ def main() -> None:
             )
         except (FileNotFoundError, ValueError, KeyError, sqlite3.Error, OSError) as exc:
             parser.exit(1, f"Static analysis failed: {exc}\n")
+    elif args.command == "script":
+        try:
+            ret = run_script_analysis_command(
+                file_path=args.file_path,
+                text=args.text,
+                event_id=args.event_id,
+                language=args.language,
+                as_json=args.json,
+                database_path=args.database,
+                case_id=args.case_id,
+                export_path=args.export,
+            )
+            if ret != 0:
+                sys.exit(ret)
+        except (FileNotFoundError, FileExistsError, ValueError, KeyError, sqlite3.Error, OSError) as exc:
+            parser.exit(1, f"Script analysis failed: {exc}\n")
 
 if __name__ == "__main__":
     main()

@@ -814,3 +814,198 @@ def test_command_line_finding_correlates_with_stored_behavior_finding(case_store
     incidents = correlate_findings(findings, evidence=[event])
     assert len(incidents) == 1
     assert "shared_evidence" in incidents[0].correlation_reasons
+
+
+# --------------------------------------------------------------------------- #
+# Stage 3: CLI (ransomeye script)
+# --------------------------------------------------------------------------- #
+
+import json as _json  # noqa: E402
+
+from ransomeye.commands import run_script_analysis_command, main as cli_main  # noqa: E402
+
+
+def test_cli_text_summary_output(capsys):
+    assert run_script_analysis_command(text="Invoke-Expression $x") == 0
+    out = capsys.readouterr().out
+    assert "SCRIPT ANALYSIS REPORT" in out
+
+
+def test_cli_text_json_output(capsys):
+    assert run_script_analysis_command(text="Invoke-Expression $x", as_json=True) == 0
+    data = _json.loads(capsys.readouterr().out)
+    assert "sha256" in data and data["analysis_status"] == sa.STATUS_COMPLETE
+
+
+def test_cli_file_analysis_only(tmp_path, capsys):
+    target = _write_script(tmp_path)
+    assert run_script_analysis_command(file_path=target) == 0
+    assert "SCRIPT ANALYSIS REPORT" in capsys.readouterr().out
+
+
+def test_cli_file_persists_into_case(tmp_path, capsys):
+    db = tmp_path / "cli.db"
+    store = EvidenceStore(db)
+    store.create_case("C-CLI", "cli")
+    store.close()
+
+    target = _write_script(tmp_path)
+    assert run_script_analysis_command(file_path=target, database_path=db, case_id="C-CLI") == 0
+    assert "ingested into case C-CLI" in capsys.readouterr().out
+
+    store = EvidenceStore(db)
+    try:
+        assert len(store.get_case_findings("C-CLI")) > 0
+        assert len(store.get_case_events("C-CLI")) == 1
+    finally:
+        store.close()
+
+
+def test_cli_text_cannot_persist(tmp_path):
+    db = tmp_path / "cli.db"
+    store = EvidenceStore(db)
+    store.create_case("C", "c")
+    store.close()
+    with pytest.raises(ValueError, match="cannot be added to a case"):
+        run_script_analysis_command(text="Invoke-Expression $x", database_path=db, case_id="C")
+
+
+def test_cli_event_mode(tmp_path, capsys):
+    db = tmp_path / "cli.db"
+    store = EvidenceStore(db)
+    store.create_case("C-EVT", "evt")
+    enc = _b64_utf16le("Invoke-Expression $x")
+    store.save_event("C-EVT", {
+        "event_id": "EVT-1",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "source": "sysmon",
+        "event_type": "process_creation",
+        "process_name": "powershell.exe",
+        "command_line": f"powershell -enc {enc}",
+    })
+    store.close()
+
+    assert run_script_analysis_command(event_id="EVT-1", database_path=db, case_id="C-EVT") == 0
+
+    store = EvidenceStore(db)
+    try:
+        assert len(store.get_case_events("C-EVT")) == 1  # no new event
+        findings = store.get_case_findings("C-EVT")
+        assert findings and all(f["event_ids"] == ["EVT-1"] for f in findings)
+        assert store.get_custody_events("C-EVT") == []  # command-line mode: no custody
+    finally:
+        store.close()
+
+
+def test_cli_event_requires_database_and_case():
+    with pytest.raises(ValueError, match="requires --database and --case"):
+        run_script_analysis_command(event_id="EVT-1")
+
+
+def test_cli_event_unknown_rejected(tmp_path):
+    db = tmp_path / "cli.db"
+    store = EvidenceStore(db)
+    store.create_case("C", "c")
+    store.close()
+    with pytest.raises(KeyError):
+        run_script_analysis_command(event_id="NOPE", database_path=db, case_id="C")
+
+
+def test_cli_event_without_command_line_rejected(tmp_path):
+    db = tmp_path / "cli.db"
+    store = EvidenceStore(db)
+    store.create_case("C", "c")
+    store.save_event("C", {
+        "event_id": "EVT-NO-CMD",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "source": "sysmon",
+        "event_type": "file_create",
+        "file_path": "x.txt",
+    })
+    store.close()
+    with pytest.raises(ValueError, match="no command line"):
+        run_script_analysis_command(event_id="EVT-NO-CMD", database_path=db, case_id="C")
+
+
+def test_cli_requires_exactly_one_input():
+    with pytest.raises(ValueError, match="exactly one"):
+        run_script_analysis_command()
+
+
+def test_cli_export_writes_report(tmp_path):
+    out = tmp_path / "report.txt"
+    run_script_analysis_command(text="Invoke-Expression $x", export_path=out)
+    assert out.is_file()
+    assert "SCRIPT ANALYSIS REPORT" in out.read_text(encoding="utf-8")
+
+
+def test_cli_export_json_by_suffix(tmp_path):
+    out = tmp_path / "report.json"
+    run_script_analysis_command(text="Invoke-Expression $x", export_path=out)
+    data = _json.loads(out.read_text(encoding="utf-8"))
+    assert "sha256" in data
+
+
+def test_cli_export_refuses_overwrite(tmp_path):
+    out = tmp_path / "exists.txt"
+    out.write_text("keep me", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="already exists"):
+        run_script_analysis_command(text="Invoke-Expression $x", export_path=out)
+    assert out.read_text(encoding="utf-8") == "keep me"
+
+
+def test_cli_language_forced(capsys):
+    run_script_analysis_command(text="Invoke-Expression $x", language="vbscript", as_json=True)
+    assert _json.loads(capsys.readouterr().out)["language"] == "vbscript"
+
+
+def test_cli_invalid_language_rejected():
+    with pytest.raises(ScriptAnalysisError):
+        run_script_analysis_command(text="x", language="perl")
+
+
+def test_cli_missing_file_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        run_script_analysis_command(file_path=tmp_path / "nope.ps1")
+
+
+# --- argparse wiring via main() ---
+
+def test_main_script_text(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["ransomeye", "script", "--text", "Invoke-Expression $x"])
+    cli_main()
+    assert "SCRIPT ANALYSIS REPORT" in capsys.readouterr().out
+
+
+def test_main_script_mutually_exclusive_inputs(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["ransomeye", "script", "--file", "a.ps1", "--text", "x"])
+    with pytest.raises(SystemExit) as exc:
+        cli_main()
+    assert exc.value.code == 2  # argparse usage error
+
+
+def test_main_script_missing_file_exit_1(monkeypatch, tmp_path):
+    monkeypatch.setattr("sys.argv", ["ransomeye", "script", "--file", str(tmp_path / "nope.ps1")])
+    with pytest.raises(SystemExit) as exc:
+        cli_main()
+    assert exc.value.code == 1
+
+
+def test_main_script_persist_and_export(monkeypatch, tmp_path, capsys):
+    db = tmp_path / "m.db"
+    store = EvidenceStore(db)
+    store.create_case("C-MAIN", "main")
+    store.close()
+    target = _write_script(tmp_path)
+    export = tmp_path / "out.json"
+    monkeypatch.setattr("sys.argv", [
+        "ransomeye", "script", "--file", str(target),
+        "--database", str(db), "--case", "C-MAIN", "--json", "--export", str(export),
+    ])
+    cli_main()
+    assert export.is_file()
+    store = EvidenceStore(db)
+    try:
+        assert len(store.get_case_findings("C-MAIN")) > 0
+    finally:
+        store.close()
