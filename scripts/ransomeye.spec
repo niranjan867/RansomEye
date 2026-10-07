@@ -16,6 +16,7 @@ src_dir = project_root / "src"
 # Static assets for dashboard console
 datas = [
     (str(src_dir / "ransomeye" / "static"), "ransomeye/static"),
+    (str(project_root / "THIRD_PARTY_NOTICES.md"), "."),
 ]
 
 hiddenimports = [

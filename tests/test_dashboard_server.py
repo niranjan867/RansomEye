@@ -818,3 +818,67 @@ def test_dashboard_static_and_phishing_analysis(running_server, tmp_path):
     assert code == 200
     assert "assessment" in res
     assert res["assessment"]["threat_level"] in ("HIGH", "CRITICAL", "MEDIUM", "LOW", "SUSPICIOUS")
+
+
+def test_dashboard_static_analysis_ingests_into_case(running_server, test_db_path, tmp_path):
+    """Static analysis with a case_id must persist a linked finding and custody record."""
+    store = EvidenceStore(test_db_path)
+    try:
+        store.create_case("CASE-STATIC-API", "Static API Case")
+    finally:
+        store.close()
+
+    artifact = tmp_path / "ransom_artifact.bin"
+    artifact.write_bytes(b"MZ\x90\x00" + b"\x00" * 60 + b"HOW_TO_DECRYPT your files RANSOM note")
+
+    code, res = _post_json(f"{running_server}/api/static/analyze", {
+        "file_path": str(artifact),
+        "case_id": "CASE-STATIC-API",
+    })
+    assert code == 200, res
+    assert isinstance(res["finding_id"], int)
+
+    store = EvidenceStore(test_db_path)
+    try:
+        findings = store.get_case_findings("CASE-STATIC-API")
+        custody = store.get_custody_events("CASE-STATIC-API")
+    finally:
+        store.close()
+
+    assert [f["finding_type"] for f in findings] == ["static_file_analysis"]
+    assert len(findings[0]["event_ids"]) == 1
+    assert [c["action"] for c in custody] == ["reviewed"]
+    assert custody[0]["sha256"] == res["analysis"]["sha256"]
+
+
+def _static_view_source() -> str:
+    app_js = (Path(dashboard_server.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+    start = app_js.index("function initStatic()")
+    end = app_js.index("\n// ====", start)
+    return app_js[start:end]
+
+
+def test_static_view_reads_fields_the_backend_returns():
+    """Every analysis/section field the Static Analysis view reads must exist in the backend payload."""
+    from dataclasses import fields
+    import re
+    from ransomeye.static_analyzer import PESection, StaticAnalyzer
+
+    source = _static_view_source()
+    analysis_keys = set(StaticAnalyzer().analyze_bytes(b"MZ" + b"\x00" * 62).to_dict())
+    section_keys = {f.name for f in fields(PESection)}
+
+    read_analysis = set(re.findall(r"\ba\.(\w+)", source))
+    read_section = set(re.findall(r"\bsec\.(\w+)", source))
+
+    assert {"file_size", "total_entropy", "suspicious_apis", "extracted_iocs", "sections"} <= read_analysis
+    assert read_analysis <= analysis_keys, read_analysis - analysis_keys
+    assert read_section and read_section <= section_keys, read_section - section_keys
+
+
+def test_static_view_never_renders_analyzer_output_as_html():
+    """XSS regression: analyzer output (section names, API names, keywords, paths) is attacker-controlled."""
+    source = _static_view_source()
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+        assert sink not in source, f"{sink} used in Static Analysis view"
+    assert "${" not in source, "HTML/template string construction in Static Analysis view"

@@ -1051,7 +1051,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     _validate_safe_id(case_id, "case_id")
                     store = _get_store()
                     try:
-                        finding_id = ingest_static_finding(store, case_id, res, f_p.name)
+                        finding_id = ingest_static_finding(store, case_id, res)
                     finally:
                         store.close()
                 json_response(self, 200, {"analysis": res_dict, "finding_id": finding_id})

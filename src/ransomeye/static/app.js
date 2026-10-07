@@ -1306,29 +1306,63 @@ function initStatic() {
 
             const a = res.analysis;
             typeEl.textContent = a.file_type || 'Unknown';
-            sizeEl.textContent = a.size ? `${a.size} B` : '-';
-            entropyEl.textContent = a.entropy !== undefined ? Number(a.entropy).toFixed(3) : '-';
-
-            const indics = a.suspicious_indicators || a.indicators || [];
-            countEl.textContent = indics.length;
+            sizeEl.textContent = typeof a.file_size === 'number' ? a.file_size.toLocaleString() + ' B' : '-';
+            entropyEl.textContent = typeof a.total_entropy === 'number' ? a.total_entropy.toFixed(3) : '-';
             pathEl.textContent = a.file_path || fpath;
             shaEl.textContent = a.sha256 || '-';
 
-            indicsEl.innerHTML = indics.length > 0 ? indics.map(i => `<span class="badge critical">${i}</span>`).join('') : '<span class="badge low">None detected</span>';
+            const indics = [];
+            const apis = a.suspicious_apis || {};
+            Object.keys(apis).sort().forEach(category => {
+                (apis[category] || []).forEach(api => indics.push({ text: category + ': ' + api, severity: 'critical' }));
+            });
+            const keywords = (a.extracted_iocs && a.extracted_iocs.ransom_keywords) || [];
+            keywords.forEach(kw => indics.push({ text: 'ransom keyword: ' + kw, severity: 'high' }));
+            countEl.textContent = String(indics.length);
 
+            const badge = (text, severity) => {
+                const span = document.createElement('span');
+                span.className = 'badge ' + severity;
+                span.textContent = text;
+                return span;
+            };
+            indicsEl.replaceChildren(...(indics.length > 0
+                ? indics.map(i => badge(i.text, i.severity))
+                : [badge('None detected', 'low')]));
+
+            const cell = (text, opts = {}) => {
+                const td = document.createElement('td');
+                td.className = 'mono';
+                if (opts.colSpan) {
+                    td.colSpan = opts.colSpan;
+                    td.style.textAlign = 'center';
+                }
+                if (opts.strong) {
+                    const strong = document.createElement('strong');
+                    strong.textContent = text;
+                    td.appendChild(strong);
+                } else {
+                    td.textContent = text;
+                }
+                return td;
+            };
             const secs = a.sections || [];
-            if (secs.length > 0) {
-                secTbody.innerHTML = secs.map(s => `
-                    <tr>
-                        <td class="mono"><strong>${s.name || '-'}</strong></td>
-                        <td class="mono">${s.virtual_size !== undefined ? s.virtual_size : '-'}</td>
-                        <td class="mono">${s.raw_size !== undefined ? s.raw_size : '-'}</td>
-                        <td class="mono">${s.entropy !== undefined ? Number(s.entropy).toFixed(3) : '-'}</td>
-                    </tr>
-                `).join('');
-            } else {
-                secTbody.innerHTML = `<tr><td colspan="4" style="text-align: center;">No PE sections found (not a PE binary).</td></tr>`;
+            const rows = secs.map(sec => {
+                const tr = document.createElement('tr');
+                tr.append(
+                    cell(sec.name || '-', { strong: true }),
+                    cell(sec.virtual_size !== undefined ? String(sec.virtual_size) : '-'),
+                    cell(sec.raw_size !== undefined ? String(sec.raw_size) : '-'),
+                    cell(typeof sec.entropy === 'number' ? sec.entropy.toFixed(3) : '-'),
+                );
+                return tr;
+            });
+            if (rows.length === 0) {
+                const tr = document.createElement('tr');
+                tr.appendChild(cell('No PE sections found (not a PE binary).', { colSpan: 4 }));
+                rows.push(tr);
             }
+            secTbody.replaceChildren(...rows);
         } else {
             fbStatic.className = 'alert alert-error mt-md';
             fbStatic.textContent = res ? res.message : 'Static analysis failed.';
