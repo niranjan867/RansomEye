@@ -296,7 +296,7 @@ function switchView(viewName) {
     renderCurrentView();
 }
 
-const GLOBAL_VIEWS = ['cases', 'monitor', 'collection', 'integrity', 'database', 'static', 'script', 'phishing'];
+const GLOBAL_VIEWS = ['cases', 'monitor', 'collection', 'integrity', 'database', 'static', 'script', 'phishing', 'pcap'];
 
 function renderCurrentView() {
     if (!state.currentCaseId && !GLOBAL_VIEWS.includes(state.currentView)) {
@@ -343,6 +343,7 @@ function renderCurrentView() {
         case 'static': initStatic(); break;
         case 'script': initScript(); break;
         case 'phishing': initPhishing(); break;
+        case 'pcap': initPcap(); break;
     }
 }
 
@@ -2254,5 +2255,224 @@ window.switchDrawerTab = function (elRef, targetId) {
     const target = document.getElementById(targetId);
     if (target) target.classList.add('active');
 };
+
+// ==========================================
+// 19. PCAP Network Analysis
+// ==========================================
+const PCAP_SEVERITY_BADGE = { low: 'low', medium: 'medium', high: 'high', critical: 'critical' };
+
+function pcapBadge(severity) {
+    return 'badge ' + (PCAP_SEVERITY_BADGE[String(severity || '').toLowerCase()] || 'low');
+}
+
+function renderPcapResult(container, analysis, findingIds) {
+    container.replaceChildren();
+
+    if (analysis.analysis_status !== 'complete') {
+        container.appendChild(el('div', { className: 'empty-state' }, [
+            el('h3', { text: 'Not analyzed' }),
+            el('p', { text: (analysis.warnings && analysis.warnings[0]) || 'This capture could not be analyzed.' }),
+            el('p', { style: 'color: var(--re-text-muted); font-size: 12px;',
+                text: 'Classic libpcap format is supported. Re-export the capture as .pcap if needed.' }),
+        ]));
+        if (analysis.warnings && analysis.warnings.length > 1) {
+            const warnNodes = analysis.warnings.map(w => el('div', { className: 'prop-val', text: w }));
+            container.appendChild(section(`Warnings (${analysis.warnings.length})`, false, warnNodes));
+        }
+        return;
+    }
+
+    const indicators = analysis.indicators || [];
+    const critical = indicators.some(i => i.severity === 'high' || i.severity === 'critical');
+    const sevLabel = indicators.length === 0
+        ? 'No indicators'
+        : (critical ? 'Elevated' : 'Low / Medium indicators detected');
+    const valCls = 'stat-val ' + (critical ? 'text-critical' : (indicators.length ? 'text-warning' : ''));
+
+    // Verdict / summary panel
+    const verdict = el('div', { className: 'panel', style: 'padding: 16px; margin-bottom: 16px;' });
+    verdict.appendChild(el('div', { style: 'display: flex; align-items: center; gap: 12px; flex-wrap: wrap;' }, [
+        el('span', { className: 'badge ' + (critical ? 'critical' : (indicators.length ? 'medium' : 'low')), text: sevLabel, style: 'font-size: 13px;' }),
+        el('span', { className: 'mono', text: `Indicators ${indicators.length}`, style: 'color: var(--re-text-secondary);' }),
+        el('span', { className: 'mono', text: `Flows ${(analysis.flows || []).length}`, style: 'color: var(--re-text-secondary);' }),
+        el('span', { className: 'mono', text: `DNS ${analysis.dns_count}`, style: 'color: var(--re-text-secondary);' }),
+    ]));
+    verdict.appendChild(el('p', { style: 'margin-top: 10px; color: var(--re-text-muted); font-size: 12px;',
+        text: indicators.length
+            ? 'PCAP indicators are deterministic observations. Review each in context before escalation; a single network pattern is rarely proof of ransomware on its own.'
+            : 'No deterministic indicators were raised by RansomEye rules. Static analysis cannot guarantee the capture is benign.' }));
+    container.appendChild(verdict);
+
+    // Capture summary
+    container.appendChild(el('div', { className: 'grid-overview', style: 'grid-template-columns: 1fr 1fr 1fr;' }, [
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Total packets' }),
+            el('span', { className: valCls, text: String(analysis.total_packets) }),
+        ]),
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Parsed' }),
+            el('span', { className: 'stat-val mono', text: String(analysis.parsed_packets) }),
+        ]),
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Malformed' }),
+            el('span', { className: 'stat-val mono', text: String(analysis.malformed_packets) }),
+        ]),
+    ]));
+
+    container.appendChild(el('div', { className: 'prop-list mb-lg', style: 'margin-top: 16px;' }, [
+        kv('Capture file', analysis.file_name, { mono: true }),
+        kv('SHA-256', analysis.sha256, { mono: true }),
+        kv('Link type', analysis.link_type_name + ' (' + analysis.link_type + ')', { mono: true }),
+        kv('File size', `${analysis.file_size} bytes`, { mono: true }),
+        kv('TCP / UDP', `${analysis.tcp_count} / ${analysis.udp_count}`, { mono: true }),
+        kv('DNS / HTTP', `${analysis.dns_count} / ${analysis.http_count}`, { mono: true }),
+    ]));
+
+    if (Array.isArray(findingIds)) {
+        const msg = findingIds.length
+            ? `Added to case: ${findingIds.length} finding(s) created (IDs ${findingIds.join(', ')}). Flows and DNS queries are stored as evidence events linked to those findings.`
+            : 'This capture is already recorded against the case; no new findings were added.';
+        container.appendChild(el('div', { className: 'alert alert-success mb-lg', text: msg }));
+    }
+
+    // Indicator table
+    const indRows = indicators.map(ind => el('tr', {}, [
+        el('td', { className: 'mono', text: ind.rule_id }),
+        el('td', {}, [el('span', { className: pcapBadge(ind.severity), text: ind.severity })]),
+        el('td', { text: ind.title }),
+        el('td', { className: 'mono', text: ind.technique }),
+        el('td', { className: 'mono', text: ind.excerpt, title: ind.excerpt }),
+    ]));
+    const indBody = indRows.length ? [
+        el('table', { className: 'data-table' }, [
+            el('thead', {}, [el('tr', {}, [
+                el('th', { text: 'Rule' }), el('th', { text: 'Severity' }),
+                el('th', { text: 'Finding' }), el('th', { text: 'MITRE' }), el('th', { text: 'Evidence excerpt' }),
+            ])]),
+            el('tbody', {}, indRows),
+        ]),
+    ] : [el('div', { className: 'empty-state', text: 'No deterministic indicators matched.' })];
+    container.appendChild(section(`Network findings (${indicators.length})`, indicators.length > 0, indBody));
+
+    // DNS queries
+    const dns = analysis.dns_queries || [];
+    if (dns.length) {
+        const dnsRows = dns.slice(0, 50).map(d => el('tr', {}, [
+            el('td', { className: 'mono', text: d.timestamp, style: 'font-size: 11px;' }),
+            el('td', { className: 'mono', text: d.qname, title: d.qname }),
+            el('td', { className: 'mono', text: d.qtype }),
+            el('td', { className: 'mono', text: `${d.src_ip} → ${d.dst_ip}` }),
+            el('td', { className: 'mono', text: String(d.packet_index) }),
+        ]));
+        container.appendChild(section(`DNS queries (${dns.length})`, false, [
+            el('table', { className: 'data-table' }, [
+                el('thead', {}, [el('tr', {}, [
+                    el('th', { text: 'Timestamp' }), el('th', { text: 'QNAME' }),
+                    el('th', { text: 'Type' }), el('th', { text: 'Src → Dst' }), el('th', { text: 'Packet #' }),
+                ])]),
+                el('tbody', {}, dnsRows),
+            ]),
+        ]));
+    }
+
+    // Flows
+    const flows = analysis.flows || [];
+    if (flows.length) {
+        const flowRows = flows.slice(0, 100).map(f => el('tr', {}, [
+            el('td', { className: 'mono', text: f.first_seen, style: 'font-size: 11px;' }),
+            el('td', { className: 'mono', text: f.protocol }),
+            el('td', { className: 'mono', text: `${f.src_ip}:${f.src_port}` }),
+            el('td', { className: 'mono', text: `${f.dst_ip}:${f.dst_port}` }),
+            el('td', { className: 'mono', text: String(f.packets) }),
+            el('td', { className: 'mono', text: String(f.packet_index) }),
+        ]));
+        container.appendChild(section(`Flows (${flows.length})`, false, [
+            el('table', { className: 'data-table' }, [
+                el('thead', {}, [el('tr', {}, [
+                    el('th', { text: 'First seen' }), el('th', { text: 'Protocol' }),
+                    el('th', { text: 'Source' }), el('th', { text: 'Destination' }),
+                    el('th', { text: 'Packets' }), el('th', { text: 'Packet #' }),
+                ])]),
+                el('tbody', {}, flowRows),
+            ]),
+        ]));
+    }
+
+    // HTTP records
+    const http = analysis.http_records || [];
+    if (http.length) {
+        const httpRows = http.slice(0, 50).map(h => el('tr', {}, [
+            el('td', { className: 'mono', text: h.timestamp, style: 'font-size: 11px;' }),
+            el('td', { className: 'mono', text: h.method }),
+            el('td', { className: 'mono', text: h.host, title: h.host }),
+            el('td', { className: 'mono', text: h.user_agent, title: h.user_agent }),
+            el('td', { className: 'mono', text: `${h.src_ip} → ${h.dst_ip}` }),
+        ]));
+        container.appendChild(section(`HTTP records (${http.length})`, false, [
+            el('table', { className: 'data-table' }, [
+                el('thead', {}, [el('tr', {}, [
+                    el('th', { text: 'Timestamp' }), el('th', { text: 'Method' }),
+                    el('th', { text: 'Host' }), el('th', { text: 'User-Agent' }), el('th', { text: 'Src → Dst' }),
+                ])]),
+                el('tbody', {}, httpRows),
+            ]),
+        ]));
+    }
+
+    // Warnings
+    if (analysis.warnings && analysis.warnings.length) {
+        const warnNodes = analysis.warnings.map(w =>
+            el('div', { className: 'prop-val', text: w, style: 'color: var(--re-text-muted); font-size: 12px;' }));
+        container.appendChild(section(`Warnings (${analysis.warnings.length})`, false, warnNodes));
+    }
+}
+
+function initPcap() {
+    const pathInp = document.getElementById('pcap-file-path');
+    const caseSel = document.getElementById('pcap-case');
+    const btn = document.getElementById('btn-run-pcap');
+    const fb = document.getElementById('pcap-feedback');
+    const results = document.getElementById('pcap-results');
+
+    caseSel.replaceChildren(el('option', { text: 'No case (analysis only)', attrs: { value: '' } }));
+    for (const c of (state.cases || [])) {
+        const label = c.case_name && c.case_name !== c.case_id ? `${c.case_id} — ${c.case_name}` : c.case_id;
+        caseSel.appendChild(el('option', { text: label, attrs: { value: c.case_id } }));
+    }
+    if (state.currentCaseId) caseSel.value = state.currentCaseId;
+
+    btn.addEventListener('click', async () => {
+        fb.classList.add('hidden');
+        const fpath = pathInp.value.trim();
+        if (!fpath) {
+            fb.className = 'alert alert-error mt-md';
+            fb.textContent = 'A capture file path is required.';
+            fb.classList.remove('hidden');
+            return;
+        }
+        const body = { file_path: fpath };
+        const cid = caseSel.value;
+        if (cid) body.case_id = cid;
+
+        btn.textContent = 'Analyzing...';
+        btn.disabled = true;
+        const res = await api('/pcap/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        btn.textContent = 'Analyze Capture';
+        btn.disabled = false;
+
+        if (!res || res._error || !res.analysis) {
+            fb.className = 'alert alert-error mt-md';
+            fb.textContent = res ? res.message : 'PCAP analysis failed.';
+            fb.classList.remove('hidden');
+            results.replaceChildren(el('div', { className: 'empty-state', text: 'Analysis could not be completed.' }));
+            return;
+        }
+        renderPcapResult(results, res.analysis, res.finding_ids);
+    });
+}
 
 document.addEventListener('DOMContentLoaded', init);

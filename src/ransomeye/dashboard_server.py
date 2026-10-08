@@ -30,6 +30,11 @@ from ransomeye.integrity import sha256_file
 from ransomeye.investigation import load_investigation
 from ransomeye.investigation_graph import build_investigation_graph
 from ransomeye.investigation_validation import validate_investigation
+from ransomeye.pcap_analyzer import (
+    PcapAnalysisError,
+    PcapAnalyzer,
+    ingest_pcap_finding,
+)
 from ransomeye.phishing import MessagePayload, PhishingDetector, ingest_phishing_finding
 from ransomeye.reconstruction import reconstruct_attack
 from ransomeye.report import generate_case_report
@@ -1165,6 +1170,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         res = analyzer.analyze_text(str(text), language=language)
                     except ScriptAnalysisError as exc:
                         return error_response(self, 400, str(exc))
+
+                json_response(self, 200, {"analysis": res.to_dict(), "finding_ids": finding_ids})
+
+            elif parts[0] == "pcap" and len(parts) > 1 and parts[1] == "analyze":
+                file_path = body.get("file_path")
+                case_id = body.get("case_id")
+
+                if not file_path or not str(file_path).strip():
+                    return error_response(self, 400, "file_path is required")
+
+                analyzer = PcapAnalyzer()
+                try:
+                    res = analyzer.analyze_file(file_path)
+                except PcapAnalysisError as exc:
+                    return error_response(self, 400, str(exc))
+                except FileNotFoundError:
+                    return error_response(self, 404, f"PCAP file not found: {file_path}")
+
+                finding_ids = None
+                if case_id:
+                    _validate_safe_id(case_id, "case_id")
+                    if not DB_PATH or not DB_PATH.is_file():
+                        return error_response(self, 400, "Database not configured")
+                    store = _get_store()
+                    try:
+                        if store.get_case(case_id) is None:
+                            return error_response(self, 404, f"Case not found: {case_id}")
+                        finding_ids = ingest_pcap_finding(store, case_id, res)
+                    finally:
+                        store.close()
 
                 json_response(self, 200, {"analysis": res.to_dict(), "finding_ids": finding_ids})
 

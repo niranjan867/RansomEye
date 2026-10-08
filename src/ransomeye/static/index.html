@@ -49,6 +49,7 @@
                 <a href="#" class="nav-item" data-view="static">Static Analysis</a>
                 <a href="#" class="nav-item" data-view="script">Script Analysis</a>
                 <a href="#" class="nav-item" data-view="phishing">Phishing Analysis</a>
+                <a href="#" class="nav-item" data-view="pcap">PCAP Analysis</a>
 
                 <div class="nav-section-title">Operations</div>
                 <a href="#" class="nav-item" data-view="integrity">Integrity Verification</a>
@@ -881,6 +882,40 @@
                 </div>
                 <div class="panel-body" id="phishing-results">
                     <div class="empty-state">Submit a message to perform analysis.</div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <template id="tpl-pcap">
+        <div class="view-header">
+            <h2 class="view-title">PCAP Network Analysis</h2>
+            <p class="view-subtitle">Statically parse a classic libpcap capture, surface deterministic network indicators, and link flows and DNS queries to case evidence.</p>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--spacing-xl);">
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Analyze Capture</span>
+                </div>
+                <div class="panel-body">
+                    <div class="form-group">
+                        <label class="form-label">Capture file path *</label>
+                        <input type="text" id="pcap-file-path" class="form-control mono" placeholder="e.g. C:\captures\suspect.pcap">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Ingest into case (optional)</label>
+                        <select id="pcap-case" class="form-control"></select>
+                    </div>
+                    <button class="btn btn-primary" id="btn-run-pcap">Analyze Capture</button>
+                    <div id="pcap-feedback" class="mt-md hidden"></div>
+                </div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Analysis Results</span>
+                </div>
+                <div class="panel-body" id="pcap-results">
+                    <div class="empty-state">Submit a capture file path to perform analysis.</div>
                 </div>
             </div>
         </div>

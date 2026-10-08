@@ -1339,6 +1339,92 @@ def run_script_analysis_command(
     return 0
 
 
+def run_pcap_analysis_command(
+    file_path: Path,
+    as_json: bool = False,
+    database_path: Path | None = None,
+    case_id: str | None = None,
+    export_path: Path | None = None,
+) -> int:
+    """Statically analyze a PCAP capture and optionally ingest findings into a case."""
+    from ransomeye.pcap_analyzer import PcapAnalyzer, ingest_pcap_finding
+
+    analyzer = PcapAnalyzer()
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"PCAP file not found: {path}")
+
+    result = analyzer.analyze_file(path)
+    created: list[int] | None = None
+
+    if database_path and case_id:
+        store = EvidenceStore(database_path)
+        try:
+            if store.get_case(case_id) is None:
+                raise KeyError(f"Case not found: {case_id}")
+            created = ingest_pcap_finding(store, case_id, result)
+        finally:
+            store.close()
+    elif database_path or case_id:
+        raise ValueError("Both --database and --case are required to ingest findings.")
+
+    if as_json:
+        output_str = json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+    else:
+        output_str = _format_pcap_summary(result)
+    print(output_str)
+    if created is not None and not as_json:
+        print(f"\n[+] PCAP findings ingested into case {case_id}: {len(created)} finding(s) {created}")
+
+    if export_path:
+        export_content = (
+            json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+            if as_json or Path(export_path).suffix.lower() == ".json"
+            else output_str
+        )
+        _export_report_no_overwrite(Path(export_path), export_content)
+        if not as_json:
+            print(f"\n[+] Report exported to: {export_path}")
+
+    return 0
+
+
+def _format_pcap_summary(result) -> str:
+    lines = [
+        "=" * 72,
+        "  RANSOMEYE PCAP NETWORK ANALYSIS",
+        "=" * 72,
+        f"  Capture        : {result.file_name}",
+        f"  Path           : {result.file_path}",
+        f"  SHA-256        : {result.sha256}",
+        f"  File size      : {result.file_size} bytes",
+        f"  Link type      : {result.link_type_name} (type {result.link_type})",
+        f"  Status         : {result.analysis_status}",
+        f"  Total packets  : {result.total_packets}",
+        f"  Parsed packets : {result.parsed_packets}",
+        f"  Malformed      : {result.malformed_packets}",
+        f"  TCP / UDP      : {result.tcp_count} / {result.udp_count}",
+        f"  DNS / HTTP     : {result.dns_count} / {result.http_count}",
+        f"  Flows          : {len(result.flows)}",
+        f"  Indicators     : {len(result.indicators)}",
+        "-" * 72,
+    ]
+    if result.indicators:
+        lines.append("  Indicators:")
+        for ind in result.indicators[:50]:
+            lines.append(
+                f"    [{ind.rule_id}] {ind.title} "
+                f"({ind.severity}, conf={ind.confidence:.2f}): {ind.excerpt[:100]}"
+            )
+    if result.warnings:
+        lines.append("-" * 72)
+        lines.append("  Warnings:")
+        for w in result.warnings[:20]:
+            lines.append(f"    - {w}")
+    lines.append("=" * 72)
+    return "\n".join(lines)
+
+
 def main() -> None:
     if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
         try:
@@ -2285,6 +2371,38 @@ def main() -> None:
         help="Optional file path to export the analysis report (will not overwrite an existing file).",
     )
 
+    pcap_parser = subparsers.add_parser(
+        "pcap",
+        help="Statically analyze a PCAP network capture (classic libpcap).",
+    )
+    pcap_parser.add_argument(
+        "--file",
+        dest="file_path",
+        type=Path,
+        required=True,
+        help="Path to a classic libpcap (.pcap) capture file.",
+    )
+    pcap_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output PCAP analysis results in JSON format.",
+    )
+    pcap_parser.add_argument(
+        "--database",
+        type=Path,
+        help="Optional path to RansomEye database to ingest findings into a case.",
+    )
+    pcap_parser.add_argument(
+        "--case",
+        dest="case_id",
+        help="Optional case ID to link PCAP findings with investigation.",
+    )
+    pcap_parser.add_argument(
+        "--export",
+        type=Path,
+        help="Optional file path to export the analysis report (will not overwrite an existing file).",
+    )
+
     args = parser.parse_args()
 
     if args.command == "collect":
@@ -2863,6 +2981,17 @@ def main() -> None:
                 sys.exit(ret)
         except (FileNotFoundError, FileExistsError, ValueError, KeyError, sqlite3.Error, OSError) as exc:
             parser.exit(1, f"Script analysis failed: {exc}\n")
+    elif args.command == "pcap":
+        try:
+            run_pcap_analysis_command(
+                file_path=args.file_path,
+                as_json=args.json,
+                database_path=args.database,
+                case_id=args.case_id,
+                export_path=args.export,
+            )
+        except (FileNotFoundError, FileExistsError, ValueError, KeyError, sqlite3.Error, OSError) as exc:
+            parser.exit(1, f"PCAP analysis failed: {exc}\n")
 
 if __name__ == "__main__":
     main()
