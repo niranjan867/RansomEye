@@ -50,6 +50,7 @@
                 <a href="#" class="nav-item" data-view="script">Script Analysis</a>
                 <a href="#" class="nav-item" data-view="phishing">Phishing Analysis</a>
                 <a href="#" class="nav-item" data-view="pcap">PCAP Analysis</a>
+                <a href="#" class="nav-item" data-view="ioc">IOC Extraction</a>
 
                 <div class="nav-section-title">Operations</div>
                 <a href="#" class="nav-item" data-view="integrity">Integrity Verification</a>
@@ -916,6 +917,40 @@
                 </div>
                 <div class="panel-body" id="pcap-results">
                     <div class="empty-state">Submit a capture file path to perform analysis.</div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <template id="tpl-ioc">
+        <div class="view-header">
+            <h2 class="view-title">IOC Extraction</h2>
+            <p class="view-subtitle">Statically extract normalized IOC observations (IP, domain, URL, hash, email, cryptocurrency, LOLBIN) from an artifact. Observations are informational, not verdicts.</p>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--spacing-xl);">
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Analyze Artifact</span>
+                </div>
+                <div class="panel-body">
+                    <div class="form-group">
+                        <label class="form-label">Artifact file path *</label>
+                        <input type="text" id="ioc-file-path" class="form-control mono" placeholder="e.g. C:\artifacts\suspect.bin">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Ingest into case (optional)</label>
+                        <select id="ioc-case" class="form-control"></select>
+                    </div>
+                    <button class="btn btn-primary" id="btn-run-ioc">Extract IOCs</button>
+                    <div id="ioc-feedback" class="mt-md hidden"></div>
+                </div>
+            </div>
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Extraction Results</span>
+                </div>
+                <div class="panel-body" id="ioc-results">
+                    <div class="empty-state">Submit an artifact path to extract IOC observations.</div>
                 </div>
             </div>
         </div>

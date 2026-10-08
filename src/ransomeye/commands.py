@@ -1339,6 +1339,93 @@ def run_script_analysis_command(
     return 0
 
 
+def run_ioc_analysis_command(
+    file_path: Path,
+    as_json: bool = False,
+    database_path: Path | None = None,
+    case_id: str | None = None,
+    export_path: Path | None = None,
+) -> int:
+    """Statically extract IOC observations from an artifact and optionally ingest into a case."""
+    from ransomeye.ioc_extractor import IocExtractor, ingest_ioc_finding
+
+    extractor = IocExtractor()
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"IOC input file not found: {path}")
+
+    result = extractor.analyze_file(path)
+    created: list[int] | None = None
+
+    if database_path and case_id:
+        store = EvidenceStore(database_path)
+        try:
+            if store.get_case(case_id) is None:
+                raise KeyError(f"Case not found: {case_id}")
+            created = ingest_ioc_finding(store, case_id, result)
+        finally:
+            store.close()
+    elif database_path or case_id:
+        raise ValueError("Both --database and --case are required to ingest findings.")
+
+    if as_json:
+        output_str = json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+    else:
+        output_str = _format_ioc_summary(result)
+    print(output_str)
+    if created is not None and not as_json:
+        print(f"\n[+] IOC findings ingested into case {case_id}: {len(created)} finding(s) {created}")
+
+    if export_path:
+        export_content = (
+            json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+            if as_json or Path(export_path).suffix.lower() == ".json"
+            else output_str
+        )
+        _export_report_no_overwrite(Path(export_path), export_content)
+        if not as_json:
+            print(f"\n[+] Report exported to: {export_path}")
+
+    return 0
+
+
+def _format_ioc_summary(result) -> str:
+    lines = [
+        "=" * 72,
+        "  RANSOMEYE IOC EXTRACTION",
+        "=" * 72,
+        f"  Artifact       : {result.file_name}",
+        f"  Path           : {result.file_path}",
+        f"  SHA-256        : {result.sha256}",
+        f"  SHA-1          : {result.sha1}",
+        f"  MD5            : {result.md5}",
+        f"  File size      : {result.file_size} bytes",
+        f"  Binary         : {result.is_binary}",
+        f"  Status         : {result.analysis_status}",
+        f"  Observations   : {len(result.observations)}",
+        "-" * 72,
+    ]
+    if result.counts:
+        lines.append("  Counts by type:")
+        for t in sorted(result.counts):
+            lines.append(f"    {t:10} {result.counts[t]}")
+    if result.observations:
+        lines.append("-" * 72)
+        lines.append("  First observations (bounded):")
+        for o in result.observations[:40]:
+            lines.append(
+                f"    [{o.rule_id}] {o.ioc_type:7} offset={o.offset:>8} "
+                f"src={o.source:14} norm={o.value_normalized[:80]}"
+            )
+    if result.warnings:
+        lines.append("-" * 72)
+        lines.append("  Warnings:")
+        for w in result.warnings[:20]:
+            lines.append(f"    - {w}")
+    lines.append("=" * 72)
+    return "\n".join(lines)
+
+
 def run_pcap_analysis_command(
     file_path: Path,
     as_json: bool = False,
@@ -2371,6 +2458,22 @@ def main() -> None:
         help="Optional file path to export the analysis report (will not overwrite an existing file).",
     )
 
+    ioc_parser = subparsers.add_parser(
+        "ioc",
+        help="Extract normalized IOC observations (IP, domain, URL, hash, email, crypto, LOLBIN) from a file.",
+    )
+    ioc_parser.add_argument(
+        "--file", dest="file_path", type=Path, required=True,
+        help="Path to a text or binary artifact to scan for IOCs.",
+    )
+    ioc_parser.add_argument("--json", action="store_true", help="Output in JSON format.")
+    ioc_parser.add_argument("--database", type=Path,
+        help="Optional path to RansomEye database to ingest findings into a case.")
+    ioc_parser.add_argument("--case", dest="case_id",
+        help="Optional case ID to link IOC findings with investigation.")
+    ioc_parser.add_argument("--export", type=Path,
+        help="Optional file path to export the analysis report (will not overwrite).")
+
     pcap_parser = subparsers.add_parser(
         "pcap",
         help="Statically analyze a PCAP network capture (classic libpcap).",
@@ -2981,6 +3084,17 @@ def main() -> None:
                 sys.exit(ret)
         except (FileNotFoundError, FileExistsError, ValueError, KeyError, sqlite3.Error, OSError) as exc:
             parser.exit(1, f"Script analysis failed: {exc}\n")
+    elif args.command == "ioc":
+        try:
+            run_ioc_analysis_command(
+                file_path=args.file_path,
+                as_json=args.json,
+                database_path=args.database,
+                case_id=args.case_id,
+                export_path=args.export,
+            )
+        except (FileNotFoundError, FileExistsError, ValueError, KeyError, sqlite3.Error, OSError) as exc:
+            parser.exit(1, f"IOC extraction failed: {exc}\n")
     elif args.command == "pcap":
         try:
             run_pcap_analysis_command(

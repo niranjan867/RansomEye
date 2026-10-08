@@ -296,7 +296,7 @@ function switchView(viewName) {
     renderCurrentView();
 }
 
-const GLOBAL_VIEWS = ['cases', 'monitor', 'collection', 'integrity', 'database', 'static', 'script', 'phishing', 'pcap'];
+const GLOBAL_VIEWS = ['cases', 'monitor', 'collection', 'integrity', 'database', 'static', 'script', 'phishing', 'pcap', 'ioc'];
 
 function renderCurrentView() {
     if (!state.currentCaseId && !GLOBAL_VIEWS.includes(state.currentView)) {
@@ -344,6 +344,7 @@ function renderCurrentView() {
         case 'script': initScript(); break;
         case 'phishing': initPhishing(); break;
         case 'pcap': initPcap(); break;
+        case 'ioc': initIoc(); break;
     }
 }
 
@@ -2472,6 +2473,172 @@ function initPcap() {
             return;
         }
         renderPcapResult(results, res.analysis, res.finding_ids);
+    });
+}
+
+// ==========================================
+// 20. IOC Extraction
+// ==========================================
+const IOC_TYPE_LABEL = {
+    ipv4: 'IPv4', ipv6: 'IPv6', domain: 'Domain', url: 'URL',
+    email: 'Email', md5: 'MD5', sha1: 'SHA-1', sha256: 'SHA-256',
+    btc: 'BTC wallet', eth: 'ETH candidate', lolbin: 'LOLBIN command'
+};
+
+function iocBadgeSeverity(ioc_type) {
+    if (ioc_type === 'lolbin') return 'medium';
+    if (ioc_type === 'btc' || ioc_type === 'eth') return 'low';
+    return 'low';
+}
+
+function renderIocResult(container, analysis, findingIds) {
+    container.replaceChildren();
+
+    if (analysis.analysis_status !== 'complete') {
+        container.appendChild(el('div', { className: 'empty-state' }, [
+            el('h3', { text: 'Not analyzed' }),
+            el('p', { text: (analysis.warnings && analysis.warnings[0]) || 'This artifact could not be analyzed.' }),
+        ]));
+        return;
+    }
+
+    const totalObs = (analysis.observations || []).length;
+    const typeCount = Object.keys(analysis.counts || {}).length;
+    const hasLolbin = (analysis.counts || {}).lolbin > 0;
+
+    // Verdict
+    const verdict = el('div', { className: 'panel', style: 'padding: 16px; margin-bottom: 16px;' });
+    verdict.appendChild(el('div', { style: 'display: flex; align-items: center; gap: 12px; flex-wrap: wrap;' }, [
+        el('span', { className: 'badge ' + (hasLolbin ? 'medium' : (totalObs ? 'low' : 'low')),
+            text: totalObs ? `${totalObs} IOC observations` : 'No IOCs observed', style: 'font-size: 13px;' }),
+        el('span', { className: 'mono', text: `Types ${typeCount}`, style: 'color: var(--re-text-secondary);' }),
+        el('span', { className: 'mono', text: analysis.is_binary ? 'Binary input' : 'Text input', style: 'color: var(--re-text-secondary);' }),
+    ]));
+    verdict.appendChild(el('p', { style: 'margin-top: 10px; color: var(--re-text-muted); font-size: 12px;',
+        text: totalObs
+            ? 'IOC observations are informational: existence of an IP, domain, URL, hash, or email in an artifact does not prove maliciousness. Review the context of each observation.'
+            : 'No IOCs matched the extraction rules. Static extraction cannot guarantee the artifact is benign.' }));
+    container.appendChild(verdict);
+
+    // Artifact summary
+    container.appendChild(el('div', { className: 'prop-list mb-lg' }, [
+        kv('Artifact', analysis.file_name, { mono: true }),
+        kv('SHA-256', analysis.sha256, { mono: true }),
+        kv('SHA-1', analysis.sha1, { mono: true }),
+        kv('MD5', analysis.md5, { mono: true }),
+        kv('File size', `${analysis.file_size} bytes`, { mono: true }),
+    ]));
+
+    if (Array.isArray(findingIds)) {
+        const msg = findingIds.length
+            ? `Added to case: ${findingIds.length} finding(s) created (IDs ${findingIds.join(', ')}). Each type is linked to the provenance evidence event.`
+            : 'This artifact is already recorded against the case; no new findings were added.';
+        container.appendChild(el('div', { className: 'alert alert-success mb-lg', text: msg }));
+    }
+
+    // Type-count table
+    const counts = analysis.counts || {};
+    if (Object.keys(counts).length) {
+        const rows = Object.keys(counts).sort().map(t => {
+            const label = IOC_TYPE_LABEL[t] || t;
+            return el('tr', {}, [
+                el('td', { className: 'mono', text: t }),
+                el('td', { text: label }),
+                el('td', {}, [badge(t === 'lolbin' ? 'medium' : (t === 'btc' || t === 'eth' ? 'low' : 'informational'),
+                    iocBadgeSeverity(t))]),
+                el('td', { className: 'mono', text: String(counts[t]) }),
+            ]);
+        });
+        container.appendChild(section('IOC counts by type', true, [
+            el('table', { className: 'data-table' }, [
+                el('thead', {}, [el('tr', {}, [
+                    el('th', { text: 'Type' }), el('th', { text: 'Label' }),
+                    el('th', { text: 'Severity' }), el('th', { text: 'Count' }),
+                ])]),
+                el('tbody', {}, rows),
+            ]),
+        ]));
+    }
+
+    // Observations table (bounded to 200 rows for UI)
+    const observations = analysis.observations || [];
+    if (observations.length) {
+        const rows = observations.slice(0, 200).map(o => el('tr', {}, [
+            el('td', { className: 'mono', text: o.rule_id }),
+            el('td', { className: 'mono', text: o.ioc_type }),
+            el('td', { className: 'mono', text: o.value_normalized, title: o.value_normalized }),
+            el('td', { className: 'mono', text: o.value_original, title: o.value_original, style: 'color: var(--re-text-muted); font-size: 11px;' }),
+            el('td', { className: 'mono', text: o.source, style: 'font-size: 11px;' }),
+            el('td', { className: 'mono', text: String(o.offset) }),
+            el('td', { className: 'mono', text: o.context_preview, title: o.context_preview, style: 'font-size: 11px; color: var(--re-text-muted);' }),
+        ]));
+        container.appendChild(section(`Observations (${observations.length})`, observations.length <= 50, [
+            el('table', { className: 'data-table' }, [
+                el('thead', {}, [el('tr', {}, [
+                    el('th', { text: 'Rule' }), el('th', { text: 'Type' }),
+                    el('th', { text: 'Normalized value' }), el('th', { text: 'Original' }),
+                    el('th', { text: 'Source' }), el('th', { text: 'Offset' }), el('th', { text: 'Context' }),
+                ])]),
+                el('tbody', {}, rows),
+            ]),
+        ]));
+    } else {
+        container.appendChild(el('div', { className: 'empty-state', text: 'No IOC observations matched the deterministic rules.' }));
+    }
+
+    // Warnings
+    if (analysis.warnings && analysis.warnings.length) {
+        const warnNodes = analysis.warnings.map(w =>
+            el('div', { className: 'prop-val', text: w, style: 'color: var(--re-text-muted); font-size: 12px;' }));
+        container.appendChild(section(`Warnings (${analysis.warnings.length})`, false, warnNodes));
+    }
+}
+
+function initIoc() {
+    const pathInp = document.getElementById('ioc-file-path');
+    const caseSel = document.getElementById('ioc-case');
+    const btn = document.getElementById('btn-run-ioc');
+    const fb = document.getElementById('ioc-feedback');
+    const results = document.getElementById('ioc-results');
+
+    caseSel.replaceChildren(el('option', { text: 'No case (analysis only)', attrs: { value: '' } }));
+    for (const c of (state.cases || [])) {
+        const label = c.case_name && c.case_name !== c.case_id ? `${c.case_id} — ${c.case_name}` : c.case_id;
+        caseSel.appendChild(el('option', { text: label, attrs: { value: c.case_id } }));
+    }
+    if (state.currentCaseId) caseSel.value = state.currentCaseId;
+
+    btn.addEventListener('click', async () => {
+        fb.classList.add('hidden');
+        const fpath = pathInp.value.trim();
+        if (!fpath) {
+            fb.className = 'alert alert-error mt-md';
+            fb.textContent = 'An artifact file path is required.';
+            fb.classList.remove('hidden');
+            return;
+        }
+        const body = { file_path: fpath };
+        const cid = caseSel.value;
+        if (cid) body.case_id = cid;
+
+        btn.textContent = 'Extracting...';
+        btn.disabled = true;
+        const res = await api('/ioc/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        btn.textContent = 'Extract IOCs';
+        btn.disabled = false;
+
+        if (!res || res._error || !res.analysis) {
+            fb.className = 'alert alert-error mt-md';
+            fb.textContent = res ? res.message : 'IOC extraction failed.';
+            fb.classList.remove('hidden');
+            results.replaceChildren(el('div', { className: 'empty-state', text: 'Extraction could not be completed.' }));
+            return;
+        }
+        renderIocResult(results, res.analysis, res.finding_ids);
     });
 }
 
