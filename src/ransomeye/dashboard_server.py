@@ -40,7 +40,12 @@ from ransomeye.pcap_analyzer import (
     PcapAnalyzer,
     ingest_pcap_finding,
 )
-from ransomeye.phishing import MessagePayload, PhishingDetector, ingest_phishing_finding
+from ransomeye.phishing import (
+    MessagePayload,
+    PhishingAnalysisError,
+    PhishingDetector,
+    ingest_phishing_finding,
+)
 from ransomeye.reconstruction import reconstruct_attack
 from ransomeye.report import generate_case_report
 from ransomeye.script_analyzer import (
@@ -1101,7 +1106,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         return error_response(self, 400, "text or file_path is required")
                     payload = MessagePayload.from_dict({"text": str(text), "sender": sender, "subject": subject})
                 detector = PhishingDetector()
-                res = detector.analyze(payload)
+                try:
+                    res = detector.analyze(payload)
+                except PhishingAnalysisError as exc:
+                    return error_response(self, 400, str(exc))
                 res_dict = res.to_dict()
                 res_dict["threat_level"] = (res_dict.get("risk_level") or "LOW").upper()
                 finding_id = None

@@ -36,6 +36,46 @@ SCORE_THRESHOLD_SUSPICIOUS = 69
 SCORE_THRESHOLD_HIGH = 89
 
 
+# --- Resource bounds (defensive against attacker-controlled artifacts) ---
+#
+# These bounds are enforced inside ``PhishingDetector.analyze``. They never
+# modify the original ``MessagePayload`` the caller passes in, so the
+# deterministic phishing evidence identity (``EVT-PHISH-<sha256[:20]>``
+# over the canonical ORIGINAL content, per Phase 2C.1) remains stable
+# whether or not analysis itself was bounded. If a bound is reached, the
+# analyzer records a warning in ``PhishingAnalysisResult.warnings`` so
+# downstream consumers can see that analysis was partial.
+#
+# A single hard input cap (``MAX_PHISHING_INPUT_SIZE``) rejects truly
+# pathological artifacts outright by raising ``PhishingAnalysisError``;
+# the API maps this to HTTP 400 and the CLI exits with a message. Every
+# other bound is a graceful per-component truncation with a warning.
+MAX_PHISHING_INPUT_SIZE = 10 * 1024 * 1024   # 10 MiB total serialized bytes
+MAX_PHISHING_BODY_LEN = 1 * 1024 * 1024      # 1M chars of body text
+MAX_PHISHING_SUBJECT_LEN = 2048
+MAX_PHISHING_SENDER_LEN = 1024
+MAX_PHISHING_RECIPIENT_LEN = 1024
+MAX_PHISHING_HEADERS = 200
+MAX_PHISHING_HEADER_KEY_LEN = 256
+MAX_PHISHING_HEADER_VALUE_LEN = 4096
+MAX_PHISHING_URLS = 500
+MAX_PHISHING_URL_LEN = 2048
+MAX_PHISHING_ATTACHMENTS = 200
+MAX_PHISHING_ATTACHMENT_NAME_LEN = 1024
+MAX_PHISHING_INDICATORS = 200
+MAX_PHISHING_WARNINGS = 50
+
+
+class PhishingAnalysisError(ValueError):
+    """Raised for phishing inputs the analyzer refuses before parsing.
+
+    The analyzer uses this exception only for a HARD rejection (the
+    aggregate serialized input exceeds ``MAX_PHISHING_INPUT_SIZE``).
+    Every other over-the-limit condition is handled by truncation with
+    a warning in ``PhishingAnalysisResult.warnings``.
+    """
+
+
 # --- Known Brands for Lookalike / Subdomain Impersonation Detection ---
 TARGETED_BRANDS = frozenset(
     {
@@ -264,7 +304,13 @@ class MessagePayload:
 
 @dataclass
 class PhishingAnalysisResult:
-    """Comprehensive verdict and forensic indicators from message analysis."""
+    """Comprehensive verdict and forensic indicators from message analysis.
+
+    ``warnings`` carries human-readable notes about bounded/partial
+    analysis. When this list is non-empty, downstream consumers must
+    treat the result as a BOUNDED analysis of the artifact, not a
+    complete one.
+    """
 
     score: int
     risk_level: str
@@ -274,6 +320,7 @@ class PhishingAnalysisResult:
     attachment_findings: list[dict[str, Any]]
     mitre_techniques: list[str]
     recommendations: list[str]
+    warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -285,6 +332,7 @@ class PhishingAnalysisResult:
             "extracted_urls": self.extracted_urls,
             "attachment_findings": self.attachment_findings,
             "recommendations": self.recommendations,
+            "warnings": list(self.warnings),
         }
 
     def to_summary_text(self) -> str:
@@ -333,6 +381,12 @@ class PhishingAnalysisResult:
         lines.append("DFIR Remediation Recommendations:")
         for rec in self.recommendations:
             lines.append(f"  > {rec}")
+
+        if self.warnings:
+            lines.append("")
+            lines.append(f"Bounded-analysis warnings ({len(self.warnings)}):")
+            for w in self.warnings:
+                lines.append(f"  ! {w}")
 
         lines.append("=" * 64)
         return "\n".join(lines)
@@ -466,15 +520,31 @@ class PhishingDetector:
     ]
 
     def analyze(self, payload: MessagePayload) -> PhishingAnalysisResult:
-        """Execute comprehensive forensic analysis on a message payload."""
+        """Execute comprehensive forensic analysis on a message payload.
+
+        Resource-bounded: produces an analysis-side bounded view of
+        ``payload`` without mutating the original (so the deterministic
+        EVT-PHISH content identity derived from the ORIGINAL payload
+        stays stable). On a HARD aggregate size breach raises
+        ``PhishingAnalysisError``; every per-component overflow is a
+        truncation with a warning in the result.
+        """
+        warnings: list[str] = []
+        bounded_payload = _bound_payload(payload, warnings)
         indicators: list[IndicatorMatch] = []
-        full_text = f"{payload.subject}\n{payload.text}"
+        full_text = f"{bounded_payload.subject}\n{bounded_payload.text}"
+
+        def _record(ind: IndicatorMatch) -> None:
+            if len(indicators) >= MAX_PHISHING_INDICATORS:
+                _add_warning(warnings, f"Indicator cap reached ({MAX_PHISHING_INDICATORS}); further indicators dropped.")
+                return
+            indicators.append(ind)
 
         # 1. Linguistic & Urgency Heuristics
         for rule_id, category, weight, desc, pattern in self.URGENCY_RULES:
             match = pattern.search(full_text)
             if match:
-                indicators.append(
+                _record(
                     IndicatorMatch(
                         rule_id=rule_id,
                         category="urgency_coercion",
@@ -490,7 +560,7 @@ class PhishingDetector:
         for rule_id, category, weight, desc, pattern in self.FRAUD_RULES:
             match = pattern.search(full_text)
             if match:
-                indicators.append(
+                _record(
                     IndicatorMatch(
                         rule_id=rule_id,
                         category="financial_fraud",
@@ -504,24 +574,25 @@ class PhishingDetector:
 
         # 3. URL and Domain Intelligence
         url_findings: list[dict[str, Any]] = []
-        for url in payload.urls:
+        for url in bounded_payload.urls:
             u_info = self._analyze_url(url)
             url_findings.append(u_info)
             if u_info["indicators"]:
                 for ind in u_info["indicators"]:
-                    indicators.append(ind)
+                    _record(ind)
 
         # 4. Attachment Risk Scoring
         att_findings: list[dict[str, Any]] = []
-        for att in payload.attachments:
+        for att in bounded_payload.attachments:
             att_info = self._analyze_attachment(att)
             att_findings.append(att_info)
             if att_info["indicator"]:
-                indicators.append(att_info["indicator"])
+                _record(att_info["indicator"])
 
         # 5. Header / Mail Authentication Analysis
-        header_inds = self._analyze_headers(payload)
-        indicators.extend(header_inds)
+        header_inds = self._analyze_headers(bounded_payload)
+        for ind in header_inds:
+            _record(ind)
 
         # 6. Score Computation & Classification
         raw_score = sum(ind.weight for ind in indicators)
@@ -563,6 +634,7 @@ class PhishingDetector:
             attachment_findings=att_findings,
             mitre_techniques=sorted(mitre_set),
             recommendations=recommendations,
+            warnings=warnings,
         )
 
     def _analyze_url(self, raw_url: str) -> dict[str, Any]:
@@ -819,6 +891,140 @@ class PhishingDetector:
 PHISHING_SOURCE = "phishing_analyzer"
 PHISHING_ANALYST = "ransomeye-phishing-analyzer"
 PHISHING_FINDING_TYPE = "phishing_initial_access"
+
+
+# --------------------------------------------------------------------------- #
+# Resource-limit helpers (used only inside PhishingDetector.analyze)
+# --------------------------------------------------------------------------- #
+
+def _add_warning(warnings: list[str], msg: str) -> None:
+    """Append a warning, deduplicating and bounded by MAX_PHISHING_WARNINGS."""
+    if msg in warnings:
+        return
+    if len(warnings) >= MAX_PHISHING_WARNINGS:
+        return
+    warnings.append(msg)
+
+
+def _aggregate_size(payload: MessagePayload) -> int:
+    """Rough serialized size of a MessagePayload in characters.
+
+    Used only to compare against ``MAX_PHISHING_INPUT_SIZE`` for the HARD
+    rejection path. The sum here does not need to match on-wire bytes
+    exactly; it just needs to grow with every attacker-controllable field.
+    """
+    size = (
+        len(payload.subject or "")
+        + len(payload.sender or "")
+        + len(payload.recipient or "")
+        + len(payload.text or "")
+    )
+    for k, v in (payload.headers or {}).items():
+        size += len(str(k)) + len(str(v))
+    for u in payload.urls or []:
+        size += len(u or "")
+    for a in payload.attachments or []:
+        size += len(a or "")
+    return size
+
+
+def _bound_payload(payload: MessagePayload, warnings: list[str]) -> MessagePayload:
+    """Return a resource-bounded, non-mutating view of ``payload``.
+
+    HARD rejection: if the aggregated serialized size exceeds
+    ``MAX_PHISHING_INPUT_SIZE`` the function raises ``PhishingAnalysisError``.
+    Every other over-cap condition truncates one component and records a
+    warning. The original ``payload`` is never mutated, which keeps the
+    Phase 2C.1 content-identity contract stable.
+    """
+    agg = _aggregate_size(payload)
+    if agg > MAX_PHISHING_INPUT_SIZE:
+        raise PhishingAnalysisError(
+            f"Phishing artifact exceeds maximum size of {MAX_PHISHING_INPUT_SIZE} bytes"
+        )
+
+    # Build a bounded local view.
+    subject = payload.subject or ""
+    if len(subject) > MAX_PHISHING_SUBJECT_LEN:
+        subject = subject[:MAX_PHISHING_SUBJECT_LEN]
+        _add_warning(warnings, f"Subject truncated at {MAX_PHISHING_SUBJECT_LEN} characters.")
+
+    sender = payload.sender or ""
+    if len(sender) > MAX_PHISHING_SENDER_LEN:
+        sender = sender[:MAX_PHISHING_SENDER_LEN]
+        _add_warning(warnings, f"Sender truncated at {MAX_PHISHING_SENDER_LEN} characters.")
+
+    recipient = payload.recipient or ""
+    if len(recipient) > MAX_PHISHING_RECIPIENT_LEN:
+        recipient = recipient[:MAX_PHISHING_RECIPIENT_LEN]
+        _add_warning(warnings, f"Recipient truncated at {MAX_PHISHING_RECIPIENT_LEN} characters.")
+
+    text = payload.text or ""
+    if len(text) > MAX_PHISHING_BODY_LEN:
+        text = text[:MAX_PHISHING_BODY_LEN]
+        _add_warning(warnings, f"Body truncated at {MAX_PHISHING_BODY_LEN} characters; scoring reflects the truncated prefix only.")
+
+    # Headers: cap count and per-value length. Deterministic order via sorted keys.
+    raw_headers = payload.headers or {}
+    bounded_headers: dict[str, str] = {}
+    if len(raw_headers) > MAX_PHISHING_HEADERS:
+        _add_warning(warnings, f"Header count capped at {MAX_PHISHING_HEADERS}; extras dropped.")
+    header_value_truncated = False
+    header_key_truncated = False
+    for key in list(raw_headers.keys())[:MAX_PHISHING_HEADERS]:
+        k = str(key)
+        v = str(raw_headers[key])
+        if len(k) > MAX_PHISHING_HEADER_KEY_LEN:
+            k = k[:MAX_PHISHING_HEADER_KEY_LEN]
+            header_key_truncated = True
+        if len(v) > MAX_PHISHING_HEADER_VALUE_LEN:
+            v = v[:MAX_PHISHING_HEADER_VALUE_LEN]
+            header_value_truncated = True
+        bounded_headers[k] = v
+    if header_key_truncated:
+        _add_warning(warnings, f"Header key truncated at {MAX_PHISHING_HEADER_KEY_LEN} characters.")
+    if header_value_truncated:
+        _add_warning(warnings, f"Header value truncated at {MAX_PHISHING_HEADER_VALUE_LEN} characters.")
+
+    # URLs: cap count and per-URL length.
+    raw_urls = payload.urls or []
+    bounded_urls: list[str] = []
+    if len(raw_urls) > MAX_PHISHING_URLS:
+        _add_warning(warnings, f"URL count capped at {MAX_PHISHING_URLS}; extras dropped.")
+    url_truncated = False
+    for u in raw_urls[:MAX_PHISHING_URLS]:
+        u = u or ""
+        if len(u) > MAX_PHISHING_URL_LEN:
+            u = u[:MAX_PHISHING_URL_LEN]
+            url_truncated = True
+        bounded_urls.append(u)
+    if url_truncated:
+        _add_warning(warnings, f"URL truncated at {MAX_PHISHING_URL_LEN} characters.")
+
+    # Attachments: cap count and per-filename length.
+    raw_atts = payload.attachments or []
+    bounded_atts: list[str] = []
+    if len(raw_atts) > MAX_PHISHING_ATTACHMENTS:
+        _add_warning(warnings, f"Attachment count capped at {MAX_PHISHING_ATTACHMENTS}; extras dropped.")
+    att_truncated = False
+    for a in raw_atts[:MAX_PHISHING_ATTACHMENTS]:
+        a = a or ""
+        if len(a) > MAX_PHISHING_ATTACHMENT_NAME_LEN:
+            a = a[:MAX_PHISHING_ATTACHMENT_NAME_LEN]
+            att_truncated = True
+        bounded_atts.append(a)
+    if att_truncated:
+        _add_warning(warnings, f"Attachment name truncated at {MAX_PHISHING_ATTACHMENT_NAME_LEN} characters.")
+
+    return MessagePayload(
+        text=text,
+        subject=subject,
+        sender=sender,
+        recipient=recipient,
+        headers=bounded_headers,
+        urls=bounded_urls,
+        attachments=bounded_atts,
+    )
 
 
 def phishing_canonical_bytes(payload: MessagePayload) -> bytes:

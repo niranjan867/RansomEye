@@ -1980,6 +1980,13 @@ function renderPhishingResult(container, a) {
             recommendations.map(r => el('li', { text: r })));
         container.appendChild(section(`Recommendations (${recommendations.length})`, false, [list]));
     }
+
+    const phishWarnings = a.warnings || [];
+    if (phishWarnings.length) {
+        const warnNodes = phishWarnings.map(w =>
+            el('div', { className: 'prop-val', text: w, style: 'color: var(--re-text-muted); font-size: 12px;' }));
+        container.appendChild(section(`Bounded-analysis warnings (${phishWarnings.length})`, true, warnNodes));
+    }
 }
 
 function initPhishing() {
