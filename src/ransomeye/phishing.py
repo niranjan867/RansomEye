@@ -816,15 +816,81 @@ class PhishingDetector:
         return recs
 
 
+PHISHING_SOURCE = "phishing_analyzer"
+PHISHING_ANALYST = "ransomeye-phishing-analyzer"
+PHISHING_FINDING_TYPE = "phishing_initial_access"
+
+
+def phishing_canonical_bytes(payload: MessagePayload) -> bytes:
+    """Deterministic canonical byte representation of the analyzed message content.
+
+    Hashing this representation gives the phishing artifact its identity: two
+    analyses of the same payload (same subject, sender, headers, body, URLs
+    and attachment names) produce the same ``sha256`` and therefore the same
+    ``EVT-PHISH-...`` event id. Order of header/URL/attachment entries does
+    not affect identity because they are sorted here.
+    """
+    parts: list[str] = [
+        f"subject:{payload.subject or ''}",
+        f"sender:{payload.sender or ''}",
+        f"recipient:{payload.recipient or ''}",
+        "headers:" + "\n".join(f"{k}={v}" for k, v in sorted((payload.headers or {}).items())),
+        f"urls:" + "\n".join(sorted(payload.urls or [])),
+        f"attachments:" + "\n".join(sorted(payload.attachments or [])),
+        "body:",
+        payload.text or "",
+    ]
+    return "\n--\n".join(parts).encode("utf-8", errors="replace")
+
+
+def phishing_content_sha256(payload: MessagePayload) -> str:
+    import hashlib
+    return hashlib.sha256(phishing_canonical_bytes(payload)).hexdigest()
+
+
+def phishing_event_id(content_sha256: str) -> str:
+    """Deterministic phishing evidence event id: EVT-PHISH-<content_sha256[:20]>."""
+    return "EVT-PHISH-" + content_sha256[:20]
+
+
+def _existing_phishing_finding_id(
+    store: EvidenceStore, case_id: str, event_id: str,
+) -> int | None:
+    for finding in store.get_event_findings(case_id, event_id):
+        if finding.get("finding_type") == PHISHING_FINDING_TYPE:
+            fid = finding.get("finding_id")
+            if fid is not None:
+                return int(fid)
+    return None
+
+
 def ingest_phishing_finding(
     store: EvidenceStore,
     case_id: str,
     result: PhishingAnalysisResult,
     source_artifact: str = "suspicious_message",
+    payload: MessagePayload | None = None,
 ) -> int:
-    """Ingest a phishing analysis verdict as an Initial Access finding into a RansomEye case."""
-    finding_type = "phishing_initial_access"
-    # Prioritize Initial Access (T1566) technique
+    """Ingest a phishing analysis verdict as an Initial Access finding into a RansomEye case.
+
+    Creates a deterministic ``file_stream_hash`` evidence event
+    (``EVT-PHISH-<sha256[:20]>``) representing the analyzed message content,
+    attaches the phishing finding to it through ``finding_evidence``, and
+    records one ``reviewed`` custody entry carrying the real content SHA-256.
+    Idempotent: a repeated ingest of the exact same payload returns the
+    existing finding id and does not create duplicate findings, evidence
+    events (``save_event`` uses INSERT OR REPLACE), or custody entries.
+
+    ``payload`` is optional for backward compatibility: when it is omitted
+    the identity falls back to a stable derivation from ``result`` (its
+    indicators + score + risk_level), so even legacy callers get a
+    deterministic, content-grounded identity rather than the previous
+    "suspicious_message" literal.
+    """
+    import hashlib
+    from datetime import datetime, timezone
+
+    finding_type = PHISHING_FINDING_TYPE
     primary_technique = MITRE_INITIAL_ACCESS_LINK
     for t in result.mitre_techniques:
         if t.startswith("T1566"):
@@ -834,11 +900,74 @@ def ingest_phishing_finding(
         if result.mitre_techniques:
             primary_technique = result.mitre_techniques[0]
 
-    # Compose detailed reason
     top_indicators = [f"{ind.rule_id}: {ind.description}" for ind in result.indicators[:3]]
     reason = (
         f"Phishing/Scam Analysis: Verdict={result.risk_level.upper()} (Score: {result.score}/100). "
         f"Top indicators: {'; '.join(top_indicators) if top_indicators else 'None'}."
+    )
+
+    # Deterministic content hash. Prefer the real payload canonical bytes;
+    # fall back to a stable derivation from the analysis result if no payload
+    # was passed in (keeps legacy callers idempotent without inventing data).
+    if payload is not None:
+        content_sha256 = phishing_content_sha256(payload)
+    else:
+        fallback = (
+            f"result|score={result.score}|level={result.risk_level}|conf={result.confidence}|"
+            + "|".join(f"{i.rule_id}:{i.matched_evidence}" for i in result.indicators)
+        )
+        content_sha256 = hashlib.sha256(fallback.encode("utf-8", errors="replace")).hexdigest()
+
+    event_id = phishing_event_id(content_sha256)
+
+    # Idempotency: if this evidence event already carries a phishing finding,
+    # return it instead of creating a duplicate.
+    existing = _existing_phishing_finding_id(store, case_id, event_id)
+    if existing is not None:
+        return existing
+
+    # Persist the deterministic phishing evidence event. INSERT OR REPLACE
+    # means a repeated ingest with the same ``event_id`` leaves the row count
+    # unchanged. No process attribution is fabricated.
+    now_iso = datetime.now(timezone.utc).isoformat()
+    subject = (payload.subject if payload is not None else "") or ""
+    sender = (payload.sender if payload is not None else "") or ""
+    url_count = len(payload.urls) if payload is not None else len(result.extracted_urls)
+    attachment_count = len(payload.attachments) if payload is not None else len(result.attachment_findings)
+    body_size = len(payload.text or "") if payload is not None else 0
+    artifact_label = source_artifact or f"phishing_message:{content_sha256[:16]}"
+
+    # Map the analyzer's qualitative confidence onto the EvidenceEvent's
+    # float [0,1] contract. The finding row keeps the original qualitative
+    # label; this mapping is only for the evidence event's own field.
+    event_confidence = {"low": 0.5, "medium": 0.75, "high": 0.9}.get(
+        str(result.confidence).lower(), 0.75,
+    )
+
+    store.save_event(
+        case_id,
+        {
+            "event_id": event_id,
+            "case_id": case_id,
+            "timestamp": now_iso,
+            "source": PHISHING_SOURCE,
+            "event_type": "file_stream_hash",
+            "file_path": artifact_label,
+            "hashes": f"SHA256={content_sha256}",
+            "confidence": event_confidence,
+            "metadata": {
+                "observation": "phishing_message_provenance",
+                "sha256": content_sha256,
+                "artifact_label": artifact_label,
+                "subject": subject,
+                "sender": sender,
+                "url_count": url_count,
+                "attachment_count": attachment_count,
+                "body_size": body_size,
+                "risk_level": result.risk_level,
+                "score": result.score,
+            },
+        },
     )
 
     finding_dict = {
@@ -852,17 +981,16 @@ def ingest_phishing_finding(
     finding_id = store.save_finding(
         case_id=case_id,
         finding=finding_dict,
-        event_ids=[],
+        event_ids=[event_id],
     )
 
-    import hashlib
-    artifact_sha256 = hashlib.sha256(source_artifact.encode("utf-8")).hexdigest()
+    # Custody entry uses the REAL content SHA-256, not a literal label hash.
     store.record_custody_event(
         case_id=case_id,
-        artifact_path=source_artifact,
-        sha256=artifact_sha256,
+        artifact_path=artifact_label,
+        sha256=content_sha256,
         action="reviewed",
-        analyst="ransomeye-phishing-analyzer",
+        analyst=PHISHING_ANALYST,
         note=f"Ingested phishing verdict (Score={result.score}, Level={result.risk_level})",
     )
 

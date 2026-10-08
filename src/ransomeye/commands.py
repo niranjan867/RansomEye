@@ -1137,6 +1137,7 @@ def run_phishing_command(
                 case_id=case_id,
                 result=result,
                 source_artifact=str(file_path.name if file_path else "cli_text"),
+                payload=payload,
             )
             if not as_json:
                 print(f"[+] Phishing finding ingested into case {case_id}: finding_id={finding_id}\n")

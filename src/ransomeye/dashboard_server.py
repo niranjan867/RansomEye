@@ -1100,7 +1100,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     store = _get_store()
                     try:
                         source = f_p.name if file_path else "analyst_console_text"
-                        finding_id = ingest_phishing_finding(store, case_id, res, source)
+                        finding_id = ingest_phishing_finding(
+                            store, case_id, res, source_artifact=source, payload=payload,
+                        )
                     finally:
                         store.close()
                 json_response(self, 200, {"analysis": res_dict, "assessment": res_dict, "finding_id": finding_id})
