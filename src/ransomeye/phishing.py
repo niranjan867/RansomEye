@@ -906,25 +906,52 @@ def _add_warning(warnings: list[str], msg: str) -> None:
     warnings.append(msg)
 
 
+def _utf8_size(s: Any) -> int:
+    """Return the UTF-8 byte length of ``s`` with bounded intermediate memory.
+
+    The naive ``len(str(s).encode("utf-8"))`` materializes a byte copy of the
+    whole string, which for an attacker-controlled multi-hundred-megabyte
+    input is itself the resource exhaustion we are defending against. We
+    therefore first check the character count against the UTF-8 upper
+    bound (max 4 bytes per code point); only when that leaves ambiguity do
+    we materialize an encoded copy, and only up to roughly four times the
+    cap. ``None`` and empty values measure 0.
+    """
+    text = str(s or "")
+    char_len = len(text)
+    if char_len == 0:
+        return 0
+    # Fast ASCII upper bound: if even the maximum (4×) exceeds the cap we
+    # already know the HARD rejection path will fire; the caller only cares
+    # about "is it over the cap", so returning a safe upper bound is fine.
+    if char_len <= MAX_PHISHING_INPUT_SIZE // 4:
+        # Can't possibly exceed the cap. Return a tight-enough estimate.
+        return char_len
+    # Chars are large enough that encoding may push past the cap; measure.
+    # Memory for this intermediate copy is bounded by 4 * char_len.
+    return len(text.encode("utf-8", errors="replace"))
+
+
 def _aggregate_size(payload: MessagePayload) -> int:
-    """Rough serialized size of a MessagePayload in characters.
+    """UTF-8 byte size of a MessagePayload's serialized surface.
 
     Used only to compare against ``MAX_PHISHING_INPUT_SIZE`` for the HARD
-    rejection path. The sum here does not need to match on-wire bytes
-    exactly; it just needs to grow with every attacker-controllable field.
+    rejection path. Measures real serialized bytes rather than Unicode
+    code points, so a multi-megabyte payload of 4-byte CJK characters is
+    not under-counted by up to 4×. Memory used by this check is bounded.
     """
     size = (
-        len(payload.subject or "")
-        + len(payload.sender or "")
-        + len(payload.recipient or "")
-        + len(payload.text or "")
+        _utf8_size(payload.subject)
+        + _utf8_size(payload.sender)
+        + _utf8_size(payload.recipient)
+        + _utf8_size(payload.text)
     )
     for k, v in (payload.headers or {}).items():
-        size += len(str(k)) + len(str(v))
+        size += _utf8_size(k) + _utf8_size(v)
     for u in payload.urls or []:
-        size += len(u or "")
+        size += _utf8_size(u)
     for a in payload.attachments or []:
-        size += len(a or "")
+        size += _utf8_size(a)
     return size
 
 

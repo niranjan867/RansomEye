@@ -303,6 +303,80 @@ def test_tiny_payload_is_safe():
 
 
 # --------------------------------------------------------------------------- #
+# Aggregate size measurement is UTF-8 byte-accurate (corrective-review)
+# --------------------------------------------------------------------------- #
+
+def test_ascii_payload_at_byte_boundary_is_accepted():
+    """An ASCII payload exactly at MAX_PHISHING_INPUT_SIZE bytes is accepted
+    (body truncation warning fires at the smaller per-component cap)."""
+    body = "a" * MAX_PHISHING_INPUT_SIZE
+    payload = MessagePayload(text=body)
+    r = _d().analyze(payload)
+    assert any("Body truncated" in w for w in r.warnings)
+
+
+def test_ascii_payload_one_byte_above_boundary_is_rejected():
+    body = "a" * (MAX_PHISHING_INPUT_SIZE + 1)
+    payload = MessagePayload(text=body)
+    with pytest.raises(PhishingAnalysisError):
+        _d().analyze(payload)
+
+
+def test_utf8_multibyte_payload_is_measured_in_bytes_not_chars():
+    """Each U+1F600 (grinning face emoji) is 4 UTF-8 bytes. A char count
+    below the cap can still exceed the cap in actual bytes; the HARD
+    rejection must fire on the real byte size."""
+    # chars = cap / 2  → bytes = chars * 4 = cap * 2 (clearly over)
+    chars_count = (MAX_PHISHING_INPUT_SIZE // 2) + 1
+    body = "\U0001F600" * chars_count
+    assert len(body) < MAX_PHISHING_INPUT_SIZE, "char count must be under the cap"
+    assert len(body.encode("utf-8")) > MAX_PHISHING_INPUT_SIZE, "byte size must exceed the cap"
+    payload = MessagePayload(text=body)
+    with pytest.raises(PhishingAnalysisError):
+        _d().analyze(payload)
+
+
+def test_utf8_payload_whose_bytes_fit_is_accepted():
+    """A payload whose char-count is near the cap but whose UTF-8 byte-count
+    is well under the cap must be analyzed, not rejected."""
+    # chars_count * 1-byte char = ~1/5 of the cap — fits comfortably.
+    body = "x" * (MAX_PHISHING_INPUT_SIZE // 5)
+    payload = MessagePayload(text=body)
+    r = _d().analyze(payload)  # must not raise
+    # Over MAX_PHISHING_BODY_LEN so body-truncation warning still fires.
+    assert any("Body truncated" in w for w in r.warnings)
+
+
+def test_original_payload_is_not_mutated_by_bounded_analysis():
+    """Phase 2C.1 identity invariant: the ORIGINAL MessagePayload must
+    remain unchanged after a bounded analysis so phishing_content_sha256
+    stays stable."""
+    body = "a" * (MAX_PHISHING_BODY_LEN + 50)
+    payload = MessagePayload(text=body, subject="S" * 10, sender="x@y.example")
+    before_body = payload.text
+    before_subject = payload.subject
+    before_sender = payload.sender
+    before_hash = phishing_content_sha256(payload)
+    r = _d().analyze(payload)
+    assert r.warnings  # bounded
+    # No mutation of the original.
+    assert payload.text == before_body
+    assert payload.subject == before_subject
+    assert payload.sender == before_sender
+    # Identity hash is still derived from the original content.
+    assert phishing_content_sha256(payload) == before_hash
+
+
+def test_bounded_warning_messages_are_deterministic():
+    body = "é" * (MAX_PHISHING_BODY_LEN + 100)  # 2-byte UTF-8 per char
+    payload = MessagePayload(text=body)
+    r1 = _d().analyze(payload)
+    r2 = _d().analyze(payload)
+    assert sorted(r1.warnings) == sorted(r2.warnings)
+    assert r1.score == r2.score
+
+
+# --------------------------------------------------------------------------- #
 # Dashboard view surfaces warnings
 # --------------------------------------------------------------------------- #
 
