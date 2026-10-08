@@ -478,3 +478,133 @@ def test_pcap_view_registered_in_nav_and_router():
     assert 'id="tpl-pcap"' in html
     assert "case 'pcap': initPcap();" in app_js
     assert "'pcap'" in app_js.split("const GLOBAL_VIEWS")[1].split("]")[0]
+
+
+# --------------------------------------------------------------------------- #
+# Safety / correctness regression tests (lock in verified-safe behavior)
+# --------------------------------------------------------------------------- #
+
+PCAP_MAGIC_BE = b"\xa1\xb2\xc3\xd4"
+
+
+def _build_pcap_be(packets: list[bytes]) -> bytes:
+    """Big-endian classic libpcap builder for endianness regression."""
+    buf = PCAP_MAGIC_BE + struct.pack(">HHiIII", 2, 4, 0, 0, 65535, LINKTYPE_ETHERNET)
+    for i, pkt in enumerate(packets):
+        buf += struct.pack(">IIII", 1700000000 + i, 0, len(pkt), len(pkt)) + pkt
+    return buf
+
+
+def test_big_endian_capture_parses():
+    """Captures with the big-endian pcap magic must parse packets correctly."""
+    pcap = _build_pcap_be([_udp_dns_packet("example.com")])
+    r = PcapAnalyzer().analyze_bytes(pcap, file_name="be.pcap")
+    assert r.analysis_status == STATUS_COMPLETE
+    assert r.total_packets == 1
+    assert r.dns_count == 1
+    assert r.dns_queries[0].qname == "example.com"
+
+
+def test_vlan_tagged_ethernet_frame_unwraps():
+    """Ethernet frames with a single 802.1Q VLAN tag must still reach IPv4 parsing."""
+    # Rebuild a DNS packet but wrap it with a VLAN tag.
+    inner = _udp_dns_packet("example.com")
+    # strip the outer Ethernet (first 14 bytes) and rewrap with VLAN tag
+    ip_and_up = inner[14:]
+    vlan_frame = b"\x00" * 6 + b"\x01" * 6 + b"\x81\x00" + b"\x00\x64" + b"\x08\x00" + ip_and_up
+    pcap = _global_header() + _pack_record(vlan_frame)
+    r = PcapAnalyzer().analyze_bytes(pcap, file_name="vlan.pcap")
+    assert r.analysis_status == STATUS_COMPLETE
+    assert r.dns_count == 1
+    assert r.dns_queries[0].qname == "example.com"
+
+
+def test_dns_compression_pointer_loop_is_safe():
+    """A DNS QNAME that is a self-referential compression pointer must not loop or crash."""
+    # QNAME = 0xC00C (compression pointer to offset 12, i.e. itself).
+    dns = (struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
+           + b"\xc0\x0c" + struct.pack("!HH", 1, 1))
+    udp = struct.pack("!HHHH", 55555, 53, 8 + len(dns), 0) + dns
+    ip = _ipv4_header(17, 20 + len(udp))
+    frame = _ethernet_frame(ip + udp)
+    pcap = _global_header() + _pack_record(frame)
+
+    import time
+    t0 = time.time()
+    r = PcapAnalyzer().analyze_bytes(pcap, file_name="pointer_loop.pcap")
+    elapsed = time.time() - t0
+
+    assert elapsed < 1.0, f"compression-pointer parsing took {elapsed:.3f}s"
+    assert r.analysis_status == STATUS_COMPLETE
+    # The parser treats a question-section compression pointer as end-of-name;
+    # the resulting empty QNAME means no dns_query event is emitted, which is
+    # the intended safe behavior.
+    assert r.dns_count == 0
+
+
+def test_pcap_findings_appear_in_report(tmp_path):
+    """PCAP findings and their evidence events must be included in the case report."""
+    from ransomeye.report import generate_case_report
+
+    cap = _make_capture_file(tmp_path, "report.pcap", [_udp_dns_packet("c2.xyz")])
+    db = tmp_path / "report.db"
+    store = EvidenceStore(db)
+    store.create_case("CASE-PCAP-RPT", "report integration")
+    result = PcapAnalyzer().analyze_file(cap)
+    ingest_pcap_finding(store, "CASE-PCAP-RPT", result)
+    store.close()
+
+    report_text = generate_case_report(db, "CASE-PCAP-RPT")
+    assert "pcap_network_dns" in report_text
+    assert "PCAP-DNS-TLD-001" in report_text
+    assert "dns_query" in report_text
+    assert "EVT-PCAP-" in report_text
+
+
+def test_pcap_events_participate_in_timeline(tmp_path):
+    """PCAP network and DNS events must appear in the case timeline for investigation."""
+    from ransomeye.timeline import get_case_timeline
+
+    cap = _make_capture_file(tmp_path, "tl2.pcap", [
+        _udp_dns_packet("example.com"),
+        _tcp_syn_packet("10.0.0.1", "203.0.113.5", 50000, 443),
+    ])
+    db = tmp_path / "tl2.db"
+    store = EvidenceStore(db)
+    store.create_case("CASE-PCAP-TL", "timeline")
+    result = PcapAnalyzer().analyze_file(cap)
+    ingest_pcap_finding(store, "CASE-PCAP-TL", result)
+    store.close()
+
+    timeline = get_case_timeline(db, "CASE-PCAP-TL")
+    event_types = {ev["event_type"] for ev in timeline}
+    assert "dns_query" in event_types
+    assert "network_connect" in event_types
+
+
+def test_pcap_events_do_not_fabricate_process_attribution(tmp_path):
+    """PCAP events must never carry fabricated process_name / command_line /
+    image_path / process_guid, since a PCAP cannot defensibly identify an
+    endpoint process."""
+    from ransomeye.timeline import get_case_timeline
+
+    cap = _make_capture_file(tmp_path, "no_proc.pcap", [
+        _udp_dns_packet("example.com"),
+        _tcp_syn_packet("10.0.0.1", "203.0.113.5", 50000, 443),
+    ])
+    db = tmp_path / "no_proc.db"
+    store = EvidenceStore(db)
+    store.create_case("CASE-PCAP-NOPROC", "no proc")
+    result = PcapAnalyzer().analyze_file(cap)
+    ingest_pcap_finding(store, "CASE-PCAP-NOPROC", result)
+    store.close()
+
+    events = get_case_timeline(db, "CASE-PCAP-NOPROC")
+    pcap_events = [e for e in events if e.get("source") in ("pcap", "pcap_analyzer")]
+    assert pcap_events, "expected PCAP-sourced events"
+    for ev in pcap_events:
+        # Core forensic correctness guarantee for PCAP evidence.
+        assert not ev.get("process_name"), f"process_name must not be fabricated: {ev}"
+        assert not ev.get("command_line"), f"command_line must not be fabricated: {ev}"
+        assert not ev.get("process_guid"), f"process_guid must not be fabricated: {ev}"
+        assert not ev.get("parent_pid"), f"parent_pid must not be fabricated: {ev}"
