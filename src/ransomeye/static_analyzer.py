@@ -583,23 +583,63 @@ class StaticAnalyzer:
         return iocs
 
 
+STATIC_FINDING_TYPE = "static_file_analysis"
+STATIC_SOURCE = "static_analyzer"
+STATIC_ANALYST = "ransomeye-static-analyzer"
+
+
+def static_event_id(result_sha256: str) -> str:
+    """Deterministic static-analysis evidence event id: EVT-STATIC-<sha256[:20]>."""
+    return "EVT-STATIC-" + result_sha256[:20]
+
+
+def _existing_static_finding_id(
+    store: Any, case_id: str, event_id: str,
+) -> int | None:
+    try:
+        findings = store.get_event_findings(case_id, event_id)
+    except Exception:  # noqa: BLE001 — defensive
+        return None
+    for finding in findings:
+        if finding.get("finding_type") == STATIC_FINDING_TYPE:
+            fid = finding.get("finding_id")
+            if fid is not None:
+                return int(fid)
+    return None
+
+
 def ingest_static_finding(
     store: Any,
     case_id: str,
     result: StaticAnalysisResult,
 ) -> int:
-    """Ingest a static analysis result as a finding into an EvidenceStore case with full evidence linkage."""
-    from datetime import datetime, timezone
-    import uuid
+    """Ingest a static analysis result as a finding into an EvidenceStore case with full evidence linkage.
 
-    event_id = f"EVT-STATIC-{uuid.uuid4().hex[:12]}"
+    Deterministic identity: the evidence event id is
+    ``EVT-STATIC-<result.sha256[:20]>`` so analyzing the same artifact twice
+    anchors to the same evidence event. ``save_event`` is INSERT OR REPLACE,
+    so the row is not duplicated; the finding is also deduplicated against
+    the event via ``finding_evidence``. Repeated ingest of the same artifact
+    returns the existing finding id and does not create a second custody
+    record.
+    """
+    from datetime import datetime, timezone
+
+    event_id = static_event_id(result.sha256)
+
+    # Idempotency: if this evidence event already carries a static-analysis
+    # finding, return it instead of creating a duplicate.
+    existing = _existing_static_finding_id(store, case_id, event_id)
+    if existing is not None:
+        return existing
+
     now_iso = datetime.now(timezone.utc).isoformat()
 
     event_data = {
         "event_id": event_id,
         "case_id": case_id,
         "timestamp": now_iso,
-        "source": "static_analyzer",
+        "source": STATIC_SOURCE,
         "event_type": "file_stream_hash",
         "file_path": result.file_path or result.file_name,
         "hashes": f"SHA256={result.sha256}, SHA1={result.sha1}, MD5={result.md5}",
@@ -611,10 +651,13 @@ def ingest_static_finding(
             "is_pe": result.is_pe,
             "total_entropy": result.total_entropy,
             "entropy_rating": result.entropy_rating,
+            "sha256": result.sha256,
+            "sha1": result.sha1,
+            "md5": result.md5,
         },
     }
 
-    # Save evidence event
+    # Save evidence event (INSERT OR REPLACE makes this safe to re-run).
     store.save_event(case_id, event_data)
 
     score = 0
@@ -636,7 +679,7 @@ def ingest_static_finding(
     score = min(score, 100)
 
     finding_data = {
-        "type": "static_file_analysis",
+        "type": STATIC_FINDING_TYPE,
         "score": score,
         "confidence": 0.85 if score > 0 else 0.50,
         "technique": "T1027",
@@ -652,13 +695,13 @@ def ingest_static_finding(
 
     finding_id = store.save_finding(case_id, finding_data, event_ids=[event_id])
 
-    # Record chain of custody event
+    # Record chain of custody event (one per distinct artifact ingest).
     store.record_custody_event(
         case_id=case_id,
         artifact_path=result.file_path or result.file_name,
         sha256=result.sha256,
         action="reviewed",
-        analyst="ransomeye-static-analyzer",
+        analyst=STATIC_ANALYST,
         note=f"Static analysis performed (Entropy={result.total_entropy:.2f}, Type={result.file_type})",
     )
 
