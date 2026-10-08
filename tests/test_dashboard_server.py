@@ -1106,7 +1106,7 @@ def test_api_script_attacker_strings_are_json_data_not_markup(running_server):
 
 def _script_view_source() -> str:
     app_js = (Path(dashboard_server.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
-    start = app_js.index("function scriptEl(")
+    start = app_js.index("const SCRIPT_SEVERITY_META")
     end = app_js.index("\n// ==", app_js.index("function initScript("))
     return app_js[start:end]
 
@@ -1244,3 +1244,128 @@ def test_phishing_view_registered_in_nav_and_router():
     assert 'id="tpl-phishing"' in html
     assert "case 'phishing': initPhishing();" in app_js
     assert "'phishing'" in app_js.split("const GLOBAL_VIEWS")[1].split("]")[0]
+
+
+# --------------------------------------------------------------------------- #
+# Global XSS hardening — the entire app.js must be free of innerHTML sinks
+# --------------------------------------------------------------------------- #
+
+_APP_JS_XSS_SINKS = ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write(", "eval(", "new Function")
+
+
+def test_app_js_contains_zero_innerhtml_sinks():
+    """Global XSS regression: app.js must never use innerHTML or equivalent sinks."""
+    static_dir = Path(dashboard_server.__file__).parent / "static"
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    for sink in _APP_JS_XSS_SINKS:
+        assert sink not in app_js, f"Forbidden DOM sink '{sink}' found in app.js"
+
+
+def test_app_js_uses_safe_dom_helpers():
+    """app.js must define and use el(), kv(), badge(), safeRow() safe helpers."""
+    static_dir = Path(dashboard_server.__file__).parent / "static"
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    for helper in ("function el(", "function kv(", "function badge(", "function safeRow(", "function safeModal("):
+        assert helper in app_js, f"Missing safe DOM helper: {helper}"
+    assert "textContent" in app_js
+    assert "replaceChildren" in app_js
+
+
+def test_app_js_uses_safe_rendering_in_all_view_inits():
+    """Every init function must be present and none may contain innerHTML."""
+    static_dir = Path(dashboard_server.__file__).parent / "static"
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    required_inits = [
+        "initOverview", "initCases", "initAssessment", "initIncidents",
+        "initFindings", "initEvidence", "initInvestigation", "initTimeline",
+        "initTree", "initReconstruction", "initReports", "initCollection",
+        "initIntegrity", "initCustody", "initExport", "initDatabase",
+        "initStatic", "initScript", "initPhishing",
+    ]
+    for fn in required_inits:
+        assert f"function {fn}(" in app_js, f"Missing view init function: {fn}"
+
+
+def test_findings_view_renders_evidence_links():
+    """The Findings view must render evidence links from event_ids."""
+    static_dir = Path(dashboard_server.__file__).parent / "static"
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    findings_section = app_js.split("function initFindings")[1].split("\nfunction ")[0]
+    assert "event_ids" in findings_section, "Findings view must reference event_ids for evidence links"
+    assert "inspectEvent" in findings_section, "Findings view must link to inspectEvent for evidence navigation"
+
+
+def test_reconstruction_view_has_clickable_evidence():
+    """Reconstruction stages must render clickable evidence IDs."""
+    static_dir = Path(dashboard_server.__file__).parent / "static"
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    recon_section = app_js.split("function initReconstruction")[1].split("\nfunction ")[0]
+    assert "evidence_ids" in recon_section
+    assert "inspectEvent" in recon_section, "Reconstruction must link evidence IDs to inspectEvent"
+
+
+# --------------------------------------------------------------------------- #
+# API XSS probe tests: attacker-controlled values pass through as string data
+# --------------------------------------------------------------------------- #
+
+_XSS_PROBES = [
+    "<script>alert(1)</script>",
+    "<img src=x onerror=alert(1)>",
+    '"><svg onload=alert(1)>',
+    "javascript:alert(1)",
+]
+
+
+def _get_json(url: str):
+    """Fetch URL and return (status_code, json_dict)."""
+    req = urllib.request.urlopen(url)
+    data = json.loads(req.read().decode("utf-8"))
+    return req.status, data
+
+
+def test_xss_in_case_name_preserved_as_data(running_server, test_db_path):
+    """XSS probes in case_name are returned as inert string data by the API."""
+    store = EvidenceStore(test_db_path)
+    for i, probe in enumerate(_XSS_PROBES):
+        cid = f"CASE-XSS-{i:03d}"
+        store.create_case(cid, probe)
+    store.close()
+
+    code, res = _get_json(f"{running_server}/api/cases")
+    assert code == 200
+    for c in res["cases"]:
+        if c["case_id"].startswith("CASE-XSS-"):
+            assert isinstance(c["case_name"], str)
+            assert "<" not in c["case_name"] or c["case_name"] in _XSS_PROBES
+
+
+def test_xss_in_process_name_preserved_in_event(running_server, test_db_path):
+    """XSS markup in process_name round-trips as string data through the inspect API."""
+    probe = "<img src=x onerror=alert(1)>"
+    store = EvidenceStore(test_db_path)
+    cid = "CASE-XSS-PROC"
+    store.create_case(cid, "xss proc test")
+    eid = "EV-XSS-001"
+    store.save_event(cid, {
+        "event_id": eid,
+        "event_type": "process_create",
+        "process_name": probe,
+        "command_line": probe,
+        "timestamp": "2026-01-01T00:00:00",
+        "source": "sysmon",
+    })
+    store.close()
+
+    code, res = _get_json(f"{running_server}/api/inspect/{cid}?event_id={eid}")
+    assert code == 200
+    ev = res["event"]
+    assert ev["process_name"] == probe
+    assert ev["command_line"] == probe
+
+
+def test_navigation_restructured_four_groups():
+    """index.html sidebar must use the 4-group navigation structure."""
+    static_dir = Path(dashboard_server.__file__).parent / "static"
+    html = (static_dir / "index.html").read_text(encoding="utf-8")
+    for group in ["Command Center", "Investigate", "Forensics", "Operations"]:
+        assert group in html, f"Navigation group '{group}' missing from index.html"

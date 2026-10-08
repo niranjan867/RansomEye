@@ -29,33 +29,32 @@
             </div>
 
             <nav class="sidebar-nav">
-                <div class="nav-section-title">Core Operations</div>
+                <div class="nav-section-title">Command Center</div>
                 <a href="#" class="nav-item active" data-view="overview">Overview</a>
                 <a href="#" class="nav-item" data-view="cases">Cases</a>
-                <a href="#" class="nav-item" data-view="monitor">Monitor</a>
+                <a href="#" class="nav-item" data-view="collection">Collection & Ingest</a>
+                <a href="#" class="nav-item" data-view="reports">Reports</a>
 
-                <div class="nav-section-title">Analysis & Investigation</div>
+                <div class="nav-section-title">Investigate</div>
                 <a href="#" class="nav-item" data-view="assessment">Threat Assessment</a>
                 <a href="#" class="nav-item" data-view="incidents">Incidents</a>
                 <a href="#" class="nav-item" data-view="findings">Findings</a>
                 <a href="#" class="nav-item" data-view="evidence">Evidence</a>
-                <a href="#" class="nav-item" data-view="investigation">Investigation</a>
+                <a href="#" class="nav-item" data-view="investigation">Investigation Hub</a>
                 <a href="#" class="nav-item" data-view="timeline">Timeline</a>
                 <a href="#" class="nav-item" data-view="tree">Process Tree</a>
                 <a href="#" class="nav-item" data-view="reconstruction">Reconstruction</a>
-                <a href="#" class="nav-item" data-view="reports">Reports</a>
 
-                <div class="nav-section-title">DFIR Operations</div>
-                <a href="#" class="nav-item" data-view="collection">Collection & Ingest</a>
+                <div class="nav-section-title">Forensics</div>
+                <a href="#" class="nav-item" data-view="static">Static Analysis</a>
+                <a href="#" class="nav-item" data-view="script">Script Analysis</a>
+                <a href="#" class="nav-item" data-view="phishing">Phishing Analysis</a>
+
+                <div class="nav-section-title">Operations</div>
                 <a href="#" class="nav-item" data-view="integrity">Integrity Verification</a>
                 <a href="#" class="nav-item" data-view="custody">Chain of Custody</a>
                 <a href="#" class="nav-item" data-view="export">Case Export</a>
                 <a href="#" class="nav-item" data-view="database">Database Maintenance</a>
-
-                <div class="nav-section-title">Specialized Analyzers</div>
-                <a href="#" class="nav-item" data-view="static">Static Analysis</a>
-                <a href="#" class="nav-item" data-view="script">Script Analysis</a>
-                <a href="#" class="nav-item" data-view="phishing">Phishing Analysis</a>
             </nav>
 
             <div class="system-status">
@@ -268,6 +267,7 @@
                             <th>Technique</th>
                             <th>Score</th>
                             <th>Confidence</th>
+                            <th>Evidence</th>
                         </tr>
                     </thead>
                     <tbody id="findings-tbody"></tbody>

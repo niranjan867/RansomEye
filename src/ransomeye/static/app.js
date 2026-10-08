@@ -1,3 +1,11 @@
+// ============================================================
+// RansomEye Analyst Console — Safe DOM Rendering Architecture
+// ============================================================
+// ALL attacker-controlled or artifact-derived data is rendered
+// via textContent / safe DOM construction helpers. Zero dynamic
+// markup interpolation or raw HTML sinks are permitted.
+// ============================================================
+
 const state = {
     cases: [],
     currentCaseId: '',
@@ -40,6 +48,87 @@ const dom = {
     modalClose: document.getElementById('modal-close')
 };
 
+// ============================================================
+// Safe DOM Helpers
+// ============================================================
+function el(tag, opts = {}, children = []) {
+    const node = document.createElement(tag);
+    if (opts.className) node.className = opts.className;
+    if (opts.text != null) node.textContent = String(opts.text);
+    if (opts.title != null) node.title = String(opts.title);
+    if (opts.style) node.style.cssText = opts.style;
+    if (opts.attrs) for (const [k, v] of Object.entries(opts.attrs)) node.setAttribute(k, String(v));
+    if (opts.onclick) node.addEventListener('click', opts.onclick);
+    for (const child of children) if (child) node.appendChild(child);
+    return node;
+}
+
+function kv(key, value, opts = {}) {
+    return el('div', { className: 'prop-item' }, [
+        el('span', { className: 'prop-key', text: key }),
+        el('span', { className: 'prop-val' + (opts.mono ? ' mono' : ''), text: value == null ? '-' : String(value) }),
+    ]);
+}
+
+function badge(text, severity) {
+    return el('span', { className: 'badge ' + (severity || 'low'), text: String(text || '-') });
+}
+
+function safeRow(cells, opts = {}) {
+    const tr = el('tr', { className: opts.clickable ? 'clickable' : '' });
+    if (opts.onclick) tr.addEventListener('click', opts.onclick);
+    for (const cell of cells) {
+        if (cell instanceof HTMLElement) {
+            const td = el('td');
+            td.appendChild(cell);
+            tr.appendChild(td);
+        } else if (cell && typeof cell === 'object' && cell.node) {
+            const td = el('td', { className: cell.className || '' });
+            td.appendChild(cell.node);
+            tr.appendChild(td);
+        } else {
+            const td = el('td', { className: (cell && cell.mono) ? 'mono' : '' });
+            td.textContent = cell != null ? String(cell) : '-';
+            tr.appendChild(td);
+        }
+    }
+    return tr;
+}
+
+function emptyRow(cols, message) {
+    const tr = el('tr');
+    const td = el('td', { text: message, style: 'text-align: center; padding: 32px;' });
+    td.colSpan = cols;
+    tr.appendChild(td);
+    return tr;
+}
+
+function section(title, startOpen, bodyNodes) {
+    const details = el('details', { style: 'margin-top: 16px;' });
+    if (startOpen) details.open = true;
+    details.appendChild(el('summary', { text: title, style: 'cursor: pointer; font-weight: 600; color: var(--re-text-secondary);' }));
+    details.appendChild(el('div', { style: 'margin-top: 12px;' }, bodyNodes));
+    return details;
+}
+
+function safeModal(title, bodyNodes, footerNodes) {
+    if (!dom.modal) return;
+    dom.modalTitle.textContent = title;
+    dom.modalBody.replaceChildren(...bodyNodes);
+    dom.modalFooter.replaceChildren(...footerNodes);
+    dom.modal.classList.remove('hidden');
+}
+
+function hideModal() {
+    if (!dom.modal) return;
+    dom.modal.classList.add('hidden');
+    dom.modalBody.replaceChildren();
+    dom.modalFooter.replaceChildren();
+}
+
+// ============================================================
+// Init & Listeners
+// ============================================================
 async function init() {
     setupListeners();
     await fetchCases();
@@ -48,8 +137,7 @@ async function init() {
 
 function setupListeners() {
     dom.selectCase.addEventListener('change', async (e) => {
-        const cid = e.target.value;
-        await loadCase(cid);
+        await loadCase(e.target.value);
     });
 
     dom.navItems.forEach(n => {
@@ -84,23 +172,9 @@ function setupListeners() {
     }
 }
 
-// Modal Utility
-function showModal(title, bodyHtml, footerHtml = '') {
-    if (!dom.modal) return;
-    dom.modalTitle.textContent = title;
-    dom.modalBody.innerHTML = bodyHtml;
-    dom.modalFooter.innerHTML = footerHtml;
-    dom.modal.classList.remove('hidden');
-}
-
-function hideModal() {
-    if (!dom.modal) return;
-    dom.modal.classList.add('hidden');
-    dom.modalBody.innerHTML = '';
-    dom.modalFooter.innerHTML = '';
-}
-
+// ============================================================
 // API
+// ============================================================
 async function api(path, options = {}) {
     try {
         const res = await fetch(`/api${path}`, options);
@@ -122,25 +196,27 @@ async function api(path, options = {}) {
     }
 }
 
+// ============================================================
 // Loaders
+// ============================================================
 async function fetchCases() {
     const data = await api('/cases');
     if (!data || !data.cases || data.cases.length === 0) {
         state.cases = [];
-        dom.selectCase.innerHTML = '<option value="">NO CASES AVAILABLE</option>';
+        dom.selectCase.replaceChildren(el('option', { text: 'NO CASES AVAILABLE', attrs: { value: '' } }));
         return;
     }
 
     state.cases = data.cases;
     const currentVal = state.currentCaseId;
-    dom.selectCase.innerHTML = '<option value="">Select Case...</option>';
+    const opts = [el('option', { text: 'Select Case...', attrs: { value: '' } })];
     data.cases.forEach(c => {
-        const opt = document.createElement('option');
-        opt.value = c.case_id;
+        const opt = el('option', { attrs: { value: c.case_id } });
         opt.textContent = `${c.case_id} — ${c.case_name || 'Unnamed'} (${c.status})`;
         if (c.case_id === currentVal) opt.selected = true;
-        dom.selectCase.appendChild(opt);
+        opts.push(opt);
     });
+    dom.selectCase.replaceChildren(...opts);
 }
 
 async function loadCase(caseId) {
@@ -210,7 +286,9 @@ function updateTopbar() {
     dom.tbSeverity.className = `badge ${sev.toLowerCase()}`;
 }
 
+// ============================================================
 // Router
+// ============================================================
 function switchView(viewName) {
     state.currentView = viewName;
     dom.navItems.forEach(n => n.classList.toggle('active', n.dataset.view === viewName));
@@ -222,31 +300,32 @@ const GLOBAL_VIEWS = ['cases', 'monitor', 'collection', 'integrity', 'database',
 
 function renderCurrentView() {
     if (!state.currentCaseId && !GLOBAL_VIEWS.includes(state.currentView)) {
-        dom.viewContainer.innerHTML = `
-            <div class="empty-state" style="padding-top: 100px;">
-                <h3>No Case Selected</h3>
-                <p>Select a case from the sidebar or manage cases to begin investigation.</p>
-                <div style="margin-top: 24px; display: flex; gap: 12px; justify-content: center;">
-                    <button class="btn btn-primary" onclick="switchView('cases')">View / Create Cases</button>
-                    <button class="btn" onclick="switchView('collection')">Ingest Evidence</button>
-                </div>
-            </div>`;
+        dom.viewContainer.replaceChildren(
+            el('div', { className: 'empty-state', style: 'padding-top: 100px;' }, [
+                el('h3', { text: 'No Case Selected' }),
+                el('p', { text: 'Select a case from the sidebar or manage cases to begin investigation.' }),
+                el('div', { style: 'margin-top: 24px; display: flex; gap: 12px; justify-content: center;' }, [
+                    el('button', { className: 'btn btn-primary', text: 'View / Create Cases', onclick: () => switchView('cases') }),
+                    el('button', { className: 'btn', text: 'Ingest Evidence', onclick: () => switchView('collection') }),
+                ]),
+            ])
+        );
         return;
     }
 
     const tpl = document.getElementById(`tpl-${state.currentView}`);
     if (!tpl) {
-        dom.viewContainer.innerHTML = `<div class="empty-state"><h3>View Not Found</h3></div>`;
+        dom.viewContainer.replaceChildren(el('div', { className: 'empty-state' }, [el('h3', { text: 'View Not Found' })]));
         return;
     }
 
-    dom.viewContainer.innerHTML = '';
+    dom.viewContainer.replaceChildren();
     dom.viewContainer.appendChild(tpl.content.cloneNode(true));
 
     switch (state.currentView) {
         case 'overview': initOverview(); break;
         case 'cases': initCases(); break;
-        case 'monitor': break; // Static truth content
+        case 'monitor': break;
         case 'assessment': initAssessment(); break;
         case 'incidents': initIncidents(); break;
         case 'findings': initFindings(); break;
@@ -296,24 +375,27 @@ function initOverview() {
 
     const incTbody = document.getElementById('ov-incidents-tbody');
     if (state.incidents.length > 0) {
-        incTbody.innerHTML = state.incidents.slice(0, 5).map(inc => `
-            <tr class="clickable" onclick="inspectIncident('${inc.incident_id}')">
-                <td><span class="clickable-id mono">${inc.incident_id}</span></td>
-                <td><span class="badge ${inc.severity.toLowerCase()}">${inc.severity}</span></td>
-                <td>${(inc.evidence_event_ids || []).length}</td>
-            </tr>
-        `).join('');
+        const rows = state.incidents.slice(0, 5).map(inc => {
+            const idCell = el('span', { className: 'clickable-id mono', text: inc.incident_id });
+            return safeRow([
+                { node: idCell },
+                { node: badge(inc.severity, (inc.severity || '').toLowerCase()) },
+                (inc.evidence_event_ids || []).length,
+            ], { clickable: true, onclick: () => inspectIncident(inc.incident_id) });
+        });
+        incTbody.replaceChildren(...rows);
     }
 
     const actTbody = document.getElementById('ov-activity-tbody');
     if (state.activity.length > 0) {
-        actTbody.innerHTML = state.activity.map(a => `
-            <tr class="clickable" onclick="inspectEventEncoded('${encodeURIComponent(a.event_id)}')">
-                <td>${a.timestamp}</td>
-                <td>${a.event_type}</td>
-                <td>${a.process_name || '-'}</td>
-            </tr>
-        `).join('');
+        const rows = state.activity.map(a =>
+            safeRow([
+                a.timestamp,
+                a.event_type,
+                a.process_name || '-',
+            ], { clickable: true, onclick: () => inspectEvent(a.event_id) })
+        );
+        actTbody.replaceChildren(...rows);
     }
 }
 
@@ -328,30 +410,41 @@ async function initCases() {
 
     const renderTable = (casesList) => {
         if (!casesList || casesList.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="10" style="text-align: center; padding: 32px;">No cases found.</td></tr>`;
+            tbody.replaceChildren(emptyRow(10, 'No cases found. Create a new case to begin.'));
             return;
         }
 
-        tbody.innerHTML = casesList.map(c => `
-            <tr>
-                <td><span class="mono clickable-id" onclick="loadCase('${c.case_id}').then(() => switchView('overview'))">${c.case_id}</span></td>
-                <td><strong>${c.case_name || '-'}</strong></td>
-                <td class="mono">${c.host || '-'}</td>
-                <td><span class="badge ${c.status === 'OPEN' ? 'critical' : 'low'}">${c.status}</span></td>
-                <td><span class="badge ${(c.severity || 'low').toLowerCase()}">${c.severity || 'LOW'}</span></td>
-                <td class="mono" style="font-size: 11px;">${c.created_at ? c.created_at.slice(0, 19) : '-'}</td>
-                <td>${c.events_count !== undefined ? c.events_count : '-'}</td>
-                <td>${c.findings_count !== undefined ? c.findings_count : '-'}</td>
-                <td>${c.incidents_count !== undefined ? c.incidents_count : '-'}</td>
-                <td>
-                    <div style="display: flex; gap: 6px;">
-                        <button class="btn btn-sm btn-primary" onclick="loadCase('${c.case_id}').then(() => switchView('overview'))">Open</button>
-                        <button class="btn btn-sm" onclick="openUpdateStatusModal('${c.case_id}', '${c.status}')">Status</button>
-                        <button class="btn btn-sm" onclick="openCaseHistoryModal('${c.case_id}')">History</button>
-                    </div>
-                </td>
-            </tr>
-        `).join('');
+        const rows = casesList.map(c => {
+            const idCell = el('span', { className: 'mono clickable-id', text: c.case_id,
+                onclick: () => loadCase(c.case_id).then(() => switchView('overview')) });
+            const nameCell = el('strong', { text: c.case_name || '-' });
+            const hostCell = el('span', { className: 'mono', text: c.host || '-' });
+            const statusBadge = badge(c.status, c.status === 'OPEN' ? 'critical' : 'low');
+            const sevBadge = badge(c.severity || 'LOW', (c.severity || 'low').toLowerCase());
+            const created = el('span', { className: 'mono', text: c.created_at ? c.created_at.slice(0, 19) : '-', style: 'font-size: 11px;' });
+            const actions = el('div', { style: 'display: flex; gap: 6px;' }, [
+                el('button', { className: 'btn btn-sm btn-primary', text: 'Open',
+                    onclick: (e) => { e.stopPropagation(); loadCase(c.case_id).then(() => switchView('overview')); } }),
+                el('button', { className: 'btn btn-sm', text: 'Status',
+                    onclick: (e) => { e.stopPropagation(); openUpdateStatusModal(c.case_id, c.status); } }),
+                el('button', { className: 'btn btn-sm', text: 'History',
+                    onclick: (e) => { e.stopPropagation(); openCaseHistoryModal(c.case_id); } }),
+            ]);
+
+            const tr = el('tr');
+            for (const cell of [idCell, nameCell, hostCell, statusBadge, sevBadge, created,
+                               c.events_count !== undefined ? String(c.events_count) : '-',
+                               c.findings_count !== undefined ? String(c.findings_count) : '-',
+                               c.incidents_count !== undefined ? String(c.incidents_count) : '-',
+                               actions]) {
+                const td = el('td');
+                if (cell instanceof HTMLElement) td.appendChild(cell);
+                else td.textContent = String(cell);
+                tr.appendChild(td);
+            }
+            return tr;
+        });
+        tbody.replaceChildren(...rows);
     };
 
     const filterAndRender = () => {
@@ -371,59 +464,52 @@ async function initCases() {
     filterStatus.addEventListener('change', filterAndRender);
 
     btnNew.addEventListener('click', () => {
-        showModal('Create Forensic Case', `
-            <div class="form-group">
-                <label class="form-label">Case ID *</label>
-                <input type="text" id="modal-new-case-id" class="form-control mono" placeholder="e.g. CASE-2026-001">
-            </div>
-            <div class="form-group">
-                <label class="form-label">Case Name</label>
-                <input type="text" id="modal-new-case-name" class="form-control" placeholder="e.g. Finance Server Ransomware Investigation">
-            </div>
-            <div class="form-group">
-                <label class="form-label">Host Name</label>
-                <input type="text" id="modal-new-case-host" class="form-control" placeholder="e.g. WIN-SRV-01">
-            </div>
-            <div id="modal-case-feedback" class="mt-md hidden"></div>
-        `, `
-            <button class="btn" onclick="hideModal()">Cancel</button>
-            <button class="btn btn-primary" id="btn-submit-create-case">Create Case</button>
-        `);
+        const idInp = el('input', { className: 'form-control mono', attrs: { type: 'text', id: 'modal-new-case-id', placeholder: 'e.g. CASE-2026-001' } });
+        const nameInp = el('input', { className: 'form-control', attrs: { type: 'text', id: 'modal-new-case-name', placeholder: 'e.g. Finance Server Ransomware Investigation' } });
+        const hostInp = el('input', { className: 'form-control', attrs: { type: 'text', id: 'modal-new-case-host', placeholder: 'e.g. WIN-SRV-01' } });
+        const fb = el('div', { className: 'mt-md hidden', attrs: { id: 'modal-case-feedback' } });
 
-        document.getElementById('btn-submit-create-case').addEventListener('click', async () => {
-            const cid = document.getElementById('modal-new-case-id').value.trim();
-            const name = document.getElementById('modal-new-case-name').value.trim();
-            const host = document.getElementById('modal-new-case-host').value.trim();
-            const fb = document.getElementById('modal-case-feedback');
+        safeModal('Create Forensic Case', [
+            el('div', { className: 'form-group' }, [el('label', { className: 'form-label', text: 'Case ID *' }), idInp]),
+            el('div', { className: 'form-group' }, [el('label', { className: 'form-label', text: 'Case Name' }), nameInp]),
+            el('div', { className: 'form-group' }, [el('label', { className: 'form-label', text: 'Host Name' }), hostInp]),
+            fb,
+        ], [
+            el('button', { className: 'btn', text: 'Cancel', onclick: hideModal }),
+            el('button', { className: 'btn btn-primary', text: 'Create Case', onclick: async () => {
+                const cid = idInp.value.trim();
+                const name = nameInp.value.trim();
+                const host = hostInp.value.trim();
 
-            if (!cid) {
-                fb.className = 'alert alert-error mt-md';
-                fb.textContent = 'Case ID is required.';
-                fb.classList.remove('hidden');
-                return;
-            }
+                if (!cid) {
+                    fb.className = 'alert alert-error mt-md';
+                    fb.textContent = 'Case ID is required.';
+                    fb.classList.remove('hidden');
+                    return;
+                }
 
-            const res = await api('/cases', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ case_id: cid, case_name: name, host: host })
-            });
+                const res = await api('/cases', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ case_id: cid, case_name: name, host: host })
+                });
 
-            if (res && !res._error) {
-                fb.className = 'alert alert-success mt-md';
-                fb.textContent = `Case ${cid} created successfully.`;
-                fb.classList.remove('hidden');
-                await fetchCases();
-                setTimeout(() => {
-                    hideModal();
-                    loadCase(cid).then(() => switchView('overview'));
-                }, 750);
-            } else {
-                fb.className = 'alert alert-error mt-md';
-                fb.textContent = res ? res.message : 'Failed to create case.';
-                fb.classList.remove('hidden');
-            }
-        });
+                if (res && !res._error) {
+                    fb.className = 'alert alert-success mt-md';
+                    fb.textContent = `Case ${cid} created successfully.`;
+                    fb.classList.remove('hidden');
+                    await fetchCases();
+                    setTimeout(() => {
+                        hideModal();
+                        loadCase(cid).then(() => switchView('overview'));
+                    }, 750);
+                } else {
+                    fb.className = 'alert alert-error mt-md';
+                    fb.textContent = res ? res.message : 'Failed to create case.';
+                    fb.classList.remove('hidden');
+                }
+            }}),
+        ]);
     });
 
     const data = await api('/cases');
@@ -434,116 +520,126 @@ async function initCases() {
 }
 
 window.openUpdateStatusModal = function(caseId, currentStatus) {
-    showModal(`Update Status: ${caseId}`, `
-        <div class="form-group">
-            <label class="form-label">Lifecycle Status</label>
-            <select id="modal-update-status" class="form-control">
-                <option value="OPEN" ${currentStatus === 'OPEN' ? 'selected' : ''}>OPEN</option>
-                <option value="IN_PROGRESS" ${currentStatus === 'IN_PROGRESS' ? 'selected' : ''}>IN_PROGRESS</option>
-                <option value="CLOSED" ${currentStatus === 'CLOSED' ? 'selected' : ''}>CLOSED</option>
-                <option value="ARCHIVED" ${currentStatus === 'ARCHIVED' ? 'selected' : ''}>ARCHIVED</option>
-            </select>
-        </div>
-        <div class="form-group">
-            <label class="form-label">Status Notes</label>
-            <textarea id="modal-update-notes" class="form-control" rows="3" placeholder="Explain the rationale for lifecycle change..."></textarea>
-        </div>
-        <div id="modal-status-feedback" class="mt-md hidden"></div>
-    `, `
-        <button class="btn" onclick="hideModal()">Cancel</button>
-        <button class="btn btn-primary" id="btn-submit-update-status">Update Status</button>
-    `);
+    const statusSel = el('select', { className: 'form-control', attrs: { id: 'modal-update-status' } });
+    for (const s of ['OPEN', 'IN_PROGRESS', 'CLOSED', 'ARCHIVED']) {
+        const opt = el('option', { text: s, attrs: { value: s } });
+        if (s === currentStatus) opt.selected = true;
+        statusSel.appendChild(opt);
+    }
+    const notesArea = el('textarea', { className: 'form-control', attrs: { id: 'modal-update-notes', rows: '3', placeholder: 'Explain the rationale for lifecycle change...' } });
+    const fb = el('div', { className: 'mt-md hidden', attrs: { id: 'modal-status-feedback' } });
 
-    document.getElementById('btn-submit-update-status').addEventListener('click', async () => {
-        const st = document.getElementById('modal-update-status').value;
-        const notes = document.getElementById('modal-update-notes').value.trim();
-        const fb = document.getElementById('modal-status-feedback');
+    safeModal(`Update Status: ${caseId}`, [
+        el('div', { className: 'form-group' }, [el('label', { className: 'form-label', text: 'Lifecycle Status' }), statusSel]),
+        el('div', { className: 'form-group' }, [el('label', { className: 'form-label', text: 'Status Notes' }), notesArea]),
+        fb,
+    ], [
+        el('button', { className: 'btn', text: 'Cancel', onclick: hideModal }),
+        el('button', { className: 'btn btn-primary', text: 'Update Status', onclick: async () => {
+            const st = statusSel.value;
+            const notes = notesArea.value.trim();
 
-        const res = await api(`/case/${encodeURIComponent(caseId)}/status`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ status: st, notes: notes })
-        });
+            const res = await api(`/case/${encodeURIComponent(caseId)}/status`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: st, notes: notes })
+            });
 
-        if (res && !res._error) {
-            fb.className = 'alert alert-success mt-md';
-            fb.textContent = `Status updated to ${st}.`;
-            fb.classList.remove('hidden');
-            await fetchCases();
-            if (state.currentCaseId === caseId) {
-                await loadCase(caseId);
+            if (res && !res._error) {
+                fb.className = 'alert alert-success mt-md';
+                fb.textContent = `Status updated to ${st}.`;
+                fb.classList.remove('hidden');
+                await fetchCases();
+                if (state.currentCaseId === caseId) await loadCase(caseId);
+                setTimeout(() => {
+                    hideModal();
+                    if (state.currentView === 'cases') initCases();
+                }, 600);
+            } else {
+                fb.className = 'alert alert-error mt-md';
+                fb.textContent = res ? res.message : 'Failed to update status.';
+                fb.classList.remove('hidden');
             }
-            setTimeout(() => {
-                hideModal();
-                if (state.currentView === 'cases') initCases();
-            }, 600);
-        } else {
-            fb.className = 'alert alert-error mt-md';
-            fb.textContent = res ? res.message : 'Failed to update status.';
-            fb.classList.remove('hidden');
-        }
-    });
+        }}),
+    ]);
 };
 
 window.openCaseHistoryModal = async function(caseId) {
-    showModal(`Case History: ${caseId}`, `<div class="empty-state">Loading history...</div>`, `<button class="btn" onclick="hideModal()">Close</button>`);
+    safeModal(`Case History: ${caseId}`,
+        [el('div', { className: 'empty-state', text: 'Loading history...' })],
+        [el('button', { className: 'btn', text: 'Close', onclick: hideModal })]
+    );
 
     const data = await api(`/case/${encodeURIComponent(caseId)}/history`);
     if (!data || data._error || !data.history || data.history.length === 0) {
-        dom.modalBody.innerHTML = `<div class="empty-state">No status history recorded for case ${caseId}.</div>`;
+        dom.modalBody.replaceChildren(el('div', { className: 'empty-state', text: `No status history recorded for case ${caseId}.` }));
         return;
     }
 
-    dom.modalBody.innerHTML = `
-        <div class="timeline-list">
-            ${data.history.map(h => `
-                <div class="timeline-item">
-                    <div class="timeline-time">${h.timestamp || '-'}</div>
-                    <div class="timeline-content">
-                        <strong>Status transitioned to: <span class="badge ${h.status === 'OPEN' ? 'critical' : 'low'}">${h.status}</span></strong>
-                        ${h.notes ? `<div class="mt-sm" style="color: var(--re-text-secondary);">${h.notes}</div>` : ''}
-                    </div>
-                </div>
-            `).join('')}
-        </div>
-    `;
+    const items = data.history.map(h => {
+        const item = el('div', { className: 'timeline-item' }, [
+            el('div', { className: 'timeline-time', text: h.timestamp || '-' }),
+            el('div', { className: 'timeline-content' }, [
+                el('strong', {}, [
+                    document.createTextNode('Status transitioned to: '),
+                    badge(h.status, h.status === 'OPEN' ? 'critical' : 'low'),
+                ]),
+            ]),
+        ]);
+        if (h.notes) {
+            item.querySelector('.timeline-content').appendChild(
+                el('div', { className: 'mt-sm', text: h.notes, style: 'color: var(--re-text-secondary);' })
+            );
+        }
+        return item;
+    });
+    dom.modalBody.replaceChildren(el('div', { className: 'timeline-list' }, items));
 };
 
 // ==========================================
 // 3. Threat Assessment
 // ==========================================
 function initAssessment() {
-    if (!state.assessment) return;
     const p = document.getElementById('assessment-panel');
+    if (!state.assessment) {
+        p.replaceChildren(el('div', { className: 'panel-body empty-state' }, [
+            el('h3', { text: 'Assessment Unavailable' }),
+            el('p', { text: 'No threat assessment has been generated for this case. Ingest evidence and run analysis to generate an assessment.' }),
+        ]));
+        return;
+    }
+
     const a = state.assessment;
-    p.innerHTML = `
-        <div class="panel-body">
-            <div class="grid-overview" style="grid-template-columns: 1fr 1fr 1fr;">
-                <div class="stat-card">
-                    <span class="stat-label">Score</span>
-                    <span class="stat-val ${a.severity === 'CRITICAL' || a.severity === 'HIGH' ? 'text-critical' : 'text-warning'}">${a.score}</span>
-                </div>
-                <div class="stat-card">
-                    <span class="stat-label">Severity</span>
-                    <span class="stat-val ${a.severity === 'CRITICAL' || a.severity === 'HIGH' ? 'text-critical' : 'text-warning'}">${a.severity}</span>
-                </div>
-                <div class="stat-card">
-                    <span class="stat-label">Confidence</span>
-                    <span class="stat-val">${(a.confidence * 100).toFixed(0)}%</span>
-                </div>
-            </div>
+    const isCrit = a.severity === 'CRITICAL' || a.severity === 'HIGH';
 
-            <h4 class="mt-xl" style="margin-bottom: 12px; color: var(--re-text-muted); text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em;">Analytical Reasons</h4>
-            <div class="prop-list">
-                ${(a.reasons || []).map(r => `<div class="prop-val" style="color: var(--re-critical); border-left: 3px solid var(--re-critical);">${r}</div>`).join('')}
-            </div>
+    const statCards = el('div', { className: 'grid-overview', style: 'grid-template-columns: 1fr 1fr 1fr;' }, [
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Score' }),
+            el('span', { className: 'stat-val ' + (isCrit ? 'text-critical' : 'text-warning'), text: String(a.score) }),
+        ]),
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Severity' }),
+            el('span', { className: 'stat-val ' + (isCrit ? 'text-critical' : 'text-warning'), text: a.severity }),
+        ]),
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Confidence' }),
+            el('span', { className: 'stat-val', text: (a.confidence * 100).toFixed(0) + '%' }),
+        ]),
+    ]);
 
-            <h4 class="mt-xl" style="margin-bottom: 12px; color: var(--re-text-muted); text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em;">Techniques</h4>
-            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                ${(a.techniques || []).map(t => `<span class="badge high">${t}</span>`).join('')}
-            </div>
-        </div>
-    `;
+    const reasonNodes = (a.reasons || []).map(r =>
+        el('div', { className: 'prop-val', text: r, style: 'color: var(--re-critical); border-left: 3px solid var(--re-critical);' })
+    );
+
+    const techBadges = (a.techniques || []).map(t => badge(t, 'high'));
+
+    p.replaceChildren(el('div', { className: 'panel-body' }, [
+        statCards,
+        el('h4', { className: 'mt-xl', text: 'Analytical Reasons', style: 'margin-bottom: 12px; color: var(--re-text-muted); text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em;' }),
+        el('div', { className: 'prop-list' }, reasonNodes),
+        el('h4', { className: 'mt-xl', text: 'Techniques', style: 'margin-bottom: 12px; color: var(--re-text-muted); text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em;' }),
+        el('div', { style: 'display: flex; gap: 8px; flex-wrap: wrap;' }, techBadges),
+    ]));
 }
 
 // ==========================================
@@ -552,41 +648,70 @@ function initAssessment() {
 function initIncidents() {
     const tbody = document.getElementById('incidents-tbody');
     if (state.incidents.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center;">No incidents in case.</td></tr>`;
+        tbody.replaceChildren(emptyRow(6, 'No incidents have been correlated for this case. Ingest evidence to trigger correlation.'));
         return;
     }
 
-    tbody.innerHTML = state.incidents.map(inc => `
-        <tr class="clickable" onclick="inspectIncident('${inc.incident_id}')">
-            <td><span class="clickable-id mono">${inc.incident_id}</span></td>
-            <td><span class="badge ${inc.severity.toLowerCase()}">${inc.severity}</span></td>
-            <td>${inc.start_time || '-'}</td>
-            <td>${inc.duration || '-'}</td>
-            <td>${(inc.finding_ids || []).length}</td>
-            <td>${(inc.evidence_event_ids || []).length}</td>
-        </tr>
-    `).join('');
+    const rows = state.incidents.map(inc =>
+        safeRow([
+            { node: el('span', { className: 'clickable-id mono', text: inc.incident_id }) },
+            { node: badge(inc.severity, (inc.severity || '').toLowerCase()) },
+            inc.start_time || '-',
+            inc.duration || '-',
+            (inc.finding_ids || []).length,
+            (inc.evidence_event_ids || []).length,
+        ], { clickable: true, onclick: () => inspectIncident(inc.incident_id) })
+    );
+    tbody.replaceChildren(...rows);
 }
 
 // ==========================================
-// 5. Findings
+// 5. Findings — with evidence links
 // ==========================================
 function initFindings() {
     const tbody = document.getElementById('findings-tbody');
     if (state.findings.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="5" style="text-align: center;">No findings in case.</td></tr>`;
+        tbody.replaceChildren(emptyRow(6, 'No findings have been generated for this case yet. Ingest evidence to run behavioral detection.'));
         return;
     }
 
-    tbody.innerHTML = state.findings.map(fn => `
-        <tr>
-            <td><span class="mono">FINDING:${fn.finding_id}</span></td>
-            <td>${fn.finding_type}</td>
-            <td><span class="badge high">${fn.technique || '-'}</span></td>
-            <td><span class="text-critical" style="font-weight: 600;">${fn.score || '-'}</span></td>
-            <td>${fn.confidence || '-'}</td>
-        </tr>
-    `).join('');
+    const rows = state.findings.map(fn => {
+        const idCell = el('span', { className: 'mono' });
+        idCell.textContent = `FINDING:${fn.finding_id}`;
+
+        const evIds = fn.event_ids || [];
+        const evLinks = evIds.length > 0
+            ? el('div', { style: 'display: flex; gap: 4px; flex-wrap: wrap;' },
+                evIds.slice(0, 3).map(eid =>
+                    el('span', { className: 'clickable-id mono', text: String(eid).slice(0, 12) + '...', title: eid, style: 'font-size: 10px; cursor: pointer;',
+                        onclick: (e) => { e.stopPropagation(); inspectEvent(eid); } })
+                ).concat(evIds.length > 3 ? [el('span', { className: 'mono', text: `+${evIds.length - 3} more`, style: 'font-size: 10px; color: var(--re-text-muted);' })] : [])
+              )
+            : el('span', { className: 'mono', text: '-', style: 'font-size: 10px; color: var(--re-text-muted);' });
+
+        const tr = el('tr', { className: 'clickable' });
+        tr.addEventListener('click', () => {
+            if (evIds.length > 0) inspectEvent(evIds[0]);
+        });
+
+        const cells = [
+            idCell,
+            fn.finding_type,
+            badge(fn.technique || '-', 'high'),
+            el('span', { className: 'text-critical', text: String(fn.score || '-'), style: 'font-weight: 600;' }),
+            fn.confidence || '-',
+            evLinks,
+        ];
+
+        for (const cell of cells) {
+            const td = el('td');
+            if (cell instanceof HTMLElement) td.appendChild(cell);
+            else td.textContent = String(cell);
+            tr.appendChild(td);
+        }
+        return tr;
+    });
+    tbody.replaceChildren(...rows);
 }
 
 // ==========================================
@@ -603,24 +728,25 @@ function initEvidence() {
         const data = await api(`/evidence/${encodeURIComponent(state.currentCaseId)}/search?q=${encodeURIComponent(q)}`);
 
         if (!data || data._error) {
-            tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--re-critical); padding: 32px;">Unable to load evidence: ${(data && data.message) ? data.message : 'Server error'}</td></tr>`;
+            tbody.replaceChildren(emptyRow(5, `Unable to load evidence: ${(data && data.message) ? data.message : 'Server error'}`));
             return;
         }
 
         if (!data.results || data.results.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; padding: 32px;">No matching evidence</td></tr>`;
+            tbody.replaceChildren(emptyRow(5, 'No matching evidence events found.'));
             return;
         }
 
-        tbody.innerHTML = data.results.map(r => `
-            <tr class="clickable" onclick="inspectEventEncoded('${encodeURIComponent(r.event_id)}')">
-                <td>${r.timestamp || '-'}</td>
-                <td>${r.event_type || r.source}</td>
-                <td>${r.process_name || '-'}</td>
-                <td>${r.pid || '-'}</td>
-                <td><span class="mono clickable-id">${r.event_id}</span></td>
-            </tr>
-        `).join('');
+        const rows = data.results.map(r =>
+            safeRow([
+                r.timestamp || '-',
+                r.event_type || r.source,
+                r.process_name || '-',
+                r.pid || '-',
+                { node: el('span', { className: 'mono clickable-id', text: r.event_id }) },
+            ], { clickable: true, onclick: () => inspectEvent(r.event_id) })
+        );
+        tbody.replaceChildren(...rows);
     };
 
     if (btn) btn.addEventListener('click', doSearch);
@@ -642,7 +768,6 @@ async function initInvestigation() {
     const graphSumEl = document.getElementById('inv-graph-summary');
     const validSumEl = document.getElementById('inv-validation-summary');
 
-    // Fetch investigation summary
     const invData = await api(`/investigation/${encodeURIComponent(state.currentCaseId)}`);
     if (invData && !invData._error && invData.summary) {
         statusEl.textContent = 'ACTIVE';
@@ -650,30 +775,28 @@ async function initInvestigation() {
         edgesEl.textContent = invData.summary.total_edges !== undefined ? invData.summary.total_edges : '-';
     }
 
-    // Fetch graph details
     const graphData = await api(`/investigation/${encodeURIComponent(state.currentCaseId)}/graph`);
     if (graphData && !graphData._error && graphData.nodes) {
-        const procNodes = graphData.nodes.filter(n => n.type === 'process' || n.label === 'Process');
-        const fileNodes = graphData.nodes.filter(n => n.type === 'file' || n.label === 'File');
-        const netNodes = graphData.nodes.filter(n => n.type === 'network' || n.label === 'Network');
+        const procNodes = graphData.nodes.filter(n => n.node_type === 'process' || n.label === 'Process');
+        const fileNodes = graphData.nodes.filter(n => n.node_type === 'file' || n.label === 'File');
+        const netNodes = graphData.nodes.filter(n => n.node_type === 'network' || n.label === 'Network');
 
-        graphSumEl.innerHTML = `
-            <div class="prop-list">
-                <div class="prop-item"><span class="prop-key">Processes in Graph</span><span class="prop-val mono">${procNodes.length}</span></div>
-                <div class="prop-item"><span class="prop-key">File Nodes in Graph</span><span class="prop-val mono">${fileNodes.length}</span></div>
-                <div class="prop-item"><span class="prop-key">Network Nodes in Graph</span><span class="prop-val mono">${netNodes.length}</span></div>
-                <div class="prop-item"><span class="prop-key">Total Edges</span><span class="prop-val mono">${(graphData.edges || []).length}</span></div>
-            </div>
-            <div class="mt-md" style="display: flex; gap: 8px;">
-                <button class="btn btn-sm btn-primary" onclick="switchView('tree')">View Process Tree &rarr;</button>
-                <button class="btn btn-sm" onclick="switchView('reconstruction')">Attack Reconstruction &rarr;</button>
-            </div>
-        `;
+        graphSumEl.replaceChildren(
+            el('div', { className: 'prop-list' }, [
+                kv('Processes in Graph', procNodes.length, { mono: true }),
+                kv('File Nodes in Graph', fileNodes.length, { mono: true }),
+                kv('Network Nodes in Graph', netNodes.length, { mono: true }),
+                kv('Total Edges', (graphData.edges || []).length, { mono: true }),
+            ]),
+            el('div', { className: 'mt-md', style: 'display: flex; gap: 8px;' }, [
+                el('button', { className: 'btn btn-sm btn-primary', text: 'View Process Tree →', onclick: () => switchView('tree') }),
+                el('button', { className: 'btn btn-sm', text: 'Attack Reconstruction →', onclick: () => switchView('reconstruction') }),
+            ])
+        );
     } else {
-        graphSumEl.innerHTML = `<div class="empty-state">No graph data generated for this case.</div>`;
+        graphSumEl.replaceChildren(el('div', { className: 'empty-state', text: 'No graph data generated for this case. Ingest evidence to build the investigation graph.' }));
     }
 
-    // Fetch validation
     const valData = await api(`/investigation/${encodeURIComponent(state.currentCaseId)}/validation`);
     if (valData && !valData._error && valData.validation) {
         const v = valData.validation;
@@ -681,17 +804,22 @@ async function initInvestigation() {
         validStatusEl.textContent = isValid ? 'VALID' : 'FLAGGED';
         validStatusEl.className = `stat-val ${isValid ? 'text-success' : 'text-critical'}`;
 
-        validSumEl.innerHTML = `
-            <div class="prop-list">
-                <div class="prop-item"><span class="prop-key">Validation Status</span><span class="badge ${isValid ? 'low' : 'critical'}">${isValid ? 'PASSED' : 'ANOMALIES DETECTED'}</span></div>
-                <div class="prop-item"><span class="prop-key">Checks Performed</span><span class="prop-val mono">${v.checks_performed !== undefined ? v.checks_performed : 'Complete'}</span></div>
-                <div class="prop-item"><span class="prop-key">Errors / Warnings</span><span class="prop-val mono ${isValid ? 'text-success' : 'text-critical'}">${(v.errors || []).length}</span></div>
-                ${v.errors && v.errors.length > 0 ? `<div class="prop-item"><span class="prop-key">Details</span><div class="prop-val" style="color: var(--re-critical);">${v.errors.join('<br>')}</div></div>` : ''}
-            </div>
-        `;
+        const items = [
+            kv('Validation Status', isValid ? 'PASSED' : 'ANOMALIES DETECTED'),
+            kv('Checks Performed', v.checks_performed !== undefined ? String(v.checks_performed) : 'Complete', { mono: true }),
+            kv('Errors / Warnings', String((v.errors || []).length), { mono: true }),
+        ];
+        if (v.errors && v.errors.length > 0) {
+            const errList = v.errors.map(err => el('div', { className: 'prop-val', text: err, style: 'color: var(--re-critical);' }));
+            items.push(el('div', { className: 'prop-item' }, [
+                el('span', { className: 'prop-key', text: 'Details' }),
+                el('div', {}, errList),
+            ]));
+        }
+        validSumEl.replaceChildren(el('div', { className: 'prop-list' }, items));
     } else {
         validStatusEl.textContent = 'CHECKED';
-        validSumEl.innerHTML = `<div class="empty-state">Validation checks complete. No discrepancies found.</div>`;
+        validSumEl.replaceChildren(el('div', { className: 'empty-state', text: 'Validation checks complete. No discrepancies found.' }));
     }
 }
 
@@ -703,32 +831,60 @@ async function initTree() {
     const container = document.getElementById('tree-container');
 
     const data = await api(`/tree/${encodeURIComponent(state.currentCaseId)}`);
-    if (!data || data._error || !data.tree || data.tree.length === 0) {
-        container.innerHTML = `<div class="empty-state">No process tree available for this case.</div>`;
+    // API may return tree as a flat list or an object with {nodes, children, roots}; normalize to a list.
+    let roots = null;
+    if (data && !data._error && data.tree) {
+        if (Array.isArray(data.tree)) {
+            roots = data.tree;
+        } else if (data.tree.nodes && data.tree.roots) {
+            const resolve = (pid) => {
+                const node = data.tree.nodes[pid];
+                if (!node) return null;
+                const kids = (data.tree.children && data.tree.children[pid]) || [];
+                return { ...node, name: node.name || node.process_name, children: kids.map(resolve).filter(Boolean) };
+            };
+            roots = data.tree.roots.map(resolve).filter(Boolean);
+        }
+    }
+    if (!roots || roots.length === 0) {
+        container.replaceChildren(el('div', { className: 'empty-state', text: 'No process tree available. Ingest evidence containing process creation events to build the tree.' }));
         return;
     }
 
-    const renderTreeNodes = (nodes, depth = 0) => {
-        return nodes.map(n => {
-            const indent = depth * 24;
+    function renderTreeNodes(nodes, depth) {
+        const frag = document.createDocumentFragment();
+        for (const n of nodes) {
+            const indent = (depth || 0) * 24;
             const procIdent = n.guid || n.pid;
-            const childrenHtml = (n.children && n.children.length > 0) ? renderTreeNodes(n.children, depth + 1) : '';
-            return `
-                <div style="margin-left: ${indent}px; margin-bottom: 8px;">
-                    <div class="tree-node current clickable-id" onclick="inspectProcess('${procIdent}')" style="display: flex; justify-content: space-between; align-items: center; border-radius: 4px;">
-                        <div>
-                            <strong>${n.name || 'Unknown'}</strong> (PID: ${n.pid || '-'})
-                            ${n.command_line ? `<div style="font-size: 11px; color: var(--re-text-muted); margin-top: 2px;">${n.command_line}</div>` : ''}
-                        </div>
-                        <span class="mono" style="font-size: 10px; color: var(--re-text-muted);">${n.guid ? n.guid.slice(0, 8) + '...' : ''}</span>
-                    </div>
-                    ${childrenHtml}
-                </div>
-            `;
-        }).join('');
-    };
 
-    container.innerHTML = `<div class="prop-list">${renderTreeNodes(data.tree)}</div>`;
+            const nameEl = el('strong', { text: n.name || 'Unknown' });
+            const pidEl = document.createTextNode(` (PID: ${n.pid || '-'})`);
+            const nameRow = el('div', {}, [nameEl, pidEl]);
+
+            const nodeDiv = el('div', { className: 'tree-node current clickable-id',
+                style: 'display: flex; justify-content: space-between; align-items: center; border-radius: 4px;',
+                onclick: () => inspectProcess(procIdent) }, [nameRow]);
+
+            if (n.command_line) {
+                const cmdEl = el('div', { text: n.command_line, style: 'font-size: 11px; color: var(--re-text-muted); margin-top: 2px;' });
+                nameRow.appendChild(cmdEl);
+            }
+
+            if (n.guid) {
+                nodeDiv.appendChild(el('span', { className: 'mono', text: n.guid.slice(0, 8) + '...', style: 'font-size: 10px; color: var(--re-text-muted);' }));
+            }
+
+            const wrapper = el('div', { style: `margin-left: ${indent}px; margin-bottom: 8px;` }, [nodeDiv]);
+
+            if (n.children && n.children.length > 0) {
+                wrapper.appendChild(renderTreeNodes(n.children, (depth || 0) + 1));
+            }
+            frag.appendChild(wrapper);
+        }
+        return frag;
+    }
+
+    container.replaceChildren(el('div', { className: 'prop-list' }, [renderTreeNodes(roots, 0)]));
 }
 
 // ==========================================
@@ -737,52 +893,85 @@ async function initTree() {
 function initTimeline() {
     const container = document.getElementById('timeline-container');
     if (state.timeline.length === 0) {
-        container.innerHTML = `<div class="empty-state">No timeline data available.</div>`;
+        container.replaceChildren(el('div', { className: 'empty-state', text: 'No timeline events available for this case. Ingest evidence to build the timeline.' }));
         return;
     }
 
-    container.innerHTML = state.timeline.map(t => `
-        <div class="timeline-item">
-            <div class="timeline-time">${t.timestamp || 'Unknown Time'}</div>
-            <div class="timeline-content">
-                <strong>${t.description}</strong>
-                ${t.process_name ? `<span class="clickable-id mono mt-sm" onclick="inspectProcess('${t.process_guid || t.pid}')" style="display: inline-block;">Process: ${t.process_name} (PID: ${t.pid})</span>` : ''}
-            </div>
-        </div>
-    `).join('');
+    const items = state.timeline.map(t => {
+        const content = el('div', { className: 'timeline-content' }, [
+            el('strong', { text: t.description }),
+        ]);
+
+        if (t.process_name) {
+            const procLink = el('span', { className: 'clickable-id mono mt-sm', text: `Process: ${t.process_name} (PID: ${t.pid})`,
+                style: 'display: inline-block; cursor: pointer;',
+                onclick: () => inspectProcess(t.process_guid || t.pid) });
+            content.appendChild(procLink);
+        }
+
+        return el('div', { className: 'timeline-item' }, [
+            el('div', { className: 'timeline-time', text: t.timestamp || 'Unknown Time' }),
+            content,
+        ]);
+    });
+
+    container.replaceChildren(...items);
 }
 
 // ==========================================
-// 10. Reconstruction
+// 10. Reconstruction — with clickable evidence/finding IDs
 // ==========================================
 function initReconstruction() {
     const container = document.getElementById('reconstruction-container');
     if (!state.reconstruction || state.reconstruction.length === 0) {
-        container.innerHTML = `<div class="empty-state"><p>No reconstructed attack stages available for this case.</p></div>`;
+        container.replaceChildren(el('div', { className: 'empty-state' }, [
+            el('p', { text: 'No reconstructed attack stages available for this case. Ingest evidence and run analysis to reconstruct the attack.' }),
+        ]));
         return;
     }
 
-    container.innerHTML = '<div class="timeline-list">' + state.reconstruction.map(stage => {
-        let detailsHtml = '';
-        if (stage.evidence_ids && stage.evidence_ids.length > 0) {
-            detailsHtml += `<div class="mt-sm"><span class="prop-key">Evidence (${stage.evidence_ids.length}):</span> <span class="mono">${stage.evidence_ids[0]}</span></div>`;
-        }
-        if (stage.finding_ids && stage.finding_ids.length > 0) {
-            detailsHtml += `<div class="mt-sm"><span class="prop-key">Findings (${stage.finding_ids.length}):</span> <span class="mono">${stage.finding_ids[0]}</span></div>`;
+    const items = state.reconstruction.map(stage => {
+        const content = el('div', { className: 'timeline-content', style: 'border-left: 3px solid var(--re-critical);' });
+
+        content.appendChild(el('div', { text: stage.stage_type, style: 'font-size: 11px; text-transform: uppercase; color: var(--re-critical); font-weight: 600; margin-bottom: 4px;' }));
+        content.appendChild(el('strong', { text: stage.title, style: 'font-size: 14px;' }));
+
+        if (stage.description) {
+            content.appendChild(el('div', { className: 'mt-sm', text: stage.description, style: 'color: var(--re-text-secondary);' }));
         }
 
-        return `
-        <div class="timeline-item">
-            <div class="timeline-time">${stage.timestamp || 'Unknown Time'}</div>
-            <div class="timeline-content" style="border-left: 3px solid var(--re-critical);">
-                <div style="font-size: 11px; text-transform: uppercase; color: var(--re-critical); font-weight: 600; margin-bottom: 4px;">${stage.stage_type}</div>
-                <strong style="font-size: 14px;">${stage.title}</strong>
-                <div class="mt-sm" style="color: var(--re-text-secondary);">${stage.description || ''}</div>
-                ${detailsHtml}
-            </div>
-        </div>
-        `;
-    }).join('') + '</div>';
+        if (stage.evidence_ids && stage.evidence_ids.length > 0) {
+            const evRow = el('div', { className: 'mt-sm' }, [
+                el('span', { className: 'prop-key', text: `Evidence (${stage.evidence_ids.length}): ` }),
+            ]);
+            stage.evidence_ids.slice(0, 3).forEach(eid => {
+                evRow.appendChild(el('span', { className: 'mono clickable-id', text: String(eid).slice(0, 16),
+                    title: eid, style: 'margin-right: 6px; cursor: pointer; font-size: 11px;',
+                    onclick: () => inspectEvent(eid) }));
+            });
+            if (stage.evidence_ids.length > 3) {
+                evRow.appendChild(el('span', { className: 'mono', text: `+${stage.evidence_ids.length - 3} more`, style: 'font-size: 11px; color: var(--re-text-muted);' }));
+            }
+            content.appendChild(evRow);
+        }
+
+        if (stage.finding_ids && stage.finding_ids.length > 0) {
+            const fnRow = el('div', { className: 'mt-sm' }, [
+                el('span', { className: 'prop-key', text: `Findings (${stage.finding_ids.length}): ` }),
+            ]);
+            stage.finding_ids.forEach(fid => {
+                fnRow.appendChild(el('span', { className: 'mono', text: `FINDING:${fid}`, style: 'margin-right: 6px; font-size: 11px; color: var(--re-critical);' }));
+            });
+            content.appendChild(fnRow);
+        }
+
+        return el('div', { className: 'timeline-item' }, [
+            el('div', { className: 'timeline-time', text: stage.timestamp || 'Unknown Time' }),
+            content,
+        ]);
+    });
+
+    container.replaceChildren(el('div', { className: 'timeline-list' }, items));
 }
 
 // ==========================================
@@ -862,12 +1051,15 @@ async function initCollection() {
 
         if (res && !res._error) {
             fbIngest.className = 'alert alert-success mt-md';
-            fbIngest.innerHTML = `
-                <strong>Ingestion Complete</strong><br>
-                Events Ingested: ${res.events_ingested !== undefined ? res.events_ingested : '-'}<br>
-                Findings Generated: ${res.findings_generated !== undefined ? res.findings_generated : '-'}<br>
-                Incidents Correlated: ${res.incidents_correlated !== undefined ? res.incidents_correlated : '-'}
-            `;
+            fbIngest.replaceChildren(
+                el('strong', { text: 'Ingestion Complete' }),
+                el('br'),
+                document.createTextNode(`Events Ingested: ${res.events_ingested !== undefined ? res.events_ingested : '-'}`),
+                el('br'),
+                document.createTextNode(`Findings Generated: ${res.findings_generated !== undefined ? res.findings_generated : '-'}`),
+                el('br'),
+                document.createTextNode(`Incidents Correlated: ${res.incidents_correlated !== undefined ? res.incidents_correlated : '-'}`),
+            );
             fbIngest.classList.remove('hidden');
             await fetchCases();
             if (state.currentCaseId === cid) await loadCase(cid);
@@ -878,7 +1070,6 @@ async function initCollection() {
         }
     });
 
-    // Live collection
     const statusVal = document.getElementById('col-status-val');
     const nameVal = document.getElementById('col-name-val');
     const detailsVal = document.getElementById('col-details-val');
@@ -947,7 +1138,14 @@ function initIntegrity() {
 
         if (res && !res._error) {
             fbHash.className = 'alert alert-success mt-md';
-            fbHash.innerHTML = `<strong>Manifest Generated</strong><br>Saved to: <span class="mono">${res.manifest_path || manifest}</span><br>Files Hashed: ${res.files_count !== undefined ? res.files_count : '-'}`;
+            fbHash.replaceChildren(
+                el('strong', { text: 'Manifest Generated' }),
+                el('br'),
+                document.createTextNode('Saved to: '),
+                el('span', { className: 'mono', text: res.manifest_path || manifest }),
+                el('br'),
+                document.createTextNode(`Files Hashed: ${res.files_count !== undefined ? res.files_count : '-'}`),
+            );
             fbHash.classList.remove('hidden');
         } else {
             fbHash.className = 'alert alert-error mt-md';
@@ -986,11 +1184,14 @@ function initIntegrity() {
         if (res && !res._error) {
             const verified = res.verified || res.status === 'OK' || res.status === 'MATCHED';
             fbVerify.className = `alert ${verified ? 'alert-success' : 'alert-error'} mt-md`;
-            fbVerify.innerHTML = `
-                <strong>Integrity Verification: ${verified ? 'PASSED (MATCHED)' : 'FAILED / TAMPERED'}</strong><br>
-                Status: <span class="mono">${res.status || (verified ? 'MATCHED' : 'FAILED')}</span><br>
-                ${res.mismatches && res.mismatches.length > 0 ? `Mismatches: ${res.mismatches.join(', ')}` : 'All cryptographic hashes match manifest.'}
-            `;
+            fbVerify.replaceChildren(
+                el('strong', { text: `Integrity Verification: ${verified ? 'PASSED (MATCHED)' : 'FAILED / TAMPERED'}` }),
+                el('br'),
+                document.createTextNode('Status: '),
+                el('span', { className: 'mono', text: res.status || (verified ? 'MATCHED' : 'FAILED') }),
+                el('br'),
+                document.createTextNode(res.mismatches && res.mismatches.length > 0 ? `Mismatches: ${res.mismatches.join(', ')}` : 'All cryptographic hashes match manifest.'),
+            );
             fbVerify.classList.remove('hidden');
         } else {
             fbVerify.className = 'alert alert-error mt-md';
@@ -1016,20 +1217,24 @@ async function initCustody() {
         if (!state.currentCaseId) return;
         const res = await api(`/custody/${encodeURIComponent(state.currentCaseId)}`);
         if (!res || res._error || !res.entries || res.entries.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 32px;">No chain of custody entries recorded for this case.</td></tr>`;
+            tbody.replaceChildren(emptyRow(6, 'No chain of custody entries recorded for this case.'));
             return;
         }
 
-        tbody.innerHTML = res.entries.map(e => `
-            <tr>
-                <td class="mono" style="font-size: 11px;">${e.timestamp ? e.timestamp.slice(0, 19) : '-'}</td>
-                <td class="mono"><strong>${e.artifact || '-'}</strong></td>
-                <td><span class="badge ${e.action === 'COLLECTED' ? 'high' : 'low'}">${e.action}</span></td>
-                <td>${e.analyst || '-'}</td>
-                <td class="mono" style="font-size: 10px;">${e.sha256 ? e.sha256.slice(0, 16) + '...' : '-'}</td>
-                <td style="font-size: 12px;">${e.notes || '-'}</td>
-            </tr>
-        `).join('');
+        const rows = res.entries.map(e => {
+            const tr = el('tr');
+            const cells = [
+                el('td', { className: 'mono', text: e.timestamp ? e.timestamp.slice(0, 19) : '-', style: 'font-size: 11px;' }),
+                el('td', { className: 'mono' }, [el('strong', { text: e.artifact || '-' })]),
+                el('td', {}, [badge(e.action, e.action === 'COLLECTED' ? 'high' : 'low')]),
+                el('td', { text: e.analyst || '-' }),
+                el('td', { className: 'mono', text: e.sha256 ? e.sha256.slice(0, 16) + '...' : '-', style: 'font-size: 10px;' }),
+                el('td', { text: e.notes || '-', style: 'font-size: 12px;' }),
+            ];
+            cells.forEach(td => tr.appendChild(td));
+            return tr;
+        });
+        tbody.replaceChildren(...rows);
     };
 
     btnRecord.addEventListener('click', async () => {
@@ -1103,9 +1308,7 @@ async function initExport() {
         }
     };
 
-    chkUnlock.addEventListener('change', () => {
-        btnUnlock.disabled = !chkUnlock.checked;
-    });
+    chkUnlock.addEventListener('change', () => { btnUnlock.disabled = !chkUnlock.checked; });
 
     btnUnlock.addEventListener('click', async () => {
         btnUnlock.textContent = 'Releasing...';
@@ -1149,7 +1352,12 @@ async function initExport() {
 
         if (res && !res._error) {
             fbExport.className = 'alert alert-success mt-md';
-            fbExport.innerHTML = `<strong>Case Export Successful</strong><br>Bundle saved to: <span class="mono text-cyan">${res.export_path || res.path || 'exports/'}</span>`;
+            fbExport.replaceChildren(
+                el('strong', { text: 'Case Export Successful' }),
+                el('br'),
+                document.createTextNode('Bundle saved to: '),
+                el('span', { className: 'mono text-cyan', text: res.export_path || res.path || 'exports/' }),
+            );
             fbExport.classList.remove('hidden');
             await refreshLock();
         } else {
@@ -1180,7 +1388,11 @@ function initDatabase() {
 
         if (res && !res._error) {
             resCheck.className = 'alert alert-success mt-md';
-            resCheck.innerHTML = `<strong>Integrity Check: ${res.status || 'OK'}</strong><br>${res.details || 'PRAGMA integrity_check: ok'}`;
+            resCheck.replaceChildren(
+                el('strong', { text: `Integrity Check: ${res.status || 'OK'}` }),
+                el('br'),
+                document.createTextNode(res.details || 'PRAGMA integrity_check: ok'),
+            );
             resCheck.classList.remove('hidden');
         } else {
             resCheck.className = 'alert alert-error mt-md';
@@ -1209,7 +1421,12 @@ function initDatabase() {
 
         if (res && !res._error) {
             resBackup.className = 'alert alert-success mt-md';
-            resBackup.innerHTML = `<strong>Backup Created</strong><br>Saved to: <span class="mono">${res.backup_path || dest}</span>`;
+            resBackup.replaceChildren(
+                el('strong', { text: 'Backup Created' }),
+                el('br'),
+                document.createTextNode('Saved to: '),
+                el('span', { className: 'mono', text: res.backup_path || dest }),
+            );
             resBackup.classList.remove('hidden');
         } else {
             resBackup.className = 'alert alert-error mt-md';
@@ -1223,9 +1440,7 @@ function initDatabase() {
     const btnRestore = document.getElementById('btn-db-restore');
     const resRestore = document.getElementById('db-restore-result');
 
-    chkRestore.addEventListener('change', () => {
-        btnRestore.disabled = !chkRestore.checked;
-    });
+    chkRestore.addEventListener('change', () => { btnRestore.disabled = !chkRestore.checked; });
 
     btnRestore.addEventListener('click', async () => {
         const src = rstPathInp.value.trim();
@@ -1315,52 +1530,32 @@ function initStatic() {
             const indics = [];
             const apis = a.suspicious_apis || {};
             Object.keys(apis).sort().forEach(category => {
-                (apis[category] || []).forEach(api => indics.push({ text: category + ': ' + api, severity: 'critical' }));
+                (apis[category] || []).forEach(apiName => indics.push({ text: category + ': ' + apiName, severity: 'critical' }));
             });
             const keywords = (a.extracted_iocs && a.extracted_iocs.ransom_keywords) || [];
             keywords.forEach(kw => indics.push({ text: 'ransom keyword: ' + kw, severity: 'high' }));
             countEl.textContent = String(indics.length);
 
-            const badge = (text, severity) => {
-                const span = document.createElement('span');
-                span.className = 'badge ' + severity;
-                span.textContent = text;
-                return span;
-            };
             indicsEl.replaceChildren(...(indics.length > 0
                 ? indics.map(i => badge(i.text, i.severity))
                 : [badge('None detected', 'low')]));
 
-            const cell = (text, opts = {}) => {
-                const td = document.createElement('td');
-                td.className = 'mono';
-                if (opts.colSpan) {
-                    td.colSpan = opts.colSpan;
-                    td.style.textAlign = 'center';
-                }
-                if (opts.strong) {
-                    const strong = document.createElement('strong');
-                    strong.textContent = text;
-                    td.appendChild(strong);
-                } else {
-                    td.textContent = text;
-                }
-                return td;
-            };
             const secs = a.sections || [];
             const rows = secs.map(sec => {
-                const tr = document.createElement('tr');
-                tr.append(
-                    cell(sec.name || '-', { strong: true }),
-                    cell(sec.virtual_size !== undefined ? String(sec.virtual_size) : '-'),
-                    cell(sec.raw_size !== undefined ? String(sec.raw_size) : '-'),
-                    cell(typeof sec.entropy === 'number' ? sec.entropy.toFixed(3) : '-'),
-                );
+                const tr = el('tr');
+                [
+                    el('td', { className: 'mono' }, [el('strong', { text: sec.name || '-' })]),
+                    el('td', { className: 'mono', text: sec.virtual_size !== undefined ? String(sec.virtual_size) : '-' }),
+                    el('td', { className: 'mono', text: sec.raw_size !== undefined ? String(sec.raw_size) : '-' }),
+                    el('td', { className: 'mono', text: typeof sec.entropy === 'number' ? sec.entropy.toFixed(3) : '-' }),
+                ].forEach(td => tr.appendChild(td));
                 return tr;
             });
             if (rows.length === 0) {
-                const tr = document.createElement('tr');
-                tr.appendChild(cell('No PE sections found (not a PE binary).', { colSpan: 4 }));
+                const tr = el('tr');
+                const td = el('td', { className: 'mono', text: 'No PE sections found (not a PE binary).', style: 'text-align: center;' });
+                td.colSpan = 4;
+                tr.appendChild(td);
                 rows.push(tr);
             }
             secTbody.replaceChildren(...rows);
@@ -1376,20 +1571,6 @@ function initStatic() {
 // ==========================================
 // 17b. Script Analysis
 // ==========================================
-// All analyzer output (file paths, excerpts, decoded previews, IOCs, rule
-// reasons, MITRE strings, error messages) is attacker-controlled and is only
-// ever placed into the DOM via textContent / safe element construction.
-function scriptEl(tag, opts = {}, children = []) {
-    const node = document.createElement(tag);
-    if (opts.className) node.className = opts.className;
-    if (opts.text != null) node.textContent = String(opts.text);
-    if (opts.title != null) node.title = String(opts.title);
-    if (opts.attrs) for (const [k, v] of Object.entries(opts.attrs)) node.setAttribute(k, String(v));
-    if (opts.style) node.style.cssText = opts.style;
-    for (const child of children) if (child) node.appendChild(child);
-    return node;
-}
-
 const SCRIPT_SEVERITY_META = {
     NONE: { label: 'No indicators found', badge: 'low' },
     LOW: { label: 'Low', badge: 'low' },
@@ -1424,34 +1605,16 @@ function scriptPlainSummary(analysis) {
     return `This script ${joined}.`;
 }
 
-function scriptKv(key, value, opts = {}) {
-    return scriptEl('div', { className: 'prop-item' }, [
-        scriptEl('span', { className: 'prop-key', text: key }),
-        scriptEl('span', { className: 'prop-val' + (opts.mono ? ' mono' : ''), text: value == null ? '-' : value }),
-    ]);
-}
-
-function scriptSection(title, startOpen, bodyNodes) {
-    const details = scriptEl('details', { style: 'margin-top: 16px;' });
-    if (startOpen) details.open = true;
-    const summary = scriptEl('summary', { style: 'cursor: pointer; font-weight: 600; color: var(--re-text-secondary);' });
-    summary.textContent = title;
-    details.appendChild(summary);
-    const wrap = scriptEl('div', { style: 'margin-top: 12px;' }, bodyNodes);
-    details.appendChild(wrap);
-    return details;
-}
-
 function renderScriptResult(container, analysis, findingIds) {
     container.replaceChildren();
     const status = analysis.analysis_status;
 
     if (status !== 'complete') {
         const warn = (analysis.warnings && analysis.warnings[0]) || 'This content type is not supported by script analysis.';
-        container.appendChild(scriptEl('div', { className: 'empty-state' }, [
-            scriptEl('h3', { text: 'Not analyzed' }),
-            scriptEl('p', { text: warn }),
-            scriptEl('p', { style: 'color: var(--re-text-muted); font-size: 12px;',
+        container.appendChild(el('div', { className: 'empty-state' }, [
+            el('h3', { text: 'Not analyzed' }),
+            el('p', { text: warn }),
+            el('p', { style: 'color: var(--re-text-muted); font-size: 12px;',
                 text: 'This is never reported as safe. For program files use Static Analysis.' }),
         ]));
         return;
@@ -1460,90 +1623,83 @@ function renderScriptResult(container, analysis, findingIds) {
     const sev = String(analysis.severity || 'NONE').toUpperCase();
     const meta = SCRIPT_SEVERITY_META[sev] || SCRIPT_SEVERITY_META.NONE;
 
-    // Verdict card
-    const verdict = scriptEl('div', { className: 'panel', style: 'padding: 16px; margin-bottom: 16px;' });
-    const verdictHead = scriptEl('div', { style: 'display: flex; align-items: center; gap: 12px; flex-wrap: wrap;' }, [
-        scriptEl('span', { className: 'badge ' + meta.badge, text: meta.label, style: 'font-size: 13px;' }),
-        scriptEl('span', { className: 'mono', text: `Score ${analysis.score}/100`, style: 'color: var(--re-text-secondary);' }),
-        scriptEl('span', { className: 'mono', text: `Confidence ${(Number(analysis.confidence) * 100).toFixed(0)}%`, style: 'color: var(--re-text-secondary);' }),
+    const verdict = el('div', { className: 'panel', style: 'padding: 16px; margin-bottom: 16px;' });
+    const verdictHead = el('div', { style: 'display: flex; align-items: center; gap: 12px; flex-wrap: wrap;' }, [
+        el('span', { className: 'badge ' + meta.badge, text: meta.label, style: 'font-size: 13px;' }),
+        el('span', { className: 'mono', text: `Score ${analysis.score}/100`, style: 'color: var(--re-text-secondary);' }),
+        el('span', { className: 'mono', text: `Confidence ${(Number(analysis.confidence) * 100).toFixed(0)}%`, style: 'color: var(--re-text-secondary);' }),
     ]);
     verdict.appendChild(verdictHead);
-    verdict.appendChild(scriptEl('p', { style: 'margin-top: 10px;', text: scriptPlainSummary(analysis) }));
+    verdict.appendChild(el('p', { style: 'margin-top: 10px;', text: scriptPlainSummary(analysis) }));
     const advice = (analysis.indicators && analysis.indicators.length)
         ? 'Do not run this file. Treat it as suspicious and investigate.'
         : 'No known malicious patterns were found. Static analysis cannot guarantee the file is safe.';
-    verdict.appendChild(scriptEl('p', { style: 'margin-top: 4px; color: var(--re-text-muted); font-size: 12px;', text: advice }));
+    verdict.appendChild(el('p', { style: 'margin-top: 4px; color: var(--re-text-muted); font-size: 12px;', text: advice }));
     container.appendChild(verdict);
 
-    // Key facts
-    container.appendChild(scriptEl('div', { className: 'prop-list mb-lg' }, [
-        scriptKv('Language', analysis.language),
-        scriptKv('File size', `${analysis.file_size} bytes`, { mono: true }),
-        scriptKv('SHA-256', analysis.sha256, { mono: true }),
-        scriptKv('Decoded layers', String((analysis.decoded_layers || []).length), { mono: true }),
-        scriptKv('MITRE techniques', (analysis.techniques || []).join(', ') || 'None', { mono: true }),
+    container.appendChild(el('div', { className: 'prop-list mb-lg' }, [
+        kv('Language', analysis.language),
+        kv('File size', `${analysis.file_size} bytes`, { mono: true }),
+        kv('SHA-256', analysis.sha256, { mono: true }),
+        kv('Decoded layers', String((analysis.decoded_layers || []).length), { mono: true }),
+        kv('MITRE techniques', (analysis.techniques || []).join(', ') || 'None', { mono: true }),
     ]));
 
-    // Traceability
     if (Array.isArray(findingIds)) {
         const msg = findingIds.length
             ? `Added to case: ${findingIds.length} finding(s) created (IDs ${findingIds.join(', ')}). See the Findings and Evidence views.`
             : 'Already recorded against this evidence; no new findings were added.';
-        container.appendChild(scriptEl('div', { className: 'alert alert-success mb-lg', text: msg }));
+        container.appendChild(el('div', { className: 'alert alert-success mb-lg', text: msg }));
     }
 
-    // Indicators
     const indicators = analysis.indicators || [];
     const highOpen = indicators.some(i => i.severity === 'high' || i.severity === 'critical');
-    const indRows = indicators.map(ind => scriptEl('tr', {}, [
-        scriptEl('td', { className: 'mono', text: ind.rule_id }),
-        scriptEl('td', { text: ind.title }),
-        scriptEl('td', {}, [scriptEl('span', { className: 'badge ' + (SCRIPT_SEVERITY_META[String(ind.severity).toUpperCase()] || { badge: 'low' }).badge, text: ind.severity })]),
-        scriptEl('td', { className: 'mono', text: ind.technique }),
-        scriptEl('td', { className: 'mono', text: `${ind.layer_index}/${ind.line}` }),
-        scriptEl('td', { className: 'mono', text: ind.excerpt, title: ind.excerpt }),
+    const indRows = indicators.map(ind => el('tr', {}, [
+        el('td', { className: 'mono', text: ind.rule_id }),
+        el('td', { text: ind.title }),
+        el('td', {}, [el('span', { className: 'badge ' + (SCRIPT_SEVERITY_META[String(ind.severity).toUpperCase()] || { badge: 'low' }).badge, text: ind.severity })]),
+        el('td', { className: 'mono', text: ind.technique }),
+        el('td', { className: 'mono', text: `${ind.layer_index}/${ind.line}` }),
+        el('td', { className: 'mono', text: ind.excerpt, title: ind.excerpt }),
     ]));
     const indBody = [];
     if (indRows.length) {
-        const table = scriptEl('table', { className: 'data-table' }, [
-            scriptEl('thead', {}, [scriptEl('tr', {}, [
-                scriptEl('th', { text: 'Rule' }), scriptEl('th', { text: 'Title' }),
-                scriptEl('th', { text: 'Severity' }), scriptEl('th', { text: 'MITRE' }),
-                scriptEl('th', { text: 'Layer/Line' }), scriptEl('th', { text: 'Excerpt' }),
+        indBody.push(el('table', { className: 'data-table' }, [
+            el('thead', {}, [el('tr', {}, [
+                el('th', { text: 'Rule' }), el('th', { text: 'Title' }),
+                el('th', { text: 'Severity' }), el('th', { text: 'MITRE' }),
+                el('th', { text: 'Layer/Line' }), el('th', { text: 'Excerpt' }),
             ])]),
-            scriptEl('tbody', {}, indRows),
-        ]);
-        indBody.push(table);
+            el('tbody', {}, indRows),
+        ]));
     } else {
-        indBody.push(scriptEl('div', { className: 'empty-state', text: 'No indicators matched.' }));
+        indBody.push(el('div', { className: 'empty-state', text: 'No indicators matched.' }));
     }
-    container.appendChild(scriptSection(`Indicators (${indicators.length})`, highOpen || indicators.length > 0, indBody));
+    container.appendChild(section(`Indicators (${indicators.length})`, highOpen || indicators.length > 0, indBody));
 
-    // Decoded layers
     const layers = analysis.decoded_layers || [];
     if (layers.length) {
         const layerNodes = layers.map(layer => {
-            const head = scriptEl('div', { className: 'mono', style: 'color: var(--re-text-secondary); font-size: 12px;',
+            const head = el('div', { className: 'mono', style: 'color: var(--re-text-secondary); font-size: 12px;',
                 text: `#${layer.index} depth ${layer.depth} from #${layer.parent_index} · ${layer.method} · ${layer.size} bytes · ${layer.is_text ? layer.encoding : 'binary'}` });
-            const sha = scriptEl('div', { className: 'mono', style: 'color: var(--re-text-muted); font-size: 11px; word-break: break-all;', text: `sha256 ${layer.sha256}` });
-            const pre = scriptEl('pre', { style: 'white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; background: var(--re-surface-hover); padding: 10px; border-radius: 6px; margin-top: 6px;' });
+            const sha = el('div', { className: 'mono', style: 'color: var(--re-text-muted); font-size: 11px; word-break: break-all;', text: `sha256 ${layer.sha256}` });
+            const pre = el('pre', { style: 'white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; background: var(--re-surface-hover); padding: 10px; border-radius: 6px; margin-top: 6px;' });
             pre.textContent = layer.is_text ? (layer.preview || '') : '(binary payload)';
-            return scriptEl('div', { style: 'margin-bottom: 14px;' }, [head, sha, pre]);
+            return el('div', { style: 'margin-bottom: 14px;' }, [head, sha, pre]);
         });
-        container.appendChild(scriptSection(`Decoded layers (${layers.length})`, false, layerNodes));
+        container.appendChild(section(`Decoded layers (${layers.length})`, false, layerNodes));
     }
 
-    // IOCs
     const iocs = analysis.iocs || {};
     const iocNodes = [];
     for (const [name, values] of Object.entries(iocs)) {
         if (!values || !values.length) continue;
-        iocNodes.push(scriptEl('div', { style: 'margin-bottom: 8px;' }, [
-            scriptEl('div', { className: 'prop-key', text: name.replace(/_/g, ' ') }),
-            scriptEl('div', { className: 'mono', style: 'word-break: break-all; font-size: 12px;', text: values.join('\n') }),
+        iocNodes.push(el('div', { style: 'margin-bottom: 8px;' }, [
+            el('div', { className: 'prop-key', text: name.replace(/_/g, ' ') }),
+            el('div', { className: 'mono', style: 'word-break: break-all; font-size: 12px;', text: values.join('\n') }),
         ]));
     }
-    if (iocNodes.length) container.appendChild(scriptSection('Indicators of compromise', false, iocNodes));
+    if (iocNodes.length) container.appendChild(section('Indicators of compromise', false, iocNodes));
 }
 
 function initScript() {
@@ -1561,11 +1717,10 @@ function initScript() {
 
     let mode = 'file';
 
-    // Populate the case selector from already-loaded cases.
-    caseSel.replaceChildren(scriptEl('option', { text: 'No case (analysis only)', attrs: { value: '' } }));
+    caseSel.replaceChildren(el('option', { text: 'No case (analysis only)', attrs: { value: '' } }));
     for (const c of (state.cases || [])) {
         const label = c.case_name && c.case_name !== c.case_id ? `${c.case_id} — ${c.case_name}` : c.case_id;
-        caseSel.appendChild(scriptEl('option', { text: label, attrs: { value: c.case_id } }));
+        caseSel.appendChild(el('option', { text: label, attrs: { value: c.case_id } }));
     }
     if (state.currentCaseId) caseSel.value = state.currentCaseId;
 
@@ -1581,7 +1736,7 @@ function initScript() {
 
     function showError(message) {
         fb.className = 'alert alert-error mt-md';
-        fb.textContent = message;              // textContent: server/analyzer messages are untrusted
+        fb.textContent = message;
         fb.classList.remove('hidden');
     }
 
@@ -1598,7 +1753,7 @@ function initScript() {
         } else {
             const text = textInp.value;
             if (!text.trim()) { showError('Paste some script text to analyze.'); return; }
-            body.text = text;   // paste mode never sends case_id
+            body.text = text;
         }
 
         btnRun.textContent = 'Analyzing...';
@@ -1613,7 +1768,7 @@ function initScript() {
 
         if (!res || res._error || !res.analysis) {
             showError(res ? res.message : 'Script analysis failed.');
-            results.replaceChildren(scriptEl('div', { className: 'empty-state', text: 'Analysis could not be completed.' }));
+            results.replaceChildren(el('div', { className: 'empty-state', text: 'Analysis could not be completed.' }));
             return;
         }
         renderScriptResult(results, res.analysis, res.finding_ids);
@@ -1623,12 +1778,6 @@ function initScript() {
 // ==========================================
 // 18. Phishing Analysis
 // ==========================================
-// Every phishing field the view shows (subject, sender, indicator text,
-// matched evidence, extracted URLs/domains, attachment filenames, MITRE
-// strings, recommendations) is derived from an attacker-controlled message and
-// is only ever placed into the DOM via textContent / safe element construction
-// (the shared scriptEl/scriptKv/scriptSection helpers) -- never as an HTML
-// string. URLs are rendered as inert text, so no scheme is ever executable.
 const PHISH_BADGE = {
     benign: 'low', low: 'low', medium: 'medium',
     suspicious: 'high', high: 'high', critical: 'critical',
@@ -1661,70 +1810,65 @@ function renderPhishingResult(container, a) {
     const critical = sev === 'HIGH' || sev === 'CRITICAL';
     const valCls = 'stat-val ' + (critical ? 'text-critical' : 'text-warning');
 
-    // Overview stat cards (same layout as before)
-    container.appendChild(scriptEl('div', { className: 'grid-overview' }, [
-        scriptEl('div', { className: 'stat-card' }, [
-            scriptEl('span', { className: 'stat-label', text: 'Risk Score' }),
-            scriptEl('span', { className: valCls, text: String(score) }),
+    container.appendChild(el('div', { className: 'grid-overview' }, [
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Risk Score' }),
+            el('span', { className: valCls, text: String(score) }),
         ]),
-        scriptEl('div', { className: 'stat-card' }, [
-            scriptEl('span', { className: 'stat-label', text: 'Threat Level' }),
-            scriptEl('span', { className: valCls, text: sev }),
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Threat Level' }),
+            el('span', { className: valCls, text: sev }),
         ]),
-        scriptEl('div', { className: 'stat-card' }, [
-            scriptEl('span', { className: 'stat-label', text: 'Indicators' }),
-            scriptEl('span', { className: 'stat-val mono', text: String(indicators.length) }),
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Indicators' }),
+            el('span', { className: 'stat-val mono', text: String(indicators.length) }),
         ]),
     ]));
 
-    // Key facts
-    container.appendChild(scriptEl('div', { className: 'prop-list mb-lg' }, [
-        scriptKv('Confidence', a.confidence || '-'),
-        scriptKv('MITRE techniques', techniques.join(', ') || 'None', { mono: true }),
+    container.appendChild(el('div', { className: 'prop-list mb-lg' }, [
+        kv('Confidence', a.confidence || '-'),
+        kv('MITRE techniques', techniques.join(', ') || 'None', { mono: true }),
     ]));
 
-    // Detected indicators
     const indRows = indicators.map(ind => {
-        // The API returns indicator objects; tolerate a plain string too.
         if (ind && typeof ind === 'object') {
-            return scriptEl('tr', {}, [
-                scriptEl('td', { className: 'mono', text: ind.rule_id }),
-                scriptEl('td', {}, [scriptEl('span', { className: phishBadge(ind.severity), text: ind.severity })]),
-                scriptEl('td', { text: ind.description }),
-                scriptEl('td', { className: 'mono', text: ind.matched_evidence, title: ind.matched_evidence }),
+            return el('tr', {}, [
+                el('td', { className: 'mono', text: ind.rule_id }),
+                el('td', {}, [el('span', { className: phishBadge(ind.severity), text: ind.severity })]),
+                el('td', { text: ind.description }),
+                el('td', { className: 'mono', text: ind.matched_evidence, title: ind.matched_evidence }),
             ]);
         }
-        return scriptEl('tr', {}, [
-            scriptEl('td', { className: 'mono', text: '-' }),
-            scriptEl('td', {}, [scriptEl('span', { className: phishBadge(sev), text: sev.toLowerCase() })]),
-            scriptEl('td', { text: String(ind) }),
-            scriptEl('td', { className: 'mono', text: '' }),
+        return el('tr', {}, [
+            el('td', { className: 'mono', text: '-' }),
+            el('td', {}, [el('span', { className: phishBadge(sev), text: sev.toLowerCase() })]),
+            el('td', { text: String(ind) }),
+            el('td', { className: 'mono', text: '' }),
         ]);
     });
     const indBody = [];
     if (indRows.length) {
-        indBody.push(scriptEl('table', { className: 'data-table' }, [
-            scriptEl('thead', {}, [scriptEl('tr', {}, [
-                scriptEl('th', { text: 'Rule' }), scriptEl('th', { text: 'Severity' }),
-                scriptEl('th', { text: 'Description' }), scriptEl('th', { text: 'Matched evidence' }),
+        indBody.push(el('table', { className: 'data-table' }, [
+            el('thead', {}, [el('tr', {}, [
+                el('th', { text: 'Rule' }), el('th', { text: 'Severity' }),
+                el('th', { text: 'Description' }), el('th', { text: 'Matched evidence' }),
             ])]),
-            scriptEl('tbody', {}, indRows),
+            el('tbody', {}, indRows),
         ]));
     } else {
-        indBody.push(scriptEl('div', { className: 'empty-state', text: 'No high-risk indicators detected.' }));
+        indBody.push(el('div', { className: 'empty-state', text: 'No high-risk indicators detected.' }));
     }
-    container.appendChild(scriptSection(`Detected indicators (${indicators.length})`, indicators.length > 0, indBody));
+    container.appendChild(section(`Detected indicators (${indicators.length})`, indicators.length > 0, indBody));
 
-    // Extracted URLs / domains -- inert text only, never clickable or markup.
     if (urls.length) {
         const urlNodes = urls.map(u => {
             const raw = (u && typeof u === 'object') ? (u.url || u.hostname || '') : u;
             const flags = (u && typeof u === 'object') ? phishUrlFlags(u) : [];
-            const line = scriptEl('div', { style: 'margin-bottom: 6px; word-break: break-all;' }, [
-                scriptEl('span', { className: 'mono', style: 'font-size: 11px;', text: raw }),
+            const line = el('div', { style: 'margin-bottom: 6px; word-break: break-all;' }, [
+                el('span', { className: 'mono', style: 'font-size: 11px;', text: raw }),
             ]);
             if (flags.length) {
-                line.appendChild(scriptEl('span', {
+                line.appendChild(el('span', {
                     className: 'mono',
                     style: 'color: var(--re-text-muted); font-size: 11px;',
                     text: `  [${flags.join(', ')}]`,
@@ -1732,31 +1876,29 @@ function renderPhishingResult(container, a) {
             }
             return line;
         });
-        container.appendChild(scriptSection(`Extracted URLs / domains (${urls.length})`, false, urlNodes));
+        container.appendChild(section(`Extracted URLs / domains (${urls.length})`, false, urlNodes));
     }
 
-    // Attachment findings
     if (attachments.length) {
-        const attRows = attachments.map(att => scriptEl('tr', {}, [
-            scriptEl('td', { className: 'mono', text: att.filename, title: att.filename }),
-            scriptEl('td', {}, [scriptEl('span', { className: phishBadge(att.risk), text: att.risk })]),
-            scriptEl('td', { text: att.reason }),
+        const attRows = attachments.map(att => el('tr', {}, [
+            el('td', { className: 'mono', text: att.filename, title: att.filename }),
+            el('td', {}, [el('span', { className: phishBadge(att.risk), text: att.risk })]),
+            el('td', { text: att.reason }),
         ]));
-        container.appendChild(scriptSection(`Attachments (${attachments.length})`, false, [
-            scriptEl('table', { className: 'data-table' }, [
-                scriptEl('thead', {}, [scriptEl('tr', {}, [
-                    scriptEl('th', { text: 'Filename' }), scriptEl('th', { text: 'Risk' }), scriptEl('th', { text: 'Reason' }),
+        container.appendChild(section(`Attachments (${attachments.length})`, false, [
+            el('table', { className: 'data-table' }, [
+                el('thead', {}, [el('tr', {}, [
+                    el('th', { text: 'Filename' }), el('th', { text: 'Risk' }), el('th', { text: 'Reason' }),
                 ])]),
-                scriptEl('tbody', {}, attRows),
+                el('tbody', {}, attRows),
             ]),
         ]));
     }
 
-    // Recommendations
     if (recommendations.length) {
-        const list = scriptEl('ul', { style: 'margin: 0; padding-left: 18px;' },
-            recommendations.map(r => scriptEl('li', { text: r })));
-        container.appendChild(scriptSection(`Recommendations (${recommendations.length})`, false, [list]));
+        const list = el('ul', { style: 'margin: 0; padding-left: 18px;' },
+            recommendations.map(r => el('li', { text: r })));
+        container.appendChild(section(`Recommendations (${recommendations.length})`, false, [list]));
     }
 }
 
@@ -1805,36 +1947,54 @@ function initPhishing() {
 }
 
 // ==========================================
-// Drawers (Inspectors)
+// Drawers (Inspectors) — Safe DOM
 // ==========================================
 async function inspectIncident(incId) {
     const inc = state.incidents.find(i => i.incident_id === incId);
     if (!inc) return;
 
     dom.drawerTitle.textContent = `Incident: ${incId}`;
-    let html = `
-        <div class="prop-list">
-            <div class="prop-item"><span class="prop-key">Severity</span><span class="badge ${inc.severity.toLowerCase()}" style="align-self: flex-start;">${inc.severity}</span></div>
-            <div class="prop-item"><span class="prop-key">Timeframe</span><span class="prop-val">${inc.start_time} - ${inc.end_time}</span></div>
-            <div class="prop-item"><span class="prop-key">Duration</span><span class="prop-val">${inc.duration} seconds</span></div>
-        </div>
 
-        <h4 class="mt-xl" style="margin-bottom: 12px; font-size: 11px; text-transform: uppercase; color: var(--re-text-muted);">Associated Findings (${(inc.finding_ids || []).length})</h4>
-        <div class="prop-list">
-            ${(inc.finding_ids || []).map(f => `<div class="prop-val mono" style="color: var(--re-critical); border-left: 3px solid var(--re-critical);">FINDING:${f}</div>`).join('')}
-        </div>
+    const content = el('div', {}, [
+        el('div', { className: 'prop-list' }, [
+            el('div', { className: 'prop-item' }, [
+                el('span', { className: 'prop-key', text: 'Severity' }),
+                badge(inc.severity, (inc.severity || '').toLowerCase()),
+            ]),
+            kv('Timeframe', `${inc.start_time || '-'} - ${inc.end_time || '-'}`),
+            kv('Duration', `${inc.duration || '-'} seconds`),
+        ]),
+    ]);
 
-        <h4 class="mt-xl" style="margin-bottom: 12px; font-size: 11px; text-transform: uppercase; color: var(--re-text-muted);">Processes Involved</h4>
-        <div class="prop-list">
-            ${(inc.processes || []).map(p => `
-                <div class="prop-val mono clickable-id" onclick="inspectProcess('${p.process_guid || p.pid}')">
-                    ${p.process_name} (PID: ${p.pid})<br>
-                    <span style="color: var(--re-text-muted); font-size: 11px;">GUID: ${p.process_guid}</span>
-                </div>
-            `).join('')}
-        </div>
-    `;
-    dom.drawerContent.innerHTML = html;
+    // Associated Findings
+    const findingIds = inc.finding_ids || [];
+    content.appendChild(el('h4', { className: 'mt-xl', text: `Associated Findings (${findingIds.length})`,
+        style: 'margin-bottom: 12px; font-size: 11px; text-transform: uppercase; color: var(--re-text-muted);' }));
+    const findingList = el('div', { className: 'prop-list' });
+    findingIds.forEach(f => {
+        findingList.appendChild(el('div', { className: 'prop-val mono', text: `FINDING:${f}`,
+            style: 'color: var(--re-critical); border-left: 3px solid var(--re-critical);' }));
+    });
+    if (findingIds.length === 0) findingList.appendChild(el('div', { className: 'prop-val', text: 'No findings associated.', style: 'color: var(--re-text-muted);' }));
+    content.appendChild(findingList);
+
+    // Processes Involved
+    const processes = inc.processes || [];
+    content.appendChild(el('h4', { className: 'mt-xl', text: 'Processes Involved',
+        style: 'margin-bottom: 12px; font-size: 11px; text-transform: uppercase; color: var(--re-text-muted);' }));
+    const procList = el('div', { className: 'prop-list' });
+    processes.forEach(p => {
+        const procEl = el('div', { className: 'prop-val mono clickable-id',
+            onclick: () => inspectProcess(p.process_guid || p.pid) });
+        procEl.appendChild(document.createTextNode(`${p.process_name || '-'} (PID: ${p.pid || '-'})`));
+        procEl.appendChild(el('br'));
+        procEl.appendChild(el('span', { text: `GUID: ${p.process_guid || '-'}`, style: 'color: var(--re-text-muted); font-size: 11px;' }));
+        procList.appendChild(procEl);
+    });
+    if (processes.length === 0) procList.appendChild(el('div', { className: 'prop-val', text: 'No process context available.', style: 'color: var(--re-text-muted);' }));
+    content.appendChild(procList);
+
+    dom.drawerContent.replaceChildren(content);
     dom.drawer.classList.add('open');
 }
 
@@ -1845,13 +2005,13 @@ window.inspectEventEncoded = function(encEventId) {
 
 async function inspectEvent(eventId) {
     if (!state.currentCaseId || !eventId) return;
-    dom.drawerTitle.textContent = `Loading Evidence...`;
-    dom.drawerContent.innerHTML = '<div class="empty-state">Loading...</div>';
+    dom.drawerTitle.textContent = 'Loading Evidence...';
+    dom.drawerContent.replaceChildren(el('div', { className: 'empty-state', text: 'Loading...' }));
     dom.drawer.classList.add('open');
 
     const data = await api(`/inspect/${encodeURIComponent(state.currentCaseId)}?event_id=${encodeURIComponent(eventId)}`);
     if (!data || data._error || !data.event) {
-        dom.drawerContent.innerHTML = `<div class="empty-state">Failed to load evidence event ${eventId}.</div>`;
+        dom.drawerContent.replaceChildren(el('div', { className: 'empty-state', text: `Failed to load evidence event.` }));
         return;
     }
 
@@ -1862,71 +2022,107 @@ async function inspectEvent(eventId) {
         process_guid: (ev.process_guid && ev.process_guid !== 'null' && ev.process_guid !== 'undefined') ? ev.process_guid : null,
     };
 
-    dom.drawerTitle.textContent = `Evidence Inspection`;
-
+    dom.drawerTitle.textContent = 'Evidence Inspection';
     const procIdent = state.lastEventMeta.process_guid || state.lastEventMeta.pid;
 
-    let processSectionHtml = '';
+    // Tabs
+    const tabProps = el('div', { className: 'tab active', text: 'Properties' });
+    const tabTrace = el('div', { className: 'tab', text: 'Evidence Trace' });
+    const tabRaw = el('div', { className: 'tab', text: 'Raw Data' });
+    const tabs = el('div', { className: 'tabs' }, [tabProps, tabTrace, tabRaw]);
+
+    // Properties panel
+    const propsPane = el('div', { className: 'tab-content active prop-list' });
+    propsPane.append(
+        kv('Event ID', ev.event_id, { mono: true }),
+        kv('Timestamp', ev.timestamp || '-'),
+        kv('Source', ev.source),
+        kv('Event Type', ev.event_type || '-'),
+    );
+
     if (procIdent) {
-        processSectionHtml = `
-            <div class="prop-item"><span class="prop-key">Process Name</span><span class="prop-val mono" style="color: var(--re-cyan-bright);">${ev.process_name || ev.image_path || '-'}</span></div>
-            <div class="prop-item"><span class="prop-key">PID</span><span class="prop-val mono">${ev.pid || '-'}</span></div>
-            <div class="prop-item"><span class="prop-key">Process GUID</span><span class="prop-val mono" style="font-size: 11px;">${ev.process_guid || '-'}</span></div>
-            <div class="mt-sm mb-md">
-                <button class="btn btn-primary btn-open-process-profile" onclick="inspectProcess('${procIdent}')" style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 8px 16px; cursor: pointer;">
-                    OPEN PROCESS PROFILE &rarr;
-                </button>
-            </div>`;
+        propsPane.append(
+            kv('Process Name', ev.process_name || ev.image_path || '-', { mono: true }),
+            kv('PID', ev.pid || '-', { mono: true }),
+            kv('Process GUID', ev.process_guid || '-', { mono: true }),
+            el('div', { className: 'mt-sm mb-md' }, [
+                el('button', { className: 'btn btn-primary', text: 'OPEN PROCESS PROFILE →',
+                    style: 'display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 8px 16px; cursor: pointer;',
+                    onclick: () => inspectProcess(procIdent) }),
+            ]),
+        );
     } else {
-        processSectionHtml = `
-            <div class="prop-item">
-                <span class="prop-key">Process Context</span>
-                <span class="prop-val text-muted" style="color: var(--re-text-muted);">No process context available</span>
-            </div>`;
+        propsPane.appendChild(kv('Process Context', 'No process context available'));
+    }
+    propsPane.append(
+        kv('Command Line', ev.command_line || '-'),
+        kv('Image Path', ev.image_path || '-'),
+    );
+
+    // Trace panel
+    const tracePane = el('div', { className: 'tab-content' });
+    const traceContainer = el('div', { className: 'trace-container' });
+
+    traceContainer.appendChild(el('div', { className: 'trace-node mono', text: `EVENT: ${ev.event_type || 'Unknown'} (${ev.event_id})`, style: 'border-color: var(--re-cyan);' }));
+    traceContainer.appendChild(el('div', { className: 'trace-edge' }));
+
+    if (data.trace.findings.length > 0) {
+        data.trace.findings.forEach(f => {
+            traceContainer.appendChild(el('div', { className: 'trace-node mono', text: `FINDING: ${f.finding_type || '-'}`, style: 'border-color: var(--re-critical); color: var(--re-critical);' }));
+            traceContainer.appendChild(el('div', { className: 'trace-edge' }));
+        });
+    } else {
+        traceContainer.appendChild(el('div', { className: 'trace-node', text: 'No Findings', style: 'color: var(--re-text-muted);' }));
+        traceContainer.appendChild(el('div', { className: 'trace-edge' }));
     }
 
-    let html = `
-        <div class="tabs">
-            <div class="tab active" onclick="switchDrawerTab(this, 'ev-props')">Properties</div>
-            <div class="tab" onclick="switchDrawerTab(this, 'ev-trace')">Evidence Trace</div>
-            <div class="tab" onclick="switchDrawerTab(this, 'ev-raw')">Raw Data</div>
-        </div>
+    if (data.trace.incidents.length > 0) {
+        data.trace.incidents.forEach(i => {
+            traceContainer.appendChild(el('div', { className: 'trace-node mono clickable-id', text: `INCIDENT: ${i.incident_id || '-'}`,
+                onclick: () => inspectIncident(i.incident_id) }));
+            traceContainer.appendChild(el('div', { className: 'trace-edge' }));
+        });
+    } else {
+        traceContainer.appendChild(el('div', { className: 'trace-node', text: 'No Incidents', style: 'color: var(--re-text-muted);' }));
+        traceContainer.appendChild(el('div', { className: 'trace-edge' }));
+    }
 
-        <div id="ev-props" class="tab-content active prop-list">
-            <div class="prop-item"><span class="prop-key">Event ID</span><span class="prop-val mono">${ev.event_id}</span></div>
-            <div class="prop-item"><span class="prop-key">Timestamp</span><span class="prop-val">${ev.timestamp || '-'}</span></div>
-            <div class="prop-item"><span class="prop-key">Source</span><span class="prop-val">${ev.source}</span></div>
-            <div class="prop-item"><span class="prop-key">Event Type</span><span class="prop-val">${ev.event_type || '-'}</span></div>
-            ${processSectionHtml}
-            <div class="prop-item"><span class="prop-key">Command Line</span><span class="prop-val" style="color: var(--re-cyan-bright);">${ev.command_line || '-'}</span></div>
-            <div class="prop-item"><span class="prop-key">Image Path</span><span class="prop-val">${ev.image_path || '-'}</span></div>
-        </div>
+    if (data.trace.processes.length > 0) {
+        data.trace.processes.forEach(p => {
+            traceContainer.appendChild(el('div', { className: 'trace-node mono clickable-id', text: `PROCESS: ${p.process_name || p.pid || '-'}`,
+                onclick: () => inspectProcess(p.guid || p.pid) }));
+        });
+    } else {
+        traceContainer.appendChild(el('div', { className: 'trace-node', text: 'No Process Context', style: 'color: var(--re-text-muted);' }));
+    }
+    tracePane.appendChild(traceContainer);
 
-        <div id="ev-trace" class="tab-content">
-            <div class="trace-container">
-                <div class="trace-node mono" style="border-color: var(--re-cyan);">EVENT: ${ev.event_type || 'Unknown'} (${ev.event_id})</div>
-                <div class="trace-edge"></div>
-                ${data.trace.findings.length > 0 ? data.trace.findings.map(f => `<div class="trace-node mono" style="border-color: var(--re-critical); color: var(--re-critical);">FINDING: ${f.finding_type}</div>`).join('<div class="trace-edge"></div>') : `<div class="trace-node" style="color: var(--re-text-muted);">No Findings</div>`}
-                <div class="trace-edge"></div>
-                ${data.trace.incidents.length > 0 ? data.trace.incidents.map(i => `<div class="trace-node mono clickable-id" onclick="inspectIncident('${i.incident_id}')">INCIDENT: ${i.incident_id}</div>`).join('<div class="trace-edge"></div>') : `<div class="trace-node" style="color: var(--re-text-muted);">No Incidents</div>`}
-                <div class="trace-edge"></div>
-                ${data.trace.processes.length > 0 ? data.trace.processes.map(p => `<div class="trace-node mono clickable-id" onclick="inspectProcess('${p.guid || p.pid}')">PROCESS: ${p.process_name || p.pid}</div>`).join('<div class="trace-edge"></div>') : `<div class="trace-node" style="color: var(--re-text-muted);">No Process Context</div>`}
-            </div>
-        </div>
+    // Raw panel
+    const rawPane = el('div', { className: 'tab-content' });
+    const rawArea = el('textarea', { className: 'code-block', attrs: { rows: '20', readonly: '' } });
+    rawArea.value = JSON.stringify(ev, null, 2);
+    rawPane.appendChild(rawArea);
 
-        <div id="ev-raw" class="tab-content">
-            <textarea class="code-block" rows="20" readonly>${JSON.stringify(ev, null, 2)}</textarea>
-        </div>
-    `;
+    // Tab switching
+    const panes = [propsPane, tracePane, rawPane];
+    const tabEls = [tabProps, tabTrace, tabRaw];
+    tabEls.forEach((t, idx) => {
+        t.addEventListener('click', () => {
+            tabEls.forEach(tt => tt.classList.remove('active'));
+            panes.forEach(pp => pp.classList.remove('active'));
+            t.classList.add('active');
+            panes[idx].classList.add('active');
+        });
+    });
 
-    dom.drawerContent.innerHTML = html;
+    dom.drawerContent.replaceChildren(tabs, ...panes);
 }
 
-async function inspectProcess(procId, meta = null) {
+async function inspectProcess(procId, meta) {
     if (!state.currentCaseId || !procId || procId === 'null' || procId === 'undefined') return;
 
-    dom.drawerTitle.textContent = `Loading Process...`;
-    dom.drawerContent.innerHTML = '<div class="empty-state">Loading...</div>';
+    dom.drawerTitle.textContent = 'Loading Process...';
+    dom.drawerContent.replaceChildren(el('div', { className: 'empty-state', text: 'Loading...' }));
     dom.drawer.classList.add('open');
 
     const m = meta || state.lastEventMeta || {};
@@ -1936,74 +2132,127 @@ async function inspectProcess(procId, meta = null) {
 
     const data = await api(`/process/${encodeURIComponent(state.currentCaseId)}/${encodeURIComponent(procId)}`);
     if (!data || data._error || !data.process) {
-        dom.drawerTitle.textContent = `Process Profile`;
-        dom.drawerContent.innerHTML = `
-            <div class="empty-state" style="padding: 24px 12px; text-align: left;">
-                <div class="badge warning mb-md" style="font-size: 13px; font-weight: 700; display: inline-block;">PROCESS PROFILE UNAVAILABLE</div>
-                <p style="color: var(--re-text); font-size: 13px; margin-bottom: 16px;">No matching process node exists for this case in the investigation graph.</p>
-                <h4 style="font-size: 11px; text-transform: uppercase; color: var(--re-text-muted); margin-bottom: 8px;">Event Process Metadata</h4>
-                <div class="prop-list mb-lg">
-                    <div class="prop-item"><span class="prop-key">Process Name</span><span class="prop-val mono">${procName}</span></div>
-                    <div class="prop-item"><span class="prop-key">PID</span><span class="prop-val mono">${procPid}</span></div>
-                    <div class="prop-item"><span class="prop-key">Process GUID</span><span class="prop-val mono" style="font-size: 11px;">${procGuid}</span></div>
-                </div>
-                <button class="btn btn-secondary mt-md" onclick="dom.drawer.classList.remove('open')" style="display: inline-flex; align-items: center; gap: 6px;">
-                    &larr; BACK TO EVIDENCE
-                </button>
-            </div>`;
+        dom.drawerTitle.textContent = 'Process Profile';
+        dom.drawerContent.replaceChildren(
+            el('div', { className: 'empty-state', style: 'padding: 24px 12px; text-align: left;' }, [
+                badge('PROCESS PROFILE UNAVAILABLE', 'warning'),
+                el('p', { text: 'No matching process node exists for this case in the investigation graph.', style: 'color: var(--re-text); font-size: 13px; margin: 16px 0;' }),
+                el('h4', { text: 'Event Process Metadata', style: 'font-size: 11px; text-transform: uppercase; color: var(--re-text-muted); margin-bottom: 8px;' }),
+                el('div', { className: 'prop-list mb-lg' }, [
+                    kv('Process Name', procName, { mono: true }),
+                    kv('PID', procPid, { mono: true }),
+                    kv('Process GUID', procGuid, { mono: true }),
+                ]),
+                el('button', { className: 'btn btn-secondary mt-md', text: '← BACK TO EVIDENCE',
+                    onclick: () => dom.drawer.classList.remove('open') }),
+            ])
+        );
         return;
     }
 
     const p = data.process;
-    dom.drawerTitle.textContent = `Process Profile`;
+    dom.drawerTitle.textContent = 'Process Profile';
 
-    let html = `
-        <div class="prop-list mb-lg">
-            <div class="prop-item"><span class="prop-key">Process Name</span><span class="prop-val mono" style="font-size: 16px; color: var(--re-cyan-bright); border-color: var(--re-cyan);">${p.name || '-'}</span></div>
-            <div class="prop-item"><span class="prop-key">PID</span><span class="prop-val mono">${p.pid || '-'}</span></div>
-            <div class="prop-item"><span class="prop-key">GUID</span><span class="prop-val mono" style="font-size: 11px;">${p.guid || '-'}</span></div>
-            <div class="prop-item"><span class="prop-key">Command Line</span><span class="prop-val" style="color: var(--re-text);">${p.command_line || '-'}</span></div>
-        </div>
+    // Identity
+    const identity = el('div', { className: 'prop-list mb-lg' }, [
+        el('div', { className: 'prop-item' }, [
+            el('span', { className: 'prop-key', text: 'Process Name' }),
+            el('span', { className: 'prop-val mono', text: p.name || '-', style: 'font-size: 16px; color: var(--re-cyan-bright); border-color: var(--re-cyan);' }),
+        ]),
+        kv('PID', p.pid || '-', { mono: true }),
+        kv('GUID', p.guid || '-', { mono: true }),
+        kv('Command Line', p.command_line || '-'),
+    ]);
 
-        <div class="tabs mt-lg">
-            <div class="tab active" onclick="switchDrawerTab(this, 'proc-lineage')">Lineage</div>
-            <div class="tab" onclick="switchDrawerTab(this, 'proc-files')">Files (${data.files.length})</div>
-            <div class="tab" onclick="switchDrawerTab(this, 'proc-net')">Network (${data.network.length})</div>
-            <div class="tab" onclick="switchDrawerTab(this, 'proc-find')">Findings (${data.findings.length})</div>
-        </div>
+    // Tabs
+    const tabLineage = el('div', { className: 'tab active', text: 'Lineage' });
+    const tabFiles = el('div', { className: 'tab', text: `Files (${data.files.length})` });
+    const tabNet = el('div', { className: 'tab', text: `Network (${data.network.length})` });
+    const tabFind = el('div', { className: 'tab', text: `Findings (${data.findings.length})` });
+    const tabBar = el('div', { className: 'tabs mt-lg' }, [tabLineage, tabFiles, tabNet, tabFind]);
 
-        <div id="proc-lineage" class="tab-content active" style="background: var(--re-bg); border: 1px solid var(--re-border); padding: 16px; border-radius: 4px;">
-            ${data.parent ? `<div class="tree-node parent clickable-id" onclick="inspectProcess('${data.parent.guid || data.parent.pid}')">${data.parent.name} (PID: ${data.parent.pid})</div>` : '<div class="tree-node parent">Unknown Parent</div>'}
-            <div class="tree-node current">${p.name} (PID: ${p.pid})</div>
-            ${data.children.length > 0 ? data.children.map(c => `<div class="tree-node child clickable-id" onclick="inspectProcess('${c.guid || c.pid}')">${c.name} (PID: ${c.pid})</div>`).join('') : '<div class="tree-node child" style="color: var(--re-text-muted);">No children</div>'}
-        </div>
+    // Lineage pane
+    const lineagePane = el('div', { className: 'tab-content active', style: 'background: var(--re-bg); border: 1px solid var(--re-border); padding: 16px; border-radius: 4px;' });
+    if (data.parent) {
+        lineagePane.appendChild(el('div', { className: 'tree-node parent clickable-id', text: `${data.parent.name || '-'} (PID: ${data.parent.pid || '-'})`,
+            onclick: () => inspectProcess(data.parent.guid || data.parent.pid) }));
+    } else {
+        lineagePane.appendChild(el('div', { className: 'tree-node parent', text: 'Unknown Parent' }));
+    }
+    lineagePane.appendChild(el('div', { className: 'tree-node current', text: `${p.name || '-'} (PID: ${p.pid || '-'})` }));
+    if (data.children.length > 0) {
+        data.children.forEach(c => {
+            lineagePane.appendChild(el('div', { className: 'tree-node child clickable-id', text: `${c.name || '-'} (PID: ${c.pid || '-'})`,
+                onclick: () => inspectProcess(c.guid || c.pid) }));
+        });
+    } else {
+        lineagePane.appendChild(el('div', { className: 'tree-node child', text: 'No children', style: 'color: var(--re-text-muted);' }));
+    }
 
-        <div id="proc-files" class="tab-content prop-list">
-            ${data.files.length > 0 ? data.files.map(f => `<div class="prop-val mono"><strong style="color: var(--re-text-secondary); width: 80px; display: inline-block;">${f.rel}</strong> ${f.path}</div>`).join('') : '<div class="empty-state">No file modifications recorded.</div>'}
-        </div>
+    // Files pane
+    const filesPane = el('div', { className: 'tab-content prop-list' });
+    if (data.files.length > 0) {
+        data.files.forEach(f => {
+            const row = el('div', { className: 'prop-val mono' }, [
+                el('strong', { text: f.rel, style: 'color: var(--re-text-secondary); width: 80px; display: inline-block;' }),
+                document.createTextNode(' '),
+            ]);
+            row.appendChild(document.createTextNode(f.path));
+            filesPane.appendChild(row);
+        });
+    } else {
+        filesPane.appendChild(el('div', { className: 'empty-state', text: 'No file modifications recorded.' }));
+    }
 
-        <div id="proc-net" class="tab-content prop-list">
-            ${data.network.length > 0 ? data.network.map(n => `<div class="prop-val mono"><strong style="color: var(--re-text-secondary);">CONNECT</strong> ${n.destination_ip}:${n.destination_port} [${n.protocol}]</div>`).join('') : '<div class="empty-state">No network connections recorded.</div>'}
-        </div>
+    // Network pane
+    const netPane = el('div', { className: 'tab-content prop-list' });
+    if (data.network.length > 0) {
+        data.network.forEach(n => {
+            const row = el('div', { className: 'prop-val mono' }, [
+                el('strong', { text: 'CONNECT', style: 'color: var(--re-text-secondary);' }),
+                document.createTextNode(` ${n.destination_ip || '-'}:${n.destination_port || '-'} [${n.protocol || '-'}]`),
+            ]);
+            netPane.appendChild(row);
+        });
+    } else {
+        netPane.appendChild(el('div', { className: 'empty-state', text: 'No network connections recorded.' }));
+    }
 
-        <div id="proc-find" class="tab-content prop-list">
-            ${data.findings.length > 0 ? data.findings.map(f => `<div class="prop-val mono" style="color: var(--re-critical); border-left: 3px solid var(--re-critical);">FINDING: ${f.finding_type} (${f.technique})</div>`).join('') : '<div class="empty-state">No associated findings.</div>'}
-        </div>
-    `;
+    // Findings pane
+    const findingsPane = el('div', { className: 'tab-content prop-list' });
+    if (data.findings.length > 0) {
+        data.findings.forEach(f => {
+            findingsPane.appendChild(el('div', { className: 'prop-val mono', text: `FINDING: ${f.finding_type || '-'} (${f.technique || '-'})`,
+                style: 'color: var(--re-critical); border-left: 3px solid var(--re-critical);' }));
+        });
+    } else {
+        findingsPane.appendChild(el('div', { className: 'empty-state', text: 'No associated findings.' }));
+    }
 
-    dom.drawerContent.innerHTML = html;
+    // Tab switching
+    const panes = [lineagePane, filesPane, netPane, findingsPane];
+    const tabEls = [tabLineage, tabFiles, tabNet, tabFind];
+    tabEls.forEach((t, idx) => {
+        t.addEventListener('click', () => {
+            tabEls.forEach(tt => tt.classList.remove('active'));
+            panes.forEach(pp => pp.classList.remove('active'));
+            t.classList.add('active');
+            panes[idx].classList.add('active');
+        });
+    });
+
+    dom.drawerContent.replaceChildren(identity, tabBar, ...panes);
 }
 
-// Global Tab Switcher for Drawer
-window.switchDrawerTab = function (el, targetId) {
-    const tabs = el.parentElement.querySelectorAll('.tab');
-    const contents = el.parentElement.nextElementSibling.parentElement.querySelectorAll('.tab-content');
-
+// Global Tab Switcher for Drawer (legacy support)
+window.switchDrawerTab = function (elRef, targetId) {
+    const tabs = elRef.parentElement.querySelectorAll('.tab');
+    const contents = elRef.parentElement.nextElementSibling.parentElement.querySelectorAll('.tab-content');
     tabs.forEach(t => t.classList.remove('active'));
     contents.forEach(c => c.classList.remove('active'));
-
-    el.classList.add('active');
-    document.getElementById(targetId).classList.add('active');
+    elRef.classList.add('active');
+    const target = document.getElementById(targetId);
+    if (target) target.classList.add('active');
 };
 
 document.addEventListener('DOMContentLoaded', init);
