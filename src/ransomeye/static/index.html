@@ -729,10 +729,16 @@
                 <span class="panel-title">Artifact Static Inspection</span>
             </div>
             <div class="panel-body">
-                <div class="toolbar">
-                    <input type="text" id="static-file-path" class="input" placeholder="Path to executable or binary artifact (e.g. samples/sample.exe)">
-                    <button class="btn btn-primary" id="btn-run-static">Analyze Artifact</button>
+                <div class="form-group">
+                    <label class="form-label">Case</label>
+                    <select id="static-case" class="form-control" data-case-selector="required"></select>
+                    <div id="static-case-status" class="mt-sm" style="font-size: 12px; color: var(--re-text-muted);"></div>
                 </div>
+                <div class="form-group">
+                    <label class="form-label">Artifact file path *</label>
+                    <input type="text" id="static-file-path" class="input mono" placeholder="Path to executable or binary artifact (e.g. samples/sample.exe)">
+                </div>
+                <button class="btn btn-primary" id="btn-run-static">Analyze Artifact</button>
                 <div id="static-feedback" class="mt-md hidden"></div>
                 <div id="static-results" class="mt-xl hidden">
                     <div class="grid-overview">
@@ -861,6 +867,11 @@
                     <span class="panel-title">Analyze Message / Content</span>
                 </div>
                 <div class="panel-body">
+                    <div class="form-group">
+                        <label class="form-label">Case</label>
+                        <select id="phishing-case" class="form-control" data-case-selector="required"></select>
+                        <div id="phishing-case-status" class="mt-sm" style="font-size: 12px; color: var(--re-text-muted);"></div>
+                    </div>
                     <div class="form-group">
                         <label class="form-label">Subject (Optional)</label>
                         <input type="text" id="phishing-subject" class="form-control" placeholder="e.g. Urgent: Account Verification Required">

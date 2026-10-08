@@ -127,6 +127,70 @@ function hideModal() {
 }
 
 // ============================================================
+// Shared case-selector helper (used by Static, Phishing, Script,
+// PCAP, and IOC analyzer views). Keeps the vocabulary consistent
+// and renders a case list through safe DOM only.
+// Options:
+//   required         - true: no "no case" option (analyzer requires a case)
+//                      false (default): include a "No case (analysis only)" option
+//   statusEl         - optional element to receive a human-readable status line
+//   onChange         - optional callback(value) when the user picks a case
+//   caseList         - optional explicit case array (defaults to state.cases)
+// Returns the selected value after population (string, "" if none selected).
+// ============================================================
+function populateCaseSelector(selectEl, options = {}) {
+    if (!selectEl) return "";
+    const required = options.required === true;
+    const statusEl = options.statusEl || null;
+    const caseList = Array.isArray(options.caseList) ? options.caseList : (state.cases || []);
+
+    const opts = [];
+    if (!required) {
+        opts.push(el('option', { text: 'No case (analysis only)', attrs: { value: '' } }));
+    } else if (caseList.length === 0) {
+        opts.push(el('option', { text: 'No cases available', attrs: { value: '' } }));
+    } else {
+        opts.push(el('option', { text: 'Select a case...', attrs: { value: '' } }));
+    }
+    for (const c of caseList) {
+        const label = c.case_name && c.case_name !== c.case_id
+            ? `${c.case_id} — ${c.case_name}`
+            : c.case_id;
+        opts.push(el('option', { text: label, attrs: { value: c.case_id } }));
+    }
+    selectEl.replaceChildren(...opts);
+    const prior = selectEl.value;
+    if (state.currentCaseId && caseList.some(c => c.case_id === state.currentCaseId)) {
+        selectEl.value = state.currentCaseId;
+    }
+
+    const render = () => {
+        if (!statusEl) return;
+        statusEl.textContent = '';
+        statusEl.style.color = 'var(--re-text-muted)';
+        if (caseList.length === 0) {
+            statusEl.textContent = required
+                ? 'No cases available. Create a case before running analysis.'
+                : 'No cases available. Analysis will run without ingesting evidence.';
+            statusEl.style.color = required ? 'var(--re-critical)' : 'var(--re-text-muted)';
+        } else if (!selectEl.value) {
+            statusEl.textContent = required
+                ? 'Select a case to analyze into.'
+                : 'No case selected. Analysis will run without ingesting evidence.';
+        } else {
+            statusEl.textContent = `Case selected: ${selectEl.value}. Ready to analyze.`;
+            statusEl.style.color = 'var(--re-text-secondary)';
+        }
+    };
+    render();
+    selectEl.addEventListener('change', () => {
+        render();
+        if (typeof options.onChange === 'function') options.onChange(selectEl.value);
+    });
+    return selectEl.value || "";
+}
+
+// ============================================================
 // Init & Listeners
 // ============================================================
 async function init() {
@@ -1484,6 +1548,8 @@ function initDatabase() {
 // ==========================================
 function initStatic() {
     const fpathInp = document.getElementById('static-file-path');
+    const caseSel = document.getElementById('static-case');
+    const caseStatus = document.getElementById('static-case-status');
     const btnRun = document.getElementById('btn-run-static');
     const fbStatic = document.getElementById('static-feedback');
     const resBox = document.getElementById('static-results');
@@ -1497,11 +1563,20 @@ function initStatic() {
     const indicsEl = document.getElementById('static-indicators');
     const secTbody = document.getElementById('static-sections-tbody');
 
+    populateCaseSelector(caseSel, { required: true, statusEl: caseStatus });
+
     btnRun.addEventListener('click', async () => {
         const fpath = fpathInp.value.trim();
+        const cid = (caseSel.value || '').trim();
         if (!fpath) {
             fbStatic.className = 'alert alert-error mt-md';
             fbStatic.textContent = 'Artifact file path is required.';
+            fbStatic.classList.remove('hidden');
+            return;
+        }
+        if (!cid) {
+            fbStatic.className = 'alert alert-error mt-md';
+            fbStatic.textContent = 'Select a case before running analysis.';
             fbStatic.classList.remove('hidden');
             return;
         }
@@ -1512,14 +1587,22 @@ function initStatic() {
         const res = await api('/static/analyze', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ file_path: fpath })
+            body: JSON.stringify({ file_path: fpath, case_id: cid })
         });
 
         btnRun.textContent = 'Analyze Artifact';
         btnRun.disabled = false;
 
         if (res && !res._error && res.analysis) {
-            fbStatic.classList.add('hidden');
+            fbStatic.className = 'alert alert-success mt-md';
+            if (res.case_id) {
+                const findingLabel = (res.finding_id == null) ? '-' : String(res.finding_id);
+                fbStatic.textContent = 'Analysis complete. Evidence persisted under case: '
+                    + res.case_id + ' (finding #' + findingLabel + ').';
+            } else {
+                fbStatic.textContent = 'Analysis complete.';
+            }
+            fbStatic.classList.remove('hidden');
             resBox.classList.remove('hidden');
 
             const a = res.analysis;
@@ -1719,12 +1802,7 @@ function initScript() {
 
     let mode = 'file';
 
-    caseSel.replaceChildren(el('option', { text: 'No case (analysis only)', attrs: { value: '' } }));
-    for (const c of (state.cases || [])) {
-        const label = c.case_name && c.case_name !== c.case_id ? `${c.case_id} — ${c.case_name}` : c.case_id;
-        caseSel.appendChild(el('option', { text: label, attrs: { value: c.case_id } }));
-    }
-    if (state.currentCaseId) caseSel.value = state.currentCaseId;
+    populateCaseSelector(caseSel, { required: false });
 
     function selectMode(next) {
         mode = next;
@@ -1908,15 +1986,26 @@ function initPhishing() {
     const subjInp = document.getElementById('phishing-subject');
     const sendInp = document.getElementById('phishing-sender');
     const bodyInp = document.getElementById('phishing-body');
+    const caseSel = document.getElementById('phishing-case');
+    const caseStatus = document.getElementById('phishing-case-status');
     const btnRun = document.getElementById('btn-run-phishing');
     const fbPhish = document.getElementById('phishing-feedback');
     const resBox = document.getElementById('phishing-results');
 
+    populateCaseSelector(caseSel, { required: true, statusEl: caseStatus });
+
     btnRun.addEventListener('click', async () => {
         const bodyText = bodyInp.value.trim();
+        const cid = (caseSel.value || '').trim();
         if (!bodyText) {
             fbPhish.className = 'alert alert-error mt-md';
             fbPhish.textContent = 'Message body or headers content is required.';
+            fbPhish.classList.remove('hidden');
+            return;
+        }
+        if (!cid) {
+            fbPhish.className = 'alert alert-error mt-md';
+            fbPhish.textContent = 'Select a case before running analysis.';
             fbPhish.classList.remove('hidden');
             return;
         }
@@ -1930,7 +2019,8 @@ function initPhishing() {
             body: JSON.stringify({
                 subject: subjInp.value.trim(),
                 sender: sendInp.value.trim(),
-                body: bodyText
+                body: bodyText,
+                case_id: cid
             })
         });
 
@@ -1938,7 +2028,13 @@ function initPhishing() {
         btnRun.disabled = false;
 
         if (res && !res._error && res.assessment) {
-            fbPhish.classList.add('hidden');
+            fbPhish.className = 'alert alert-success mt-md';
+            if (res.case_id) {
+                fbPhish.textContent = `Analysis complete. Evidence persisted under case: ${res.case_id} (finding #${res.finding_id ?? '-'}).`;
+            } else {
+                fbPhish.textContent = 'Analysis complete.';
+            }
+            fbPhish.classList.remove('hidden');
             renderPhishingResult(resBox, res.assessment);
         } else {
             fbPhish.className = 'alert alert-error mt-md';
@@ -2435,12 +2531,7 @@ function initPcap() {
     const fb = document.getElementById('pcap-feedback');
     const results = document.getElementById('pcap-results');
 
-    caseSel.replaceChildren(el('option', { text: 'No case (analysis only)', attrs: { value: '' } }));
-    for (const c of (state.cases || [])) {
-        const label = c.case_name && c.case_name !== c.case_id ? `${c.case_id} — ${c.case_name}` : c.case_id;
-        caseSel.appendChild(el('option', { text: label, attrs: { value: c.case_id } }));
-    }
-    if (state.currentCaseId) caseSel.value = state.currentCaseId;
+    populateCaseSelector(caseSel, { required: false });
 
     btn.addEventListener('click', async () => {
         fb.classList.add('hidden');
@@ -2601,12 +2692,7 @@ function initIoc() {
     const fb = document.getElementById('ioc-feedback');
     const results = document.getElementById('ioc-results');
 
-    caseSel.replaceChildren(el('option', { text: 'No case (analysis only)', attrs: { value: '' } }));
-    for (const c of (state.cases || [])) {
-        const label = c.case_name && c.case_name !== c.case_id ? `${c.case_id} — ${c.case_name}` : c.case_id;
-        caseSel.appendChild(el('option', { text: label, attrs: { value: c.case_id } }));
-    }
-    if (state.currentCaseId) caseSel.value = state.currentCaseId;
+    populateCaseSelector(caseSel, { required: false });
 
     btn.addEventListener('click', async () => {
         fb.classList.add('hidden');

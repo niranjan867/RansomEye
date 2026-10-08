@@ -1062,14 +1062,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 res = analyzer.analyze_file(f_p)
                 res_dict = res.to_dict()
                 finding_id = None
-                if case_id and DB_PATH and DB_PATH.is_file():
+                case_ingested = None
+                if case_id:
                     _validate_safe_id(case_id, "case_id")
+                    if not DB_PATH or not DB_PATH.is_file():
+                        return error_response(self, 400, "Database not configured")
                     store = _get_store()
                     try:
+                        if store.get_case(case_id) is None:
+                            return error_response(self, 404, f"Case not found: {case_id}")
                         finding_id = ingest_static_finding(store, case_id, res)
+                        case_ingested = case_id
                     finally:
                         store.close()
-                json_response(self, 200, {"analysis": res_dict, "finding_id": finding_id})
+                json_response(self, 200, {
+                    "analysis": res_dict,
+                    "finding_id": finding_id,
+                    "case_id": case_ingested,
+                })
 
             elif parts[0] == "phishing" and len(parts) > 1 and parts[1] == "analyze":
                 text = body.get("text") or body.get("body") or ""
@@ -1095,17 +1105,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 res_dict = res.to_dict()
                 res_dict["threat_level"] = (res_dict.get("risk_level") or "LOW").upper()
                 finding_id = None
-                if case_id and DB_PATH and DB_PATH.is_file():
+                case_ingested = None
+                if case_id:
                     _validate_safe_id(case_id, "case_id")
+                    if not DB_PATH or not DB_PATH.is_file():
+                        return error_response(self, 400, "Database not configured")
                     store = _get_store()
                     try:
+                        if store.get_case(case_id) is None:
+                            return error_response(self, 404, f"Case not found: {case_id}")
                         source = f_p.name if file_path else "analyst_console_text"
                         finding_id = ingest_phishing_finding(
                             store, case_id, res, source_artifact=source, payload=payload,
                         )
+                        case_ingested = case_id
                     finally:
                         store.close()
-                json_response(self, 200, {"analysis": res_dict, "assessment": res_dict, "finding_id": finding_id})
+                json_response(self, 200, {
+                    "analysis": res_dict,
+                    "assessment": res_dict,
+                    "finding_id": finding_id,
+                    "case_id": case_ingested,
+                })
 
             elif parts[0] == "script" and len(parts) > 1 and parts[1] == "analyze":
                 file_path = body.get("file_path")
