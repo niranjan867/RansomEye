@@ -1,6 +1,7 @@
 """Integration tests for RansomEye Dashboard HTTP Server (M23.9 Product Integration)."""
 
 import json
+import os
 import socket
 import threading
 import time
@@ -411,7 +412,7 @@ def test_dashboard_report_security_checks(running_server, test_db_path):
 
 
 def test_dashboard_process_missing_graph_node_behavior(running_server, test_db_path):
-    """Test process profile endpoints for missing graph nodes and preserving PID=2000 metadata."""
+    """Test process profile endpoints for existing graph nodes, missing graph nodes, and case isolation."""
     from ransomeye.evidence import EvidenceEvent
 
     store = EvidenceStore(test_db_path)
@@ -439,14 +440,63 @@ def test_dashboard_process_missing_graph_node_behavior(running_server, test_db_p
     assert str(data["event"]["pid"]) == "2000"
     assert data["event"]["process_guid"] == "{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}"
 
-    # 2. Process GUID with no graph node returns 404 cleanly (frontend handles as PROCESS PROFILE UNAVAILABLE)
+    # 2. Existing process GUID with percent-encoding resolves successfully (200 OK)
+    req_proc = urllib.request.urlopen(f"{running_server}/api/process/PROC-CASE-A/%7BAAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA%7D")
+    assert req_proc.status == 200
+    proc_data = json.loads(req_proc.read().decode("utf-8"))
+    assert str(proc_data["process"]["pid"]) == "2000"
+    assert proc_data["process"]["name"] == "powershell.exe"
+
+    # 3. Non-existent process GUID returns 404 cleanly (frontend handles as PROCESS PROFILE UNAVAILABLE)
     with pytest.raises(urllib.error.HTTPError) as exc_info:
-        urllib.request.urlopen(f"{running_server}/api/process/PROC-CASE-A/%7BAAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA%7D")
+        urllib.request.urlopen(f"{running_server}/api/process/PROC-CASE-A/%7BNONEXIST-9999-9999-9999-999999999999%7D")
     assert exc_info.value.code == 404
 
-    # 3. Case isolation: Process in PROC-CASE-A requested under PROC-CASE-B returns 404
+    # 4. Case isolation: Process in PROC-CASE-A requested under PROC-CASE-B returns 404
     with pytest.raises(urllib.error.HTTPError) as exc_info:
         urllib.request.urlopen(f"{running_server}/api/process/PROC-CASE-B/%7BAAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA%7D")
+    assert exc_info.value.code == 404
+
+
+def test_dashboard_process_guid_resolution_regression(running_server, test_db_path):
+    """Regression test: GET /api/process/CASE-RANSOMWARE-DEMO/%7B11111111-2222-3333-4444-555555555555%7D returns 200."""
+    sample_file = Path("samples/ransomware_like_activity.json")
+    assert sample_file.exists(), "Sample ransomware activity file must exist"
+
+    summary = ingest_evidence(
+        database_path=test_db_path,
+        case_id="CASE-RANSOMWARE-DEMO",
+        file_path=sample_file,
+        format_type="auto",
+        case_name="Ransomware Demo Case",
+        host="VICTIM-PC",
+    )
+    assert summary["events_accepted"] > 0
+
+    # 1. Percent-encoded braced GUID (%7B...%7D) resolves with 200 OK
+    req = urllib.request.urlopen(f"{running_server}/api/process/CASE-RANSOMWARE-DEMO/%7B11111111-2222-3333-4444-555555555555%7D")
+    assert req.status == 200
+    data = json.loads(req.read().decode("utf-8"))
+    assert data["process"]["name"] == "simulated_encryptor.exe"
+    assert str(data["process"]["pid"]) == "7777"
+    assert data["process"]["guid"] == "{11111111-2222-3333-4444-555555555555}"
+    assert data["process"]["command_line"] == "simulated_encryptor.exe --simulate"
+
+    # 2. Raw unbraced GUID resolves with 200 OK
+    req_unbraced = urllib.request.urlopen(f"{running_server}/api/process/CASE-RANSOMWARE-DEMO/11111111-2222-3333-4444-555555555555")
+    assert req_unbraced.status == 200
+    data_unbraced = json.loads(req_unbraced.read().decode("utf-8"))
+    assert str(data_unbraced["process"]["pid"]) == "7777"
+
+    # 3. PID query resolves with 200 OK
+    req_pid = urllib.request.urlopen(f"{running_server}/api/process/CASE-RANSOMWARE-DEMO/7777")
+    assert req_pid.status == 200
+    data_pid = json.loads(req_pid.read().decode("utf-8"))
+    assert data_pid["process"]["name"] == "simulated_encryptor.exe"
+
+    # 4. Unknown process returns 404
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(f"{running_server}/api/process/CASE-RANSOMWARE-DEMO/%7B99999999-9999-9999-9999-999999999999%7D")
     assert exc_info.value.code == 404
 
 
@@ -549,3 +599,944 @@ def test_dashboard_evidence_search_queries(running_server, test_db_path):
     assert req_insp.status == 200
     data_insp = json.loads(req_insp.read().decode("utf-8"))
     assert data_insp["event"]["event_id"] == win_path_id
+
+
+def _post_json(url: str, payload: dict) -> tuple[int, dict]:
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8"))
+
+
+def test_dashboard_case_lifecycle_and_history(running_server, test_db_path):
+    """Test case creation, listing, status update, and history tracking."""
+    # 1. Create case
+    code, res = _post_json(f"{running_server}/api/cases", {
+        "case_id": "CASE-TEST-LIFECYCLE",
+        "case_name": "Lifecycle Test Case",
+        "host": "WIN-SRV-TEST"
+    })
+    assert code == 201
+    assert res["case"]["case_id"] == "CASE-TEST-LIFECYCLE"
+
+    # 2. List cases
+    req = urllib.request.urlopen(f"{running_server}/api/cases")
+    assert req.status == 200
+    cases_data = json.loads(req.read().decode("utf-8"))
+    found = [c for c in cases_data["cases"] if c["case_id"] == "CASE-TEST-LIFECYCLE"]
+    assert len(found) == 1
+    assert found[0]["status"] == "OPEN"
+
+    # 3. Update status
+    code, res = _post_json(f"{running_server}/api/case/CASE-TEST-LIFECYCLE/status", {
+        "status": "TRIAGED",
+        "notes": "Analyst investigating suspicious activity"
+    })
+    assert code == 200
+    assert res["status"] == "TRIAGED"
+
+    # 4. View history
+    req = urllib.request.urlopen(f"{running_server}/api/case/CASE-TEST-LIFECYCLE/history")
+    assert req.status == 200
+    hist_data = json.loads(req.read().decode("utf-8"))
+    assert len(hist_data["history"]) >= 1
+    assert hist_data["history"][-1]["status"] == "TRIAGED"
+
+
+def test_dashboard_investigation_and_tree(running_server, test_db_path, tmp_path):
+    """Test investigation summary, graph, process tree, and validation endpoints."""
+    # Ingest evidence
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-INV-01", "Investigation Case", "HOST-INV")
+    store.close()
+
+    ev_file = tmp_path / "inv_events.json"
+    ev_file.write_text(json.dumps([
+        {
+            "event_id": "INV-EV-1",
+            "timestamp": "2026-08-25T11:00:00Z",
+            "source": "sysmon",
+            "event_type": "process_create",
+            "process_name": "cmd.exe",
+            "pid": 5001,
+            "process_guid": "{5001-0000-0000-0000}",
+            "command_line": "cmd.exe /c whoami"
+        }
+    ]), encoding="utf-8")
+
+    code, res = _post_json(f"{running_server}/api/ingest", {
+        "case_id": "CASE-INV-01",
+        "file_path": str(ev_file)
+    })
+    assert code == 200
+    assert res["events_ingested"] == 1
+
+    # 1. Summary
+    req = urllib.request.urlopen(f"{running_server}/api/investigation/CASE-INV-01")
+    assert req.status == 200
+    inv = json.loads(req.read().decode("utf-8"))
+    assert inv["case_id"] == "CASE-INV-01"
+
+    # 2. Graph
+    req = urllib.request.urlopen(f"{running_server}/api/investigation/CASE-INV-01/graph")
+    assert req.status == 200
+    graph = json.loads(req.read().decode("utf-8"))
+    assert "nodes" in graph
+    assert "edges" in graph
+
+    # 3. Process Tree
+    req = urllib.request.urlopen(f"{running_server}/api/tree/CASE-INV-01")
+    assert req.status == 200
+    tree_data = json.loads(req.read().decode("utf-8"))
+    assert "tree" in tree_data
+
+    # 4. Validation
+    req = urllib.request.urlopen(f"{running_server}/api/investigation/CASE-INV-01/validation")
+    assert req.status == 200
+    val_data = json.loads(req.read().decode("utf-8"))
+    assert "validation" in val_data
+
+
+def test_dashboard_custody_and_integrity(running_server, test_db_path, tmp_path):
+    """Test custody ledger recording and integrity manifest hash/verify endpoints."""
+    # Custody
+    code, res = _post_json(f"{running_server}/api/cases", {
+        "case_id": "CASE-CUSTODY-01",
+        "case_name": "Custody Case"
+    })
+    assert code == 201
+
+    sample_art = tmp_path / "sample_artifact.bin"
+    sample_art.write_bytes(b"forensic evidence sample 12345")
+
+    code, res = _post_json(f"{running_server}/api/custody/CASE-CUSTODY-01", {
+        "artifact": str(sample_art),
+        "action": "COLLECTED",
+        "analyst": "Forensic Analyst Alpha",
+        "notes": "Disk image collected at scene"
+    })
+    assert code == 201
+    assert res["entry"]["action"] == "COLLECTED"
+
+    req = urllib.request.urlopen(f"{running_server}/api/custody/CASE-CUSTODY-01")
+    assert req.status == 200
+    custody_data = json.loads(req.read().decode("utf-8"))
+    assert len(custody_data["entries"]) == 1
+    assert custody_data["entries"][0]["analyst"] == "Forensic Analyst Alpha"
+
+    # Integrity Hash
+    man_path = tmp_path / "test_manifest.txt"
+    code, res = _post_json(f"{running_server}/api/integrity/hash", {
+        "target_path": str(sample_art),
+        "manifest_path": str(man_path)
+    })
+    assert code == 200
+    assert "manifest_path" in res
+
+    # Integrity Verify (should pass)
+    code, res = _post_json(f"{running_server}/api/integrity/verify", {
+        "target_path": str(sample_art),
+        "manifest_path": str(man_path)
+    })
+    assert code == 200
+    assert res["verified"] is True
+
+
+def test_dashboard_export_and_lock(running_server, test_db_path, tmp_path):
+    """Test export generation and concurrency lock management."""
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-EXPORT-01", "Export Case")
+    store.close()
+
+    out_dir = tmp_path / "exports"
+    code, res = _post_json(f"{running_server}/api/export", {
+        "case_id": "CASE-EXPORT-01",
+        "output_dir": str(out_dir)
+    })
+    assert code == 200
+    assert "export_path" in res
+
+    # Check lock
+    req = urllib.request.urlopen(f"{running_server}/api/export/lock?case_id=CASE-EXPORT-01")
+    assert req.status == 200
+    lock_info = json.loads(req.read().decode("utf-8"))
+    assert "locked" in lock_info
+
+    # Unlock without explicit authorization must be rejected (safe-by-default).
+    code, res = _post_json(f"{running_server}/api/export/unlock", {
+        "case_id": "CASE-EXPORT-01"
+    })
+    assert code == 403
+
+    # Explicit authorization succeeds.
+    code, res = _post_json(f"{running_server}/api/export/unlock", {
+        "case_id": "CASE-EXPORT-01",
+        "force": True,
+        "break_lock": True,
+    })
+    assert code == 200
+
+
+def test_dashboard_export_unlock_requires_explicit_force(running_server, test_db_path, tmp_path):
+    """Regression test: /api/export/unlock must not force-break a lock by default."""
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-UNLOCK-01", "Unlock Case")
+    store.close()
+
+    out_dir = tmp_path / "exports_unlock"
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = out_dir.parent / f".{out_dir.name}.lock"
+    # The dashboard server runs in a background thread of this SAME process (see the
+    # running_server fixture), so a lock stamped with this test's own pid is reported
+    # ACTIVE by get_lock_owner_status() inside the handler -- i.e. this simulates a
+    # live, currently-owned export lock, not a stale one.
+    lock_path.write_text(json.dumps({
+        "pid": os.getpid(),
+        "created_utc": "2026-01-01T00:00:00+00:00",
+        "database": str(test_db_path),
+        "case_id": "CASE-UNLOCK-01",
+        "output": str(out_dir),
+    }), encoding="utf-8")
+
+    # No force at all -> rejected before any lock inspection.
+    code, res = _post_json(f"{running_server}/api/export/unlock", {
+        "output_dir": str(out_dir)
+    })
+    assert code == 403
+    assert lock_path.is_file()
+
+    # force without break_lock, against an ACTIVE lock -> library-level rejection (409),
+    # proving "release" and "override" are genuinely distinguished, not just force-gated.
+    code, res = _post_json(f"{running_server}/api/export/unlock", {
+        "output_dir": str(out_dir),
+        "force": True
+    })
+    assert code == 409
+    assert lock_path.is_file()
+
+    # Explicit force + break_lock -> removal succeeds.
+    code, res = _post_json(f"{running_server}/api/export/unlock", {
+        "output_dir": str(out_dir),
+        "force": True,
+        "break_lock": True
+    })
+    assert code == 200
+    assert res["removed_lock"]  # truthy: the removed lock's path (not False)
+    assert not lock_path.is_file()
+
+
+def test_dashboard_database_maintenance(running_server, test_db_path, tmp_path):
+    """Test database integrity check, online backup, and safe restore endpoints."""
+    # 1. Check
+    code, res = _post_json(f"{running_server}/api/database/check", {})
+    assert code == 200
+    assert res["status"] == "OK"
+
+    # 2. Backup
+    bkp_path = tmp_path / "backup_test.db"
+    code, res = _post_json(f"{running_server}/api/database/backup", {
+        "backup_path": str(bkp_path)
+    })
+    assert code == 200
+    assert bkp_path.is_file()
+
+    # 3. Restore
+    code, res = _post_json(f"{running_server}/api/database/restore", {
+        "backup_path": str(bkp_path),
+        "target_path": str(tmp_path / "restored_test.db"),
+        "confirm": True
+    })
+    assert code == 200
+    assert res["status"] == "OK"
+
+
+def test_dashboard_database_restore_requires_explicit_confirm_and_target(running_server, test_db_path, tmp_path):
+    """Regression test: /api/database/restore must not default confirm=true or
+    silently target the live database when the caller omits either field."""
+    bkp_path = tmp_path / "backup_test2.db"
+    code, res = _post_json(f"{running_server}/api/database/backup", {
+        "backup_path": str(bkp_path)
+    })
+    assert code == 200
+    assert bkp_path.is_file()
+
+    restored_path = tmp_path / "restored_test2.db"
+
+    # Missing confirm entirely -> rejected (previously defaulted to confirm=True).
+    code, res = _post_json(f"{running_server}/api/database/restore", {
+        "backup_path": str(bkp_path),
+        "target_path": str(restored_path),
+    })
+    assert code == 400
+    assert not restored_path.exists()
+
+    # confirm explicitly false -> rejected.
+    code, res = _post_json(f"{running_server}/api/database/restore", {
+        "backup_path": str(bkp_path),
+        "target_path": str(restored_path),
+        "confirm": False,
+    })
+    assert code == 400
+    assert not restored_path.exists()
+
+    # confirm true but target_path omitted -> rejected (previously defaulted to the
+    # live DB_PATH, i.e. test_db_path).
+    live_db_mtime_before = test_db_path.stat().st_mtime if test_db_path.exists() else None
+    code, res = _post_json(f"{running_server}/api/database/restore", {
+        "backup_path": str(bkp_path),
+        "confirm": True,
+    })
+    assert code == 400
+    if live_db_mtime_before is not None:
+        assert test_db_path.stat().st_mtime == live_db_mtime_before
+
+    # Both present and correct -> succeeds.
+    code, res = _post_json(f"{running_server}/api/database/restore", {
+        "backup_path": str(bkp_path),
+        "target_path": str(restored_path),
+        "confirm": True,
+    })
+    assert code == 200
+    assert restored_path.is_file()
+
+
+def test_dashboard_case_assessment_correlations_match_incidents_route(running_server, test_db_path):
+    """Phase 2 regression test: GET /api/case/<id>'s assessment.correlations must be
+    exactly the data GET /api/incidents/<id> serves, for both a case with correlations
+    and one without. This is the equivalence the frontend's loadCase() now relies on
+    to stop issuing a separate /api/incidents/<id> request."""
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-CORR-01", "Correlated Case")
+    store.create_case("CASE-CORR-02", "Uncorrelated Case")
+
+    correlations = [
+        {
+            "incident_id": "INC-0001",
+            "severity": "HIGH",
+            "start_time": "2026-01-01T00:00:00Z",
+            "duration": "PT5M",
+            "finding_ids": ["FIND-1", "FIND-2"],
+            "evidence_event_ids": ["EV-1", "EV-2", "EV-3"],
+        }
+    ]
+    store.save_assessment("CASE-CORR-01", {
+        "score": 90,
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "reasons": ["Multiple high-confidence findings correlated"],
+        "techniques": ["T1486"],
+        "correlations": correlations,
+    })
+    store.save_assessment("CASE-CORR-02", {
+        "score": 10,
+        "severity": "LOW",
+        "confidence": 0.5,
+        "reasons": [],
+        "techniques": [],
+        "correlations": [],
+    })
+    store.close()
+
+    # Case with correlations: /case's embedded assessment.correlations must equal
+    # /incidents' top-level incidents array, element for element.
+    case_resp = json.loads(urllib.request.urlopen(f"{running_server}/api/case/CASE-CORR-01").read())
+    inc_resp = json.loads(urllib.request.urlopen(f"{running_server}/api/incidents/CASE-CORR-01").read())
+    assert case_resp["assessment"]["correlations"] == inc_resp["incidents"]
+    assert case_resp["assessment"]["correlations"] == correlations
+    assert case_resp["assessment"]["correlations"][0]["incident_id"] == "INC-0001"
+
+    # Case with an assessment but no correlations: both routes must agree on an
+    # empty list, not null or a missing key.
+    case_resp2 = json.loads(urllib.request.urlopen(f"{running_server}/api/case/CASE-CORR-02").read())
+    inc_resp2 = json.loads(urllib.request.urlopen(f"{running_server}/api/incidents/CASE-CORR-02").read())
+    assert case_resp2["assessment"]["correlations"] == []
+    assert inc_resp2["incidents"] == []
+
+    # Case with no assessment row at all: /case returns assessment: null;
+    # /incidents still returns an empty list. The frontend's loadCase() must treat
+    # a null assessment the same as an assessment with no correlations.
+    store2 = EvidenceStore(test_db_path)
+    store2.create_case("CASE-CORR-03", "No Assessment Case")
+    store2.close()
+    case_resp3 = json.loads(urllib.request.urlopen(f"{running_server}/api/case/CASE-CORR-03").read())
+    inc_resp3 = json.loads(urllib.request.urlopen(f"{running_server}/api/incidents/CASE-CORR-03").read())
+    assert case_resp3["assessment"] is None
+    assert inc_resp3["incidents"] == []
+
+
+def test_dashboard_static_and_phishing_analysis(running_server, tmp_path):
+    """Test static PE analyzer and phishing message analysis endpoints."""
+    # Static analysis on a small file
+    test_exe = tmp_path / "test_artifact.exe"
+    test_exe.write_bytes(b"MZ\x90\x00" + b"\x00" * 200)
+
+    code, res = _post_json(f"{running_server}/api/static/analyze", {
+        "file_path": str(test_exe)
+    })
+    assert code == 200
+    assert "analysis" in res
+    assert "sha256" in res["analysis"]
+
+    # Phishing analysis
+    code, res = _post_json(f"{running_server}/api/phishing/analyze", {
+        "subject": "Urgent password reset required immediately",
+        "sender": "support@bank-security-login.xyz",
+        "body": "Dear customer, your account has been suspended. Click here to verify your credentials: http://phish.xyz/login"
+    })
+    assert code == 200
+    assert "assessment" in res
+    assert res["assessment"]["threat_level"] in ("HIGH", "CRITICAL", "MEDIUM", "LOW", "SUSPICIOUS")
+
+
+def test_dashboard_static_analysis_ingests_into_case(running_server, test_db_path, tmp_path):
+    """Static analysis with a case_id must persist a linked finding and custody record."""
+    store = EvidenceStore(test_db_path)
+    try:
+        store.create_case("CASE-STATIC-API", "Static API Case")
+    finally:
+        store.close()
+
+    artifact = tmp_path / "ransom_artifact.bin"
+    artifact.write_bytes(b"MZ\x90\x00" + b"\x00" * 60 + b"HOW_TO_DECRYPT your files RANSOM note")
+
+    code, res = _post_json(f"{running_server}/api/static/analyze", {
+        "file_path": str(artifact),
+        "case_id": "CASE-STATIC-API",
+    })
+    assert code == 200, res
+    assert isinstance(res["finding_id"], int)
+
+    store = EvidenceStore(test_db_path)
+    try:
+        findings = store.get_case_findings("CASE-STATIC-API")
+        custody = store.get_custody_events("CASE-STATIC-API")
+    finally:
+        store.close()
+
+    assert [f["finding_type"] for f in findings] == ["static_file_analysis"]
+    assert len(findings[0]["event_ids"]) == 1
+    assert [c["action"] for c in custody] == ["reviewed"]
+    assert custody[0]["sha256"] == res["analysis"]["sha256"]
+
+
+def _static_view_source() -> str:
+    app_js = (Path(dashboard_server.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+    start = app_js.index("function initStatic()")
+    end = app_js.index("\n// ====", start)
+    return app_js[start:end]
+
+
+def test_static_view_reads_fields_the_backend_returns():
+    """Every analysis/section field the Static Analysis view reads must exist in the backend payload."""
+    from dataclasses import fields
+    import re
+    from ransomeye.static_analyzer import PESection, StaticAnalyzer
+
+    source = _static_view_source()
+    analysis_keys = set(StaticAnalyzer().analyze_bytes(b"MZ" + b"\x00" * 62).to_dict())
+    section_keys = {f.name for f in fields(PESection)}
+
+    read_analysis = set(re.findall(r"\ba\.(\w+)", source))
+    read_section = set(re.findall(r"\bsec\.(\w+)", source))
+
+    assert {"file_size", "total_entropy", "suspicious_apis", "extracted_iocs", "sections"} <= read_analysis
+    assert read_analysis <= analysis_keys, read_analysis - analysis_keys
+    assert read_section and read_section <= section_keys, read_section - section_keys
+
+
+def test_static_view_never_renders_analyzer_output_as_html():
+    """XSS regression: analyzer output (section names, API names, keywords, paths) is attacker-controlled."""
+    source = _static_view_source()
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+        assert sink not in source, f"{sink} used in Static Analysis view"
+    assert "${" not in source, "HTML/template string construction in Static Analysis view"
+
+
+# --------------------------------------------------------------------------- #
+# Stage 4: POST /api/script/analyze
+# --------------------------------------------------------------------------- #
+
+import base64 as _b64  # noqa: E402
+
+
+def _enc_command(inner: str = "Invoke-Expression $x") -> str:
+    return "powershell -enc " + _b64.b64encode(inner.encode("utf-16-le")).decode("ascii")
+
+
+def _script_url(running_server: str) -> str:
+    return f"{running_server}/api/script/analyze"
+
+
+def test_api_script_text_analysis(running_server):
+    code, res = _post_json(_script_url(running_server), {"text": "Invoke-Expression $x"})
+    assert code == 200, res
+    assert res["analysis"]["analysis_status"] == "complete"
+    assert "PS-IEX-003" in {i["rule_id"] for i in res["analysis"]["indicators"]}
+    assert res["finding_ids"] is None  # no case -> analysis only
+
+
+def test_api_script_file_analysis_without_case(running_server, tmp_path):
+    target = tmp_path / "s.ps1"
+    target.write_text("vssadmin delete shadows /all /quiet\n", encoding="utf-8")
+    code, res = _post_json(_script_url(running_server), {"file_path": str(target)})
+    assert code == 200, res
+    assert "REC-010" in {i["rule_id"] for i in res["analysis"]["indicators"]}
+    assert res["finding_ids"] is None
+
+
+def test_api_script_file_ingests_into_case(running_server, test_db_path, tmp_path):
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-API-SCRIPT", "api script")
+    store.close()
+
+    target = tmp_path / "mal.ps1"
+    target.write_text(f"{_enc_command()}\nvssadmin delete shadows /all /quiet\n", encoding="utf-8")
+    code, res = _post_json(_script_url(running_server), {
+        "file_path": str(target), "case_id": "CASE-API-SCRIPT",
+    })
+    assert code == 200, res
+    assert isinstance(res["finding_ids"], list) and res["finding_ids"]
+
+    store = EvidenceStore(test_db_path)
+    try:
+        events = store.get_case_events("CASE-API-SCRIPT")
+        findings = store.get_case_findings("CASE-API-SCRIPT")
+        custody = store.get_custody_events("CASE-API-SCRIPT")
+    finally:
+        store.close()
+    assert len(events) == 1 and events[0]["source"] == "script_analyzer"
+    assert len(findings) == len(res["finding_ids"])
+    assert [c["action"] for c in custody] == ["reviewed"]
+
+
+def test_api_script_file_ingest_is_idempotent(running_server, test_db_path, tmp_path):
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-API-IDEM", "idem")
+    store.close()
+    target = tmp_path / "idem.ps1"
+    target.write_text("Invoke-Expression $x\n", encoding="utf-8")
+
+    body = {"file_path": str(target), "case_id": "CASE-API-IDEM"}
+    first = _post_json(_script_url(running_server), body)[1]
+    second = _post_json(_script_url(running_server), body)[1]
+    assert first["finding_ids"] and second["finding_ids"] == []
+
+    store = EvidenceStore(test_db_path)
+    try:
+        assert len(store.get_case_events("CASE-API-IDEM")) == 1
+        assert len(store.get_case_findings("CASE-API-IDEM")) == len(first["finding_ids"])
+    finally:
+        store.close()
+
+
+def test_api_script_event_mode(running_server, test_db_path):
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-API-EVT", "evt")
+    store.save_event("CASE-API-EVT", {
+        "event_id": "EVT-API-1",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "source": "sysmon",
+        "event_type": "process_creation",
+        "process_name": "powershell.exe",
+        "command_line": _enc_command(),
+    })
+    store.close()
+
+    code, res = _post_json(_script_url(running_server), {
+        "event_id": "EVT-API-1", "case_id": "CASE-API-EVT",
+    })
+    assert code == 200, res
+    assert res["finding_ids"]
+
+    store = EvidenceStore(test_db_path)
+    try:
+        assert [e["event_id"] for e in store.get_case_events("CASE-API-EVT")] == ["EVT-API-1"]
+        assert store.get_custody_events("CASE-API-EVT") == []
+    finally:
+        store.close()
+
+
+def test_api_script_text_with_case_is_refused(running_server, test_db_path):
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-API-TXT", "txt")
+    store.close()
+    code, res = _post_json(_script_url(running_server), {
+        "text": "Invoke-Expression $x", "case_id": "CASE-API-TXT",
+    })
+    assert code == 400
+    assert "cannot be added to a case" in res["error"]
+
+    store = EvidenceStore(test_db_path)
+    try:
+        assert store.get_case_findings("CASE-API-TXT") == []
+    finally:
+        store.close()
+
+
+def test_api_script_requires_exactly_one_input(running_server):
+    code, res = _post_json(_script_url(running_server), {})
+    assert code == 400 and "exactly one" in res["error"]
+
+    code, res = _post_json(_script_url(running_server), {"text": "x", "file_path": "a.ps1"})
+    assert code == 400 and "exactly one" in res["error"]
+
+
+def test_api_script_event_requires_case(running_server):
+    code, res = _post_json(_script_url(running_server), {"event_id": "EVT-X"})
+    # event_id alone is the single input, but needs a case.
+    assert code == 400 and "requires case_id" in res["error"]
+
+
+def test_api_script_unknown_case(running_server, test_db_path, tmp_path):
+    # Database exists (with a different case), but the requested case is absent.
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-OTHER", "other")
+    store.close()
+    target = tmp_path / "s.ps1"
+    target.write_text("Invoke-Expression $x\n", encoding="utf-8")
+    code, res = _post_json(_script_url(running_server), {
+        "file_path": str(target), "case_id": "NO_SUCH_CASE",
+    })
+    assert code == 404 and "Case not found" in res["error"]
+
+
+def test_api_script_unknown_event(running_server, test_db_path):
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-API-NOEVT", "noevt")
+    store.close()
+    code, res = _post_json(_script_url(running_server), {
+        "event_id": "MISSING", "case_id": "CASE-API-NOEVT",
+    })
+    assert code == 404 and "Event not found" in res["error"]
+
+
+def test_api_script_missing_file(running_server, tmp_path):
+    code, res = _post_json(_script_url(running_server), {"file_path": str(tmp_path / "nope.ps1")})
+    assert code == 400 and "not found" in res["error"].lower()
+
+
+def test_api_script_unsupported_container_not_clean(running_server, tmp_path):
+    target = tmp_path / "doc.docm"
+    target.write_bytes(b"PK\x03\x04" + b"\x00" * 64)
+    code, res = _post_json(_script_url(running_server), {"file_path": str(target)})
+    assert code == 200
+    assert res["analysis"]["analysis_status"] == "unsupported_container"
+    assert res["analysis"]["severity"] == "NOT_ANALYZED"
+
+
+@pytest.mark.parametrize("bad_path", [
+    r"\\server\share\x.ps1",
+    r"\\?\C:\x.ps1",
+    r"\\.\PhysicalDrive0",
+])
+def test_api_script_unc_and_device_paths_rejected(running_server, bad_path):
+    code, res = _post_json(_script_url(running_server), {"file_path": bad_path})
+    assert code == 400 and "UNC" in res["error"]
+
+
+def test_api_script_invalid_language(running_server):
+    code, res = _post_json(_script_url(running_server), {"text": "x", "language": "perl"})
+    assert code == 400 and "Unsupported language" in res["error"]
+
+
+def test_api_script_malformed_json_body(running_server):
+    # Body that is not valid JSON is treated as empty -> exactly-one-input error.
+    req = urllib.request.Request(
+        _script_url(running_server), data=b"{not json", method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            code, res = resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        code, res = e.code, json.loads(e.read())
+    assert code == 400 and "exactly one" in res["error"]
+
+
+def test_api_script_response_is_deterministic(running_server):
+    body = {"text": f"{_enc_command()}\nvssadmin delete shadows"}
+    first = _post_json(_script_url(running_server), body)[1]["analysis"]
+    second = _post_json(_script_url(running_server), body)[1]["analysis"]
+    assert first == second
+
+
+def test_api_script_attacker_strings_are_json_data_not_markup(running_server):
+    # An attacker-controlled URL containing HTML must round-trip as JSON data,
+    # not break the response or appear interpreted.
+    payload = 'Invoke-WebRequest "http://evil.invalid/</script><img src=x onerror=alert(1)>"'
+    code, res = _post_json(_script_url(running_server), {"text": payload})
+    assert code == 200
+    blob = json.dumps(res)
+    assert "<img src=x" in blob  # preserved verbatim as data
+    # It is present only inside string values, never as a structural element.
+    assert res["analysis"]["analysis_status"] == "complete"
+
+
+def _script_view_source() -> str:
+    app_js = (Path(dashboard_server.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+    start = app_js.index("const SCRIPT_SEVERITY_META")
+    end = app_js.index("\n// ==", app_js.index("function initScript("))
+    return app_js[start:end]
+
+
+def test_script_view_never_uses_html_sinks():
+    """XSS regression: the Script Analysis view must build DOM nodes, not HTML strings."""
+    source = _script_view_source()
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+        assert sink not in source, f"{sink} used in Script Analysis view"
+
+
+def test_script_view_reads_fields_the_api_returns(running_server):
+    """Top-level analysis fields the view reads must exist in the API response."""
+    code, res = _post_json(_script_url(running_server), {"text": f"{_enc_command()}\nvssadmin delete shadows"})
+    assert code == 200
+    analysis = res["analysis"]
+    for key in ("analysis_status", "severity", "score", "confidence", "language",
+                "file_size", "sha256", "decoded_layers", "indicators", "techniques", "iocs", "warnings"):
+        assert key in analysis, key
+    assert "finding_ids" in res
+    ind = analysis["indicators"][0]
+    for key in ("rule_id", "title", "severity", "technique", "layer_index", "line", "excerpt", "category"):
+        assert key in ind, key
+    layer = analysis["decoded_layers"][0]
+    for key in ("index", "depth", "parent_index", "method", "size", "is_text", "encoding", "preview", "sha256"):
+        assert key in layer, key
+
+
+def test_script_view_registered_in_nav_and_router():
+    static_dir = Path(dashboard_server.__file__).parent / "static"
+    html = (static_dir / "index.html").read_text(encoding="utf-8")
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    assert 'data-view="script"' in html
+    assert 'id="tpl-script"' in html
+    assert "case 'script': initScript();" in app_js
+    assert "'script'" in app_js.split("const GLOBAL_VIEWS")[1].split("]")[0]
+
+
+# --------------------------------------------------------------------------- #
+# Phishing Analysis view: XSS hardening regression
+# --------------------------------------------------------------------------- #
+
+# Inert, non-executing markup/scheme probes. These never run anything; they are
+# plain strings used to assert the dashboard treats message content as data.
+_PHISH_XSS_PROBES = [
+    "<u>x</u>",
+    "<img src=x onerror=alert(1)>",
+    "<script>alert(1)</script>",
+    "\"><img src=x onerror=alert(1)>",
+    "javascript:alert(1)",
+    "data:text/html,<script>alert(1)</script>",
+]
+
+
+def _phishing_view_source() -> str:
+    app_js = (Path(dashboard_server.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+    start = app_js.index("const PHISH_BADGE")
+    end = app_js.index("\n// ==", app_js.index("function initPhishing("))
+    return app_js[start:end]
+
+
+def test_phishing_view_never_uses_html_sinks():
+    """XSS regression: the Phishing Analysis view must build DOM nodes, not HTML strings."""
+    source = _phishing_view_source()
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"):
+        assert sink not in source, f"{sink} used in Phishing Analysis view"
+
+
+def test_phishing_view_renders_urls_as_inert_text_not_links():
+    """URLs are plain text, never anchors -- so no javascript:/data: scheme can execute."""
+    source = _phishing_view_source()
+    assert "createElement('a')" not in source and 'createElement("a")' not in source
+    assert "href" not in source
+
+
+def test_phishing_view_reads_fields_the_api_returns(running_server):
+    """Top-level assessment fields the view reads must exist in the API response."""
+    code, res = _post_json(f"{running_server}/api/phishing/analyze", {
+        "subject": "Urgent: verify your account",
+        "sender": "security@paypal.com.account-update.xyz",
+        "body": "Update your KYC immediately at http://1.2.3.4/login to avoid suspension.",
+    })
+    assert code == 200, res
+    a = res["assessment"]
+    for key in ("score", "risk_level", "threat_level", "confidence",
+                "mitre_techniques", "indicators", "extracted_urls",
+                "attachment_findings", "recommendations"):
+        assert key in a, key
+    assert a["indicators"], "expected at least one indicator"
+    ind = a["indicators"][0]
+    for key in ("rule_id", "category", "severity", "description", "matched_evidence"):
+        assert key in ind, key
+    assert a["extracted_urls"], "expected at least one extracted URL"
+    u = a["extracted_urls"][0]
+    for key in ("url", "hostname", "is_ip_hostname", "is_brand_subdomain",
+                "is_punycode", "is_shortener", "has_suspicious_tld"):
+        assert key in u, key
+
+
+def test_phishing_api_accepts_attacker_markup_and_stays_structured(running_server):
+    """Probe-laden messages must not break the API; the response stays valid structured JSON."""
+    for probe in _PHISH_XSS_PROBES:
+        code, res = _post_json(f"{running_server}/api/phishing/analyze", {
+            "subject": f"alert {probe}",
+            "sender": f"{probe}@evil.example",
+            "body": f"verify {probe} now at http://evil.example.xyz/path",
+        })
+        assert code == 200, (probe, res)
+        a = res.get("assessment")
+        assert isinstance(a, dict), (probe, res)
+        # Returned collections are JSON arrays/strings -- structured data, not markup.
+        assert isinstance(a["indicators"], list)
+        assert isinstance(a["extracted_urls"], list)
+        for u in a["extracted_urls"]:
+            assert isinstance(u.get("url"), str)
+
+
+def test_phishing_api_url_with_executable_scheme_is_plain_string(running_server):
+    """A URL carrying a javascript:-style scheme is returned as a string value only."""
+    code, res = _post_json(f"{running_server}/api/phishing/analyze", {
+        "body": "Click http://evil.example.xyz/path?next=javascript:alert1 to verify your kyc",
+    })
+    assert code == 200, res
+    urls = res["assessment"]["extracted_urls"]
+    assert urls, "expected an extracted URL"
+    # The view renders this via textContent, so the scheme can never execute.
+    assert all(isinstance(u["url"], str) for u in urls)
+
+
+def test_phishing_view_registered_in_nav_and_router():
+    static_dir = Path(dashboard_server.__file__).parent / "static"
+    html = (static_dir / "index.html").read_text(encoding="utf-8")
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    assert 'data-view="phishing"' in html
+    assert 'id="tpl-phishing"' in html
+    assert "case 'phishing': initPhishing();" in app_js
+    assert "'phishing'" in app_js.split("const GLOBAL_VIEWS")[1].split("]")[0]
+
+
+# --------------------------------------------------------------------------- #
+# Global XSS hardening — the entire app.js must be free of innerHTML sinks
+# --------------------------------------------------------------------------- #
+
+_APP_JS_XSS_SINKS = ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write(", "eval(", "new Function")
+
+
+def test_app_js_contains_zero_innerhtml_sinks():
+    """Global XSS regression: app.js must never use innerHTML or equivalent sinks."""
+    static_dir = Path(dashboard_server.__file__).parent / "static"
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    for sink in _APP_JS_XSS_SINKS:
+        assert sink not in app_js, f"Forbidden DOM sink '{sink}' found in app.js"
+
+
+def test_app_js_uses_safe_dom_helpers():
+    """app.js must define and use el(), kv(), badge(), safeRow() safe helpers."""
+    static_dir = Path(dashboard_server.__file__).parent / "static"
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    for helper in ("function el(", "function kv(", "function badge(", "function safeRow(", "function safeModal("):
+        assert helper in app_js, f"Missing safe DOM helper: {helper}"
+    assert "textContent" in app_js
+    assert "replaceChildren" in app_js
+
+
+def test_app_js_uses_safe_rendering_in_all_view_inits():
+    """Every init function must be present and none may contain innerHTML."""
+    static_dir = Path(dashboard_server.__file__).parent / "static"
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    required_inits = [
+        "initOverview", "initCases", "initAssessment", "initIncidents",
+        "initFindings", "initEvidence", "initInvestigation", "initTimeline",
+        "initTree", "initReconstruction", "initReports", "initCollection",
+        "initIntegrity", "initCustody", "initExport", "initDatabase",
+        "initStatic", "initScript", "initPhishing",
+    ]
+    for fn in required_inits:
+        assert f"function {fn}(" in app_js, f"Missing view init function: {fn}"
+
+
+def test_findings_view_renders_evidence_links():
+    """The Findings view must render evidence links from event_ids."""
+    static_dir = Path(dashboard_server.__file__).parent / "static"
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    findings_section = app_js.split("function initFindings")[1].split("\nfunction ")[0]
+    assert "event_ids" in findings_section, "Findings view must reference event_ids for evidence links"
+    assert "inspectEvent" in findings_section, "Findings view must link to inspectEvent for evidence navigation"
+
+
+def test_reconstruction_view_has_clickable_evidence():
+    """Reconstruction stages must render clickable evidence IDs."""
+    static_dir = Path(dashboard_server.__file__).parent / "static"
+    app_js = (static_dir / "app.js").read_text(encoding="utf-8")
+    recon_section = app_js.split("function initReconstruction")[1].split("\nfunction ")[0]
+    assert "evidence_ids" in recon_section
+    assert "inspectEvent" in recon_section, "Reconstruction must link evidence IDs to inspectEvent"
+
+
+# --------------------------------------------------------------------------- #
+# API XSS probe tests: attacker-controlled values pass through as string data
+# --------------------------------------------------------------------------- #
+
+_XSS_PROBES = [
+    "<script>alert(1)</script>",
+    "<img src=x onerror=alert(1)>",
+    '"><svg onload=alert(1)>',
+    "javascript:alert(1)",
+]
+
+
+def _get_json(url: str):
+    """Fetch URL and return (status_code, json_dict)."""
+    req = urllib.request.urlopen(url)
+    data = json.loads(req.read().decode("utf-8"))
+    return req.status, data
+
+
+def test_xss_in_case_name_preserved_as_data(running_server, test_db_path):
+    """XSS probes in case_name are returned as inert string data by the API."""
+    store = EvidenceStore(test_db_path)
+    for i, probe in enumerate(_XSS_PROBES):
+        cid = f"CASE-XSS-{i:03d}"
+        store.create_case(cid, probe)
+    store.close()
+
+    code, res = _get_json(f"{running_server}/api/cases")
+    assert code == 200
+    for c in res["cases"]:
+        if c["case_id"].startswith("CASE-XSS-"):
+            assert isinstance(c["case_name"], str)
+            assert "<" not in c["case_name"] or c["case_name"] in _XSS_PROBES
+
+
+def test_xss_in_process_name_preserved_in_event(running_server, test_db_path):
+    """XSS markup in process_name round-trips as string data through the inspect API."""
+    probe = "<img src=x onerror=alert(1)>"
+    store = EvidenceStore(test_db_path)
+    cid = "CASE-XSS-PROC"
+    store.create_case(cid, "xss proc test")
+    eid = "EV-XSS-001"
+    store.save_event(cid, {
+        "event_id": eid,
+        "event_type": "process_create",
+        "process_name": probe,
+        "command_line": probe,
+        "timestamp": "2026-01-01T00:00:00",
+        "source": "sysmon",
+    })
+    store.close()
+
+    code, res = _get_json(f"{running_server}/api/inspect/{cid}?event_id={eid}")
+    assert code == 200
+    ev = res["event"]
+    assert ev["process_name"] == probe
+    assert ev["command_line"] == probe
+
+
+def test_navigation_restructured_four_groups():
+    """index.html sidebar must use the 4-group navigation structure."""
+    static_dir = Path(dashboard_server.__file__).parent / "static"
+    html = (static_dir / "index.html").read_text(encoding="utf-8")
+    for group in ["Command Center", "Investigate", "Forensics", "Operations"]:
+        assert group in html, f"Navigation group '{group}' missing from index.html"

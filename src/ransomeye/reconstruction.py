@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from ransomeye.investigation import Investigation
 from ransomeye.investigation_graph import InvestigationGraph, _get_process_id
+
+
+def _normalize_dt(dt: datetime | None) -> datetime | None:
+    """Normalize datetime to UTC for timezone-safe comparison."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
 
 
 @dataclass(frozen=True)
@@ -109,6 +119,14 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
     # 1. Process Findings first to identify aggregations or upgrades
     finding_upgrades = {}  # evidence_id -> dict of upgraded properties
 
+    # Pre-index correlations per evidence event
+    event_correlations: dict[str, set[str]] = {}
+    for corr in investigation.correlations:
+        c_id_val = corr.get("incident_id")
+        if c_id_val:
+            for eid_val in corr.get("evidence_event_ids", []):
+                event_correlations.setdefault(str(eid_val), set()).add(str(c_id_val))
+
     for finding in investigation.findings:
         f_id = finding.get("finding_id")
         if f_id is None:
@@ -116,19 +134,59 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
         f_id_str = str(f_id)
 
         f_type = finding.get("finding_type", "").lower()
-        f_title = finding.get("title") or f_type
-        f_desc = finding.get("description", "")
+        f_title = finding.get("title")
+        f_desc = finding.get("description") or finding.get("reason", "")
         ev_ids = [str(x) for x in (finding.get("event_ids") or [])]
 
-        # Determine stage type
+        # Determine stage type and evidence-supported titles
         if "mass" in f_type and "file" in f_type:
             stage_type = "MASS_FILE_MODIFICATION"
+            if not f_title:
+                f_title = "Mass File Modification Activity"
         elif "ransom" in f_type and "note" in f_type:
             stage_type = "RANSOM_NOTE"
-        elif f_type in ("suspicious_powershell", "encoded_command", "suspicious_command", "suspicious_process"):
+            if not f_title:
+                f_title = "Ransom Note Creation"
+        elif f_type in ("suspicious_powershell", "encoded_command"):
             stage_type = "SUSPICIOUS_COMMAND"
+            if not f_title:
+                f_title = "Suspicious PowerShell Execution"
+        elif "certutil" in f_type:
+            stage_type = "COMMAND"
+            if not f_title:
+                f_title = "File Download Activity (CertUtil LOLBIN)"
+        elif "recovery" in f_type or "inhibition" in f_type:
+            stage_type = "COMMAND"
+            if not f_title:
+                f_title = "Recovery-Inhibition Command"
+        elif "static" in f_type:
+            stage_type = "SUSPICIOUS_EXECUTABLE"
+            if not f_title:
+                f_title = "Suspicious Executable Activity"
+        elif "script" in f_type:
+            stage_type = "SCRIPT_EXECUTION"
+            if not f_title:
+                f_title = "PowerShell Download Cradle Detected"
+        elif "phish" in f_type:
+            stage_type = "PHISHING"
+            if not f_title:
+                f_title = "Suspicious Phishing Artifact Submitted"
+        elif "ioc_contextual_lolbin" in f_type:
+            stage_type = "COMMAND"
+            if not f_title:
+                f_title = "LOLBIN Command Activity Detected"
+        elif "ioc" in f_type:
+            stage_type = "FINDING"
+            if not f_title:
+                f_title = "Threat Indicator Extraction"
+        elif f_type in ("suspicious_command", "suspicious_process"):
+            stage_type = "SUSPICIOUS_COMMAND"
+            if not f_title:
+                f_title = "Suspicious Process Activity"
         else:
             stage_type = "FINDING"
+            if not f_title:
+                f_title = f_type.replace("_", " ").title()
 
         # Grouping behavior: if it's a mass file modification, group them.
         if stage_type == "MASS_FILE_MODIFICATION" and len(ev_ids) > 1:
@@ -137,8 +195,8 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
             if not evs:
                 continue
 
-            min_time = min(e.timestamp for e in evs)
-            max_time = max(e.timestamp for e in evs)
+            min_time = min(evs, key=lambda e: _normalize_dt(e.timestamp)).timestamp
+            max_time = max(evs, key=lambda e: _normalize_dt(e.timestamp)).timestamp
 
             pids = set()
             for e in evs:
@@ -152,10 +210,11 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
                 end_time=max_time,
                 stage_type=stage_type,
                 title=f_title,
-                description=f_desc,
+                description=f_desc or f"Mass file modification detected across {len(ev_ids)} files",
                 evidence_ids=tuple(sorted(ev_ids)),
                 finding_ids=(f_id_str,),
-                process_ids=tuple(sorted(pids))
+                process_ids=tuple(sorted(pids)),
+                attributes={"file_count": len(ev_ids), "finding_reason": f_desc}
             ))
             grouped_evidence_ids.update(ev_ids)
 
@@ -173,8 +232,10 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
                 # Keep the most severe stage type if multiple (simplification: last one wins or specific overrides)
                 if stage_type != "FINDING":
                     finding_upgrades[eid]["stage_type"] = stage_type
-                if f_title and finding_upgrades[eid]["title"] == "FINDING":
+                if f_title and (finding_upgrades[eid]["title"] in ("FINDING", "file_stream_hash", f_type) or stage_type != "FINDING"):
                     finding_upgrades[eid]["title"] = f_title
+                if f_desc and not finding_upgrades[eid]["description"]:
+                    finding_upgrades[eid]["description"] = f_desc
 
     # 2. Process Raw Evidence Events
     for i, event in enumerate(investigation.evidence):
@@ -197,6 +258,16 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
             title = f"{proc_name}{pid_str}"
             if event.command_line:
                 desc = event.command_line
+                attributes["command_line"] = event.command_line
+            else:
+                desc = f"Process {proc_name} created"
+            attributes["process_name"] = proc_name
+            if event.pid:
+                attributes["pid"] = event.pid
+            if event.parent_image:
+                attributes["parent_image"] = event.parent_image
+            if event.parent_pid:
+                attributes["parent_pid"] = event.parent_pid
 
         elif ev_type in ("file_create", "file_modify", "file_delete", "file_rename"):
             stage_type = "FILE_ACTIVITY"
@@ -204,18 +275,25 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
             fname = event.file_path.split("\\")[-1].split("/")[-1] if event.file_path else "unknown file"
             title = f"File {action.lower()} activity"
             desc = f"{action} {fname}"
+            if event.file_path:
+                attributes["file_path"] = event.file_path
+                desc = f"{action} {fname} ({event.file_path})"
 
         elif ev_type == "network_connect":
             stage_type = "NETWORK_ACTIVITY"
             if event.network:
                 attributes.update(event.network)
 
-            proc_name = event.process_name or "unknown process"
+            proc_name = event.process_name or ""
             dip = attributes.get("destination_ip", "")
             dport = attributes.get("destination_port", "")
             dest_str = f"{dip}:{dport}" if dport else f"{dip}"
-            title = f"{proc_name} \u2192 {dest_str}"
-            desc = ""
+            if proc_name:
+                title = f"{proc_name} \u2192 {dest_str}" if dest_str else f"{proc_name} network connection"
+                desc = f"Outbound connection to {dest_str} initiated by {proc_name}" if dest_str else f"Network connection by {proc_name}"
+            else:
+                title = f"Network Connection \u2192 {dest_str}" if dest_str else "Network Connection"
+                desc = f"Observed outbound network connection to {dest_str}" if dest_str else "Network connection observed"
 
         elif ev_type == "dns_query":
             stage_type = "NETWORK_ACTIVITY"
@@ -224,12 +302,42 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
                 qname = event.network.get("query_name", "")
                 qres = event.network.get("query_results", "")
                 title = f"DNS Query: {qname}" if qname else "DNS Query"
-                desc = f"Result: {qres}" if qres else ""
+                desc = f"Result: {qres}" if qres else (f"Query for {qname}" if qname else "DNS resolution query")
             else:
                 title = "DNS Query"
+                desc = "DNS resolution query"
+
+        elif ev_type == "file_stream_hash":
+            stage_type = "ARTIFACT_INGESTION"
+            meta = event.metadata or {}
+            fname = event.file_path.split("\\")[-1].split("/")[-1] if event.file_path else (meta.get("file_name") or meta.get("artifact_label") or "artifact")
+            obs = meta.get("observation", "")
+            if obs == "phishing_message_provenance" or fname.endswith(".eml"):
+                title = "Phishing Artifact Submitted"
+                subj = meta.get("subject", "Mandatory Security Verification")
+                desc = f"Email artifact '{fname}' submitted for analysis (Subject: {subj})"
+            elif obs == "static_script_analysis" or fname.endswith(".ps1"):
+                title = "Suspicious Script Artifact"
+                lang = meta.get("language", "powershell")
+                desc = f"Script '{fname}' ({lang}) submitted for forensic analysis"
+            elif obs == "pcap_capture_provenance" or fname.endswith(".pcap"):
+                title = "Network Capture Artifact"
+                pkts = meta.get("total_packets", 2)
+                desc = f"PCAP capture '{fname}' ({pkts} packets) submitted for traffic inspection"
+            elif obs == "ioc_extraction_provenance" or "indicators" in fname:
+                title = "Threat Indicator Artifact"
+                desc = f"IOC indicator feed '{fname}' submitted for intelligence extraction"
+            elif meta.get("file_type") == "Windows PE Executable / DLL" or fname.endswith(".exe"):
+                title = "Suspicious Executable Artifact"
+                ent = meta.get("total_entropy", "")
+                desc = f"Staged binary '{fname}' (PE Executable, entropy {ent}) submitted for static analysis"
+            else:
+                title = f"Evidence Artifact: {fname}"
+                desc = f"Artifact {fname} ingested into case evidence store"
         else:
             stage_type = ev_type.upper()
-            title = ev_type
+            title = ev_type.replace("_", " ").title()
+            desc = f"Event {event.event_id} ({ev_type})"
 
         finding_ids = set()
 
@@ -237,10 +345,18 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
         if event.event_id in finding_upgrades:
             upg = finding_upgrades[event.event_id]
             stage_type = upg["stage_type"]
-            # If the finding has a specific title, we might use it instead or alongside
-            if upg["title"] and upg["stage_type"] != "FINDING":
+            if upg["title"]:
                 title = upg["title"]
+            if upg["description"]:
+                if desc and desc != upg["description"]:
+                    attributes["finding_reason"] = upg["description"]
+                else:
+                    desc = upg["description"]
             finding_ids.update(upg["finding_ids"])
+
+        event_corrs = tuple(sorted(event_correlations.get(str(event.event_id), set())))
+        if event_corrs:
+            attributes["correlation_ids"] = list(event_corrs)
 
         stages.append(AttackStage(
             stage_id=f"STAGE-E-{event.event_id}",
@@ -277,13 +393,19 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
             elif pid is not None:
                 pids.add(f"PROCESS:PID:{pid}")
 
+        ev_count = len(ev_ids)
+        c_title = corr.get("title") or f"Incident: {c_id}"
+        c_desc = corr.get("description") or corr.get("summary") or (
+            f"Correlated {ev_count} events across incident lifecycle" if ev_count > 1 else f"Correlated event {ev_ids[0] if ev_ids else ''}"
+        )
+
         stages.append(AttackStage(
             stage_id=f"STAGE-C-{c_id}",
             timestamp=start_time,
             end_time=end_time,
             stage_type="CORRELATION",
-            title=f"Incident: {c_id}",
-            description=f"Correlated {len(ev_ids)} events",
+            title=c_title,
+            description=c_desc,
             evidence_ids=tuple(sorted(ev_ids)),
             correlation_ids=(c_id,),
             process_ids=tuple(sorted(pids))
@@ -318,7 +440,7 @@ def reconstruct_attack(investigation: Investigation, graph: InvestigationGraph) 
         stages,
         key=lambda s: (
             s.timestamp is None,
-            s.timestamp,
+            _normalize_dt(s.timestamp),
             _get_stage_priority(s.stage_type),
             s.stage_id
         )

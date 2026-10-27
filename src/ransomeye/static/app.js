@@ -1,13 +1,23 @@
+// ============================================================
+// RansomEye Analyst Console — Safe DOM Rendering Architecture
+// ============================================================
+// ALL attacker-controlled or artifact-derived data is rendered
+// via textContent / safe DOM construction helpers. Zero dynamic
+// markup interpolation or raw HTML sinks are permitted.
+// ============================================================
+
 const state = {
     cases: [],
     currentCaseId: '',
     currentCase: null,
     assessment: null,
+    timelineAssessment: null,
     stats: null,
     incidents: [],
     findings: [],
     activity: [],
     timeline: [],
+    reconstruction: [],
     lastEventMeta: null,
     currentView: 'overview'
 };
@@ -29,32 +39,189 @@ const dom = {
     drawer: document.getElementById('detail-drawer'),
     drawerTitle: document.getElementById('drawer-title'),
     drawerContent: document.getElementById('drawer-content'),
-    drawerClose: document.getElementById('drawer-close')
+    drawerClose: document.getElementById('drawer-close'),
+
+    // Modal
+    modal: document.getElementById('app-modal'),
+    modalTitle: document.getElementById('modal-title'),
+    modalBody: document.getElementById('modal-body'),
+    modalFooter: document.getElementById('modal-footer'),
+    modalClose: document.getElementById('modal-close')
 };
 
+// ============================================================
+// Safe DOM Helpers
+// ============================================================
+function el(tag, opts = {}, children = []) {
+    const node = document.createElement(tag);
+    if (opts.className) node.className = opts.className;
+    if (opts.text != null) node.textContent = String(opts.text);
+    if (opts.title != null) node.title = String(opts.title);
+    if (opts.style) node.style.cssText = opts.style;
+    if (opts.attrs) for (const [k, v] of Object.entries(opts.attrs)) node.setAttribute(k, String(v));
+    if (opts.onclick) node.addEventListener('click', opts.onclick);
+    for (const child of children) if (child) node.appendChild(child);
+    return node;
+}
+
+function kv(key, value, opts = {}) {
+    return el('div', { className: 'prop-item' }, [
+        el('span', { className: 'prop-key', text: key }),
+        el('span', { className: 'prop-val' + (opts.mono ? ' mono' : ''), text: value == null ? '-' : String(value) }),
+    ]);
+}
+
+function badge(text, severity) {
+    return el('span', { className: 'badge ' + (severity || 'low'), text: String(text || '-') });
+}
+
+function safeRow(cells, opts = {}) {
+    const tr = el('tr', { className: opts.clickable ? 'clickable' : '' });
+    if (opts.onclick) tr.addEventListener('click', opts.onclick);
+    for (const cell of cells) {
+        if (cell instanceof HTMLElement) {
+            const td = el('td');
+            td.appendChild(cell);
+            tr.appendChild(td);
+        } else if (cell && typeof cell === 'object' && cell.node) {
+            const td = el('td', { className: cell.className || '' });
+            td.appendChild(cell.node);
+            tr.appendChild(td);
+        } else {
+            const td = el('td', { className: (cell && cell.mono) ? 'mono' : '' });
+            td.textContent = cell != null ? String(cell) : '-';
+            tr.appendChild(td);
+        }
+    }
+    return tr;
+}
+
+function emptyRow(cols, message) {
+    const tr = el('tr');
+    const td = el('td', { text: message, style: 'text-align: center; padding: 32px;' });
+    td.colSpan = cols;
+    tr.appendChild(td);
+    return tr;
+}
+
+function section(title, startOpen, bodyNodes) {
+    const details = el('details', { style: 'margin-top: 16px;' });
+    if (startOpen) details.open = true;
+    details.appendChild(el('summary', { text: title, style: 'cursor: pointer; font-weight: 600; color: var(--re-text-secondary);' }));
+    details.appendChild(el('div', { style: 'margin-top: 12px;' }, bodyNodes));
+    return details;
+}
+
+function safeModal(title, bodyNodes, footerNodes) {
+    if (!dom.modal) return;
+    dom.modalTitle.textContent = title;
+    dom.modalBody.replaceChildren(...bodyNodes);
+    dom.modalFooter.replaceChildren(...footerNodes);
+    dom.modal.classList.remove('hidden');
+}
+
+function hideModal() {
+    if (!dom.modal) return;
+    dom.modal.classList.add('hidden');
+    dom.modalBody.replaceChildren();
+    dom.modalFooter.replaceChildren();
+}
+
+// ============================================================
+// Shared case-selector helper (used by Static, Phishing, Script,
+// PCAP, and IOC analyzer views). Keeps the vocabulary consistent
+// and renders a case list through safe DOM only.
+// Options:
+//   required         - true: no "no case" option (analyzer requires a case)
+//                      false (default): include a "No case (analysis only)" option
+//   statusEl         - optional element to receive a human-readable status line
+//   onChange         - optional callback(value) when the user picks a case
+//   caseList         - optional explicit case array (defaults to state.cases)
+// Returns the selected value after population (string, "" if none selected).
+// ============================================================
+function populateCaseSelector(selectEl, options = {}) {
+    if (!selectEl) return "";
+    const required = options.required === true;
+    const statusEl = options.statusEl || null;
+    const caseList = Array.isArray(options.caseList) ? options.caseList : (state.cases || []);
+
+    const opts = [];
+    if (!required) {
+        opts.push(el('option', { text: 'No case (analysis only)', attrs: { value: '' } }));
+    } else if (caseList.length === 0) {
+        opts.push(el('option', { text: 'No cases available', attrs: { value: '' } }));
+    } else {
+        opts.push(el('option', { text: 'Select a case...', attrs: { value: '' } }));
+    }
+    for (const c of caseList) {
+        const label = c.case_name && c.case_name !== c.case_id
+            ? `${c.case_id} — ${c.case_name}`
+            : c.case_id;
+        opts.push(el('option', { text: label, attrs: { value: c.case_id } }));
+    }
+    selectEl.replaceChildren(...opts);
+    const prior = selectEl.value;
+    if (state.currentCaseId && caseList.some(c => c.case_id === state.currentCaseId)) {
+        selectEl.value = state.currentCaseId;
+    }
+
+    const render = () => {
+        if (!statusEl) return;
+        statusEl.textContent = '';
+        statusEl.style.color = 'var(--re-text-muted)';
+        if (caseList.length === 0) {
+            statusEl.textContent = required
+                ? 'No cases available. Create a case before running analysis.'
+                : 'No cases available. Analysis will run without ingesting evidence.';
+            statusEl.style.color = required ? 'var(--re-critical)' : 'var(--re-text-muted)';
+        } else if (!selectEl.value) {
+            statusEl.textContent = required
+                ? 'Select a case to analyze into.'
+                : 'No case selected. Analysis will run without ingesting evidence.';
+        } else {
+            statusEl.textContent = `Case selected: ${selectEl.value}. Ready to analyze.`;
+            statusEl.style.color = 'var(--re-text-secondary)';
+        }
+    };
+    render();
+    selectEl.addEventListener('change', () => {
+        render();
+        if (typeof options.onChange === 'function') options.onChange(selectEl.value);
+    });
+    return selectEl.value || "";
+}
+
+// ============================================================
+// Init & Listeners
+// ============================================================
 async function init() {
     setupListeners();
     await fetchCases();
+    if (!state.currentCaseId && state.cases && state.cases.length > 0) {
+        await loadCase(state.cases[0].case_id);
+    }
     switchView('overview');
 }
 
 function setupListeners() {
     dom.selectCase.addEventListener('change', async (e) => {
-        const cid = e.target.value;
-        if (cid) {
-            await loadCase(cid);
-        }
+        await loadCase(e.target.value);
     });
 
     dom.navItems.forEach(n => {
         n.addEventListener('click', (e) => {
             e.preventDefault();
-            switchView(e.target.dataset.view);
+            switchView(e.currentTarget.dataset.view);
         });
     });
 
     dom.btnRefresh.addEventListener('click', async () => {
-        if (state.currentCaseId) await loadCase(state.currentCaseId);
+        await fetchCases();
+        if (state.currentCaseId) {
+            await loadCase(state.currentCaseId);
+        } else {
+            renderCurrentView();
+        }
     });
 
     dom.btnReport.addEventListener('click', () => switchView('reports'));
@@ -62,9 +229,20 @@ function setupListeners() {
     dom.drawerClose.addEventListener('click', () => {
         dom.drawer.classList.remove('open');
     });
+
+    if (dom.modalClose) {
+        dom.modalClose.addEventListener('click', hideModal);
+    }
+    if (dom.modal) {
+        dom.modal.addEventListener('click', (e) => {
+            if (e.target === dom.modal) hideModal();
+        });
+    }
 }
 
+// ============================================================
 // API
+// ============================================================
 async function api(path, options = {}) {
     try {
         const res = await fetch(`/api${path}`, options);
@@ -86,22 +264,27 @@ async function api(path, options = {}) {
     }
 }
 
+// ============================================================
 // Loaders
+// ============================================================
 async function fetchCases() {
     const data = await api('/cases');
     if (!data || !data.cases || data.cases.length === 0) {
-        dom.selectCase.innerHTML = '<option value="">NO CASES AVAILABLE</option>';
+        state.cases = [];
+        dom.selectCase.replaceChildren(el('option', { text: 'NO CASES AVAILABLE', attrs: { value: '' } }));
         return;
     }
 
     state.cases = data.cases;
-    dom.selectCase.innerHTML = '<option value="">Select Case...</option>';
+    const currentVal = state.currentCaseId;
+    const opts = [el('option', { text: 'Select Case...', attrs: { value: '' } })];
     data.cases.forEach(c => {
-        const opt = document.createElement('option');
-        opt.value = c.case_id;
+        const opt = el('option', { attrs: { value: c.case_id } });
         opt.textContent = `${c.case_id} — ${c.case_name || 'Unnamed'} (${c.status})`;
-        dom.selectCase.appendChild(opt);
+        if (c.case_id === currentVal) opt.selected = true;
+        opts.push(opt);
     });
+    dom.selectCase.replaceChildren(...opts);
 }
 
 async function loadCase(caseId) {
@@ -114,33 +297,39 @@ async function loadCase(caseId) {
         state.findings = [];
         state.activity = [];
         state.timeline = [];
+        state.timelineAssessment = null;
         state.reconstruction = [];
+        dom.selectCase.value = '';
         updateTopbar();
         renderCurrentView();
         return;
     }
+
     state.currentCaseId = caseId;
-    const data = await api(`/case/${caseId}`);
-    if (data) {
+    dom.selectCase.value = caseId;
+
+    const data = await api(`/case/${encodeURIComponent(caseId)}`);
+    if (data && !data._error) {
         state.currentCase = data.case;
         state.assessment = data.assessment;
         state.stats = data.stats;
     }
 
-    const incData = await api(`/incidents/${caseId}`);
-    state.incidents = incData ? incData.incidents : [];
+    const incData = await api(`/incidents/${encodeURIComponent(caseId)}`);
+    state.incidents = (incData && !incData._error) ? incData.incidents : [];
 
-    const findData = await api(`/findings/${caseId}`);
-    state.findings = findData ? findData.findings : [];
+    const findData = await api(`/findings/${encodeURIComponent(caseId)}`);
+    state.findings = (findData && !findData._error) ? findData.findings : [];
 
-    const actData = await api(`/recent_activity/${caseId}`);
-    state.activity = actData ? actData.activity : [];
+    const actData = await api(`/recent_activity/${encodeURIComponent(caseId)}`);
+    state.activity = (actData && !actData._error) ? actData.activity : [];
 
-    const tlData = await api(`/timeline/${caseId}`);
-    state.timeline = tlData ? tlData.timeline : [];
+    const tlData = await api(`/timeline/${encodeURIComponent(caseId)}`);
+    state.timeline = (tlData && !tlData._error) ? tlData.timeline : [];
+    state.timelineAssessment = (tlData && !tlData._error && tlData.assessment) ? tlData.assessment : null;
 
-    const recData = await api(`/reconstruction/${caseId}`);
-    state.reconstruction = recData ? recData.stages : [];
+    const recData = await api(`/reconstruction/${encodeURIComponent(caseId)}`);
+    state.reconstruction = (recData && !recData._error) ? recData.stages : [];
 
     updateTopbar();
     renderCurrentView();
@@ -167,7 +356,9 @@ function updateTopbar() {
     dom.tbSeverity.className = `badge ${sev.toLowerCase()}`;
 }
 
+// ============================================================
 // Router
+// ============================================================
 function switchView(viewName) {
     state.currentView = viewName;
     dom.navItems.forEach(n => n.classList.toggle('active', n.dataset.view === viewName));
@@ -175,46 +366,64 @@ function switchView(viewName) {
     renderCurrentView();
 }
 
+const GLOBAL_VIEWS = ['cases', 'monitor', 'collection', 'integrity', 'database', 'static', 'script', 'phishing', 'pcap', 'ioc'];
+
 function renderCurrentView() {
-    if (!state.currentCaseId && state.currentView !== 'monitor') {
-        dom.viewContainer.innerHTML = `
-            <div class="empty-state" style="padding-top: 100px;">
-                <h3>No Case Selected</h3>
-                <p>Select a case from the sidebar to view this dashboard, or ingest new evidence using the CLI.</p>
-                <div class="code-block" style="display: inline-block; text-align: left; margin-top: 24px; padding: 16px;">
-.\\.venv\\Scripts\\python.exe -m ransomeye.commands ingest --database &lt;db_path&gt; --case &lt;case_id&gt; &lt;evidence_file&gt;
-                </div>
-            </div>`;
+    if (!state.currentCaseId && !GLOBAL_VIEWS.includes(state.currentView)) {
+        dom.viewContainer.replaceChildren(
+            el('div', { className: 'empty-state', style: 'padding-top: 100px;' }, [
+                el('h3', { text: 'No Case Selected' }),
+                el('p', { text: 'Select a case from the sidebar or manage cases to begin investigation.' }),
+                el('div', { style: 'margin-top: 24px; display: flex; gap: 12px; justify-content: center;' }, [
+                    el('button', { className: 'btn btn-primary', text: 'View / Create Cases', onclick: () => switchView('cases') }),
+                    el('button', { className: 'btn', text: 'Ingest Evidence', onclick: () => switchView('collection') }),
+                ]),
+            ])
+        );
         return;
     }
 
     const tpl = document.getElementById(`tpl-${state.currentView}`);
     if (!tpl) {
-        dom.viewContainer.innerHTML = `<div class="empty-state"><h3>View Not Found</h3></div>`;
+        dom.viewContainer.replaceChildren(el('div', { className: 'empty-state' }, [el('h3', { text: 'View Not Found' })]));
         return;
     }
 
-    dom.viewContainer.innerHTML = '';
+    dom.viewContainer.replaceChildren();
     dom.viewContainer.appendChild(tpl.content.cloneNode(true));
 
     switch (state.currentView) {
         case 'overview': initOverview(); break;
-        case 'monitor': break; // Static truth content
+        case 'cases': initCases(); break;
+        case 'monitor': break;
         case 'assessment': initAssessment(); break;
         case 'incidents': initIncidents(); break;
         case 'findings': initFindings(); break;
         case 'evidence': initEvidence(); break;
+        case 'investigation': initInvestigation(); break;
         case 'timeline': initTimeline(); break;
+        case 'tree': initTree(); break;
         case 'reconstruction': initReconstruction(); break;
         case 'reports': initReports(); break;
+        case 'collection': initCollection(); break;
+        case 'integrity': initIntegrity(); break;
+        case 'custody': initCustody(); break;
+        case 'export': initExport(); break;
+        case 'database': initDatabase(); break;
+        case 'static': initStatic(); break;
+        case 'script': initScript(); break;
+        case 'phishing': initPhishing(); break;
+        case 'pcap': initPcap(); break;
+        case 'ioc': initIoc(); break;
     }
 }
 
-// View Initializers
+// ==========================================
+// 1. Overview
+// ==========================================
 function initOverview() {
     if (!state.currentCase) return;
 
-    // Stats
     const asmt = state.assessment || {};
     const scoreVal = asmt.score !== undefined ? asmt.score : '-';
     const confVal = asmt.confidence !== undefined ? (asmt.confidence * 100).toFixed(0) + '%' : '-';
@@ -227,7 +436,6 @@ function initOverview() {
     document.getElementById('ov-findings').textContent = state.findings.length;
     document.getElementById('ov-evidence').textContent = state.stats ? state.stats.events : '-';
 
-    // Colors
     const sevClass = (asmt.severity || '').toLowerCase();
     if (sevClass === 'critical' || sevClass === 'high') {
         document.getElementById('ov-score').classList.add('text-critical');
@@ -237,102 +445,350 @@ function initOverview() {
         document.getElementById('ov-severity').classList.add('text-warning');
     }
 
-    // Incidents Table
     const incTbody = document.getElementById('ov-incidents-tbody');
     if (state.incidents.length > 0) {
-        incTbody.innerHTML = state.incidents.slice(0, 5).map(inc => `
-            <tr class="clickable" onclick="inspectIncident('${inc.incident_id}')">
-                <td><span class="clickable-id mono">${inc.incident_id}</span></td>
-                <td><span class="badge ${inc.severity.toLowerCase()}">${inc.severity}</span></td>
-                <td>${(inc.evidence_event_ids || []).length}</td>
-            </tr>
-        `).join('');
+        const rows = state.incidents.slice(0, 5).map(inc => {
+            const idCell = el('span', { className: 'clickable-id mono', text: inc.incident_id });
+            return safeRow([
+                { node: idCell },
+                { node: badge(inc.severity, (inc.severity || '').toLowerCase()) },
+                (inc.evidence_event_ids || []).length,
+            ], { clickable: true, onclick: () => inspectIncident(inc.incident_id) });
+        });
+        incTbody.replaceChildren(...rows);
     }
 
-    // Activity Table
     const actTbody = document.getElementById('ov-activity-tbody');
     if (state.activity.length > 0) {
-        actTbody.innerHTML = state.activity.map(a => `
-            <tr class="clickable" onclick="inspectEventEncoded('${encodeURIComponent(a.event_id)}')">
-                <td>${a.timestamp}</td>
-                <td>${a.event_type}</td>
-                <td>${a.process_name || '-'}</td>
-            </tr>
-        `).join('');
+        const rows = state.activity.map(a =>
+            safeRow([
+                a.timestamp,
+                a.event_type,
+                a.process_name || '-',
+            ], { clickable: true, onclick: () => inspectEvent(a.event_id) })
+        );
+        actTbody.replaceChildren(...rows);
     }
 }
 
-function initAssessment() {
-    if (!state.assessment) return;
-    const p = document.getElementById('assessment-panel');
-    const a = state.assessment;
-    p.innerHTML = `
-        <div class="panel-body">
-            <div class="grid-overview" style="grid-template-columns: 1fr 1fr 1fr;">
-                <div class="stat-card">
-                    <span class="stat-label">Score</span>
-                    <span class="stat-val ${a.severity === 'CRITICAL' || a.severity === 'HIGH' ? 'text-critical' : 'text-warning'}">${a.score}</span>
-                </div>
-                <div class="stat-card">
-                    <span class="stat-label">Severity</span>
-                    <span class="stat-val ${a.severity === 'CRITICAL' || a.severity === 'HIGH' ? 'text-critical' : 'text-warning'}">${a.severity}</span>
-                </div>
-                <div class="stat-card">
-                    <span class="stat-label">Confidence</span>
-                    <span class="stat-val">${(a.confidence * 100).toFixed(0)}%</span>
-                </div>
-            </div>
+// ==========================================
+// 2. Cases Management
+// ==========================================
+async function initCases() {
+    const tbody = document.getElementById('cases-tbody');
+    const searchInp = document.getElementById('cases-search');
+    const filterStatus = document.getElementById('cases-filter-status');
+    const btnNew = document.getElementById('btn-create-case-modal');
 
-            <h4 class="mt-xl" style="margin-bottom: 12px; color: var(--re-text-muted); text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em;">Analytical Reasons</h4>
-            <div class="prop-list">
-                ${(a.reasons || []).map(r => `<div class="prop-val" style="color: var(--re-critical); border-left: 3px solid var(--re-critical);">${r}</div>`).join('')}
-            </div>
+    const renderTable = (casesList) => {
+        if (!casesList || casesList.length === 0) {
+            tbody.replaceChildren(emptyRow(10, 'No cases found. Create a new case to begin.'));
+            return;
+        }
 
-            <h4 class="mt-xl" style="margin-bottom: 12px; color: var(--re-text-muted); text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em;">Techniques</h4>
-            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                ${(a.techniques || []).map(t => `<span class="badge high">${t}</span>`).join('')}
-            </div>
-        </div>
-    `;
+        const rows = casesList.map(c => {
+            const idCell = el('span', { className: 'mono clickable-id', text: c.case_id,
+                onclick: () => loadCase(c.case_id).then(() => switchView('overview')) });
+            const nameCell = el('strong', { text: c.case_name || '-' });
+            const hostCell = el('span', { className: 'mono', text: c.host || '-' });
+            const statusBadge = badge(c.status, c.status === 'OPEN' ? 'critical' : 'low');
+            const sevBadge = badge(c.severity || 'LOW', (c.severity || 'low').toLowerCase());
+            const created = el('span', { className: 'mono', text: c.created_at ? c.created_at.slice(0, 19) : '-', style: 'font-size: 11px;' });
+            const actions = el('div', { style: 'display: flex; gap: 6px; white-space: nowrap; min-width: 175px;' }, [
+                el('button', { className: 'btn btn-sm btn-primary', text: 'Open',
+                    onclick: (e) => { e.stopPropagation(); loadCase(c.case_id).then(() => switchView('overview')); } }),
+                el('button', { className: 'btn btn-sm', text: 'Status',
+                    onclick: (e) => { e.stopPropagation(); openUpdateStatusModal(c.case_id, c.status); } }),
+                el('button', { className: 'btn btn-sm', text: 'History',
+                    onclick: (e) => { e.stopPropagation(); openCaseHistoryModal(c.case_id); } }),
+            ]);
+
+            const tr = el('tr');
+            for (const cell of [idCell, nameCell, hostCell, statusBadge, sevBadge, created,
+                               c.events_count !== undefined ? String(c.events_count) : '-',
+                               c.findings_count !== undefined ? String(c.findings_count) : '-',
+                               c.incidents_count !== undefined ? String(c.incidents_count) : '-',
+                               actions]) {
+                const td = el('td');
+                if (cell instanceof HTMLElement) td.appendChild(cell);
+                else td.textContent = String(cell);
+                tr.appendChild(td);
+            }
+            return tr;
+        });
+        tbody.replaceChildren(...rows);
+    };
+
+    const filterAndRender = () => {
+        const q = (searchInp.value || '').toLowerCase();
+        const st = (filterStatus.value || '').toUpperCase();
+        const filtered = state.cases.filter(c => {
+            const matchesQ = !q || (c.case_id && c.case_id.toLowerCase().includes(q)) ||
+                             (c.case_name && c.case_name.toLowerCase().includes(q)) ||
+                             (c.host && c.host.toLowerCase().includes(q));
+            const matchesSt = !st || c.status === st;
+            return matchesQ && matchesSt;
+        });
+        renderTable(filtered);
+    };
+
+    searchInp.addEventListener('input', filterAndRender);
+    filterStatus.addEventListener('change', filterAndRender);
+
+    btnNew.addEventListener('click', () => {
+        const idInp = el('input', { className: 'form-control mono', attrs: { type: 'text', id: 'modal-new-case-id', placeholder: 'e.g. CASE-2026-001' } });
+        const nameInp = el('input', { className: 'form-control', attrs: { type: 'text', id: 'modal-new-case-name', placeholder: 'e.g. Finance Server Ransomware Investigation' } });
+        const hostInp = el('input', { className: 'form-control', attrs: { type: 'text', id: 'modal-new-case-host', placeholder: 'e.g. WIN-SRV-01' } });
+        const fb = el('div', { className: 'mt-md hidden', attrs: { id: 'modal-case-feedback' } });
+
+        safeModal('Create Forensic Case', [
+            el('div', { className: 'form-group' }, [el('label', { className: 'form-label', text: 'Case ID *' }), idInp]),
+            el('div', { className: 'form-group' }, [el('label', { className: 'form-label', text: 'Case Name' }), nameInp]),
+            el('div', { className: 'form-group' }, [el('label', { className: 'form-label', text: 'Host Name' }), hostInp]),
+            fb,
+        ], [
+            el('button', { className: 'btn', text: 'Cancel', onclick: hideModal }),
+            el('button', { className: 'btn btn-primary', text: 'Create Case', onclick: async () => {
+                const cid = idInp.value.trim();
+                const name = nameInp.value.trim();
+                const host = hostInp.value.trim();
+
+                if (!cid) {
+                    fb.className = 'alert alert-error mt-md';
+                    fb.textContent = 'Case ID is required.';
+                    fb.classList.remove('hidden');
+                    return;
+                }
+
+                const res = await api('/cases', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ case_id: cid, case_name: name, host: host })
+                });
+
+                if (res && !res._error) {
+                    fb.className = 'alert alert-success mt-md';
+                    fb.textContent = `Case ${cid} created successfully.`;
+                    fb.classList.remove('hidden');
+                    await fetchCases();
+                    setTimeout(() => {
+                        hideModal();
+                        loadCase(cid).then(() => switchView('overview'));
+                    }, 750);
+                } else {
+                    fb.className = 'alert alert-error mt-md';
+                    fb.textContent = res ? res.message : 'Failed to create case.';
+                    fb.classList.remove('hidden');
+                }
+            }}),
+        ]);
+    });
+
+    const data = await api('/cases');
+    if (data && data.cases) {
+        state.cases = data.cases;
+    }
+    filterAndRender();
 }
 
+window.openUpdateStatusModal = function(caseId, currentStatus) {
+    const statusSel = el('select', { className: 'form-control', attrs: { id: 'modal-update-status' } });
+    for (const s of ['OPEN', 'IN_PROGRESS', 'CLOSED', 'ARCHIVED']) {
+        const opt = el('option', { text: s, attrs: { value: s } });
+        if (s === currentStatus) opt.selected = true;
+        statusSel.appendChild(opt);
+    }
+    const notesArea = el('textarea', { className: 'form-control', attrs: { id: 'modal-update-notes', rows: '3', placeholder: 'Explain the rationale for lifecycle change...' } });
+    const fb = el('div', { className: 'mt-md hidden', attrs: { id: 'modal-status-feedback' } });
+
+    safeModal(`Update Status: ${caseId}`, [
+        el('div', { className: 'form-group' }, [el('label', { className: 'form-label', text: 'Lifecycle Status' }), statusSel]),
+        el('div', { className: 'form-group' }, [el('label', { className: 'form-label', text: 'Status Notes' }), notesArea]),
+        fb,
+    ], [
+        el('button', { className: 'btn', text: 'Cancel', onclick: hideModal }),
+        el('button', { className: 'btn btn-primary', text: 'Update Status', onclick: async () => {
+            const st = statusSel.value;
+            const notes = notesArea.value.trim();
+
+            const res = await api(`/case/${encodeURIComponent(caseId)}/status`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: st, notes: notes })
+            });
+
+            if (res && !res._error) {
+                fb.className = 'alert alert-success mt-md';
+                fb.textContent = `Status updated to ${st}.`;
+                fb.classList.remove('hidden');
+                await fetchCases();
+                if (state.currentCaseId === caseId) await loadCase(caseId);
+                setTimeout(() => {
+                    hideModal();
+                    if (state.currentView === 'cases') initCases();
+                }, 600);
+            } else {
+                fb.className = 'alert alert-error mt-md';
+                fb.textContent = res ? res.message : 'Failed to update status.';
+                fb.classList.remove('hidden');
+            }
+        }}),
+    ]);
+};
+
+window.openCaseHistoryModal = async function(caseId) {
+    safeModal(`Case History: ${caseId}`,
+        [el('div', { className: 'empty-state', text: 'Loading history...' })],
+        [el('button', { className: 'btn', text: 'Close', onclick: hideModal })]
+    );
+
+    const data = await api(`/case/${encodeURIComponent(caseId)}/history`);
+    if (!data || data._error || !data.history || data.history.length === 0) {
+        dom.modalBody.replaceChildren(el('div', { className: 'empty-state', text: `No status history recorded for case ${caseId}.` }));
+        return;
+    }
+
+    const items = data.history.map(h => {
+        const item = el('div', { className: 'timeline-item' }, [
+            el('div', { className: 'timeline-time', text: h.timestamp || '-' }),
+            el('div', { className: 'timeline-content' }, [
+                el('strong', {}, [
+                    document.createTextNode('Status transitioned to: '),
+                    badge(h.status, h.status === 'OPEN' ? 'critical' : 'low'),
+                ]),
+            ]),
+        ]);
+        if (h.notes) {
+            item.querySelector('.timeline-content').appendChild(
+                el('div', { className: 'mt-sm', text: h.notes, style: 'color: var(--re-text-secondary);' })
+            );
+        }
+        return item;
+    });
+    dom.modalBody.replaceChildren(el('div', { className: 'timeline-list' }, items));
+};
+
+// ==========================================
+// 3. Threat Assessment
+// ==========================================
+function initAssessment() {
+    const p = document.getElementById('assessment-panel');
+    if (!state.assessment) {
+        p.replaceChildren(el('div', { className: 'panel-body empty-state' }, [
+            el('h3', { text: 'Assessment Unavailable' }),
+            el('p', { text: 'No threat assessment has been generated for this case. Ingest evidence and run analysis to generate an assessment.' }),
+        ]));
+        return;
+    }
+
+    const a = state.assessment;
+    const isCrit = a.severity === 'CRITICAL' || a.severity === 'HIGH';
+
+    const statCards = el('div', { className: 'grid-overview', style: 'grid-template-columns: 1fr 1fr 1fr;' }, [
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Score' }),
+            el('span', { className: 'stat-val ' + (isCrit ? 'text-critical' : 'text-warning'), text: String(a.score) }),
+        ]),
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Severity' }),
+            el('span', { className: 'stat-val ' + (isCrit ? 'text-critical' : 'text-warning'), text: a.severity }),
+        ]),
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Confidence' }),
+            el('span', { className: 'stat-val', text: (a.confidence * 100).toFixed(0) + '%' }),
+        ]),
+    ]);
+
+    const reasonNodes = (a.reasons || []).map(r =>
+        el('div', { className: 'prop-val', text: r, style: 'color: var(--re-critical); border-left: 3px solid var(--re-critical);' })
+    );
+
+    const techBadges = (a.techniques || []).map(t => badge(t, 'high'));
+
+    p.replaceChildren(el('div', { className: 'panel-body' }, [
+        statCards,
+        el('h4', { className: 'mt-xl', text: 'Analytical Reasons', style: 'margin-bottom: 12px; color: var(--re-text-muted); text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em;' }),
+        el('div', { className: 'prop-list' }, reasonNodes),
+        el('h4', { className: 'mt-xl', text: 'Techniques', style: 'margin-bottom: 12px; color: var(--re-text-muted); text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em;' }),
+        el('div', { style: 'display: flex; gap: 8px; flex-wrap: wrap;' }, techBadges),
+    ]));
+}
+
+// ==========================================
+// 4. Incidents
+// ==========================================
 function initIncidents() {
     const tbody = document.getElementById('incidents-tbody');
     if (state.incidents.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center;">No incidents in case.</td></tr>`;
+        tbody.replaceChildren(emptyRow(6, 'No incidents have been correlated for this case. Ingest evidence to trigger correlation.'));
         return;
     }
 
-    tbody.innerHTML = state.incidents.map(inc => `
-        <tr class="clickable" onclick="inspectIncident('${inc.incident_id}')">
-            <td><span class="clickable-id mono">${inc.incident_id}</span></td>
-            <td><span class="badge ${inc.severity.toLowerCase()}">${inc.severity}</span></td>
-            <td>${inc.start_time || '-'}</td>
-            <td>${inc.duration || '-'}</td>
-            <td>${(inc.finding_ids || []).length}</td>
-            <td>${(inc.evidence_event_ids || []).length}</td>
-        </tr>
-    `).join('');
+    const rows = state.incidents.map(inc =>
+        safeRow([
+            { node: el('span', { className: 'clickable-id mono', text: inc.incident_id }) },
+            { node: badge(inc.severity, (inc.severity || '').toLowerCase()) },
+            inc.start_time || '-',
+            inc.duration || '-',
+            (inc.finding_ids || []).length,
+            (inc.evidence_event_ids || []).length,
+        ], { clickable: true, onclick: () => inspectIncident(inc.incident_id) })
+    );
+    tbody.replaceChildren(...rows);
 }
 
+// ==========================================
+// 5. Findings — with evidence links
+// ==========================================
 function initFindings() {
     const tbody = document.getElementById('findings-tbody');
     if (state.findings.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="5" style="text-align: center;">No findings in case.</td></tr>`;
+        tbody.replaceChildren(emptyRow(6, 'No findings have been generated for this case yet. Ingest evidence to run behavioral detection.'));
         return;
     }
 
-    tbody.innerHTML = state.findings.map(fn => `
-        <tr>
-            <td><span class="mono">FINDING:${fn.finding_id}</span></td>
-            <td>${fn.finding_type}</td>
-            <td><span class="badge high">${fn.technique || '-'}</span></td>
-            <td><span class="text-critical" style="font-weight: 600;">${fn.score || '-'}</span></td>
-            <td>${fn.confidence || '-'}</td>
-        </tr>
-    `).join('');
+    const rows = state.findings.map(fn => {
+        const idCell = el('span', { className: 'mono' });
+        idCell.textContent = `FINDING:${fn.finding_id}`;
+
+        const evIds = fn.event_ids || [];
+        const evLinks = evIds.length > 0
+            ? el('div', { style: 'display: flex; gap: 4px; flex-wrap: wrap;' },
+                evIds.slice(0, 3).map(eid =>
+                    el('span', { className: 'clickable-id mono', text: String(eid).slice(0, 12) + '...', title: eid, style: 'font-size: 10px; cursor: pointer;',
+                        onclick: (e) => { e.stopPropagation(); inspectEvent(eid); } })
+                ).concat(evIds.length > 3 ? [el('span', { className: 'mono', text: `+${evIds.length - 3} more`, style: 'font-size: 10px; color: var(--re-text-muted);' })] : [])
+              )
+            : el('span', { className: 'mono', text: '-', style: 'font-size: 10px; color: var(--re-text-muted);' });
+
+        const tr = el('tr', { className: 'clickable' });
+        tr.addEventListener('click', () => {
+            if (evIds.length > 0) inspectEvent(evIds[0]);
+        });
+
+        const cells = [
+            idCell,
+            fn.finding_type,
+            badge(fn.technique || '-', 'high'),
+            el('span', { className: 'text-critical', text: String(fn.score || '-'), style: 'font-weight: 600;' }),
+            fn.confidence || '-',
+            evLinks,
+        ];
+
+        for (const cell of cells) {
+            const td = el('td');
+            if (cell instanceof HTMLElement) td.appendChild(cell);
+            else td.textContent = String(cell);
+            tr.appendChild(td);
+        }
+        return tr;
+    });
+    tbody.replaceChildren(...rows);
 }
 
+// ==========================================
+// 6. Evidence Workspace
+// ==========================================
 function initEvidence() {
     const btn = document.getElementById('btn-ev-search');
     const inp = document.getElementById('ev-search');
@@ -341,27 +797,28 @@ function initEvidence() {
     const doSearch = async () => {
         if (!state.currentCaseId) return;
         const q = inp ? inp.value.trim() : '';
-        const data = await api(`/search/${encodeURIComponent(state.currentCaseId)}?q=${encodeURIComponent(q)}`);
+        const data = await api(`/evidence/${encodeURIComponent(state.currentCaseId)}/search?q=${encodeURIComponent(q)}`);
 
         if (!data || data._error) {
-            tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--re-critical); padding: 32px;">Unable to load evidence: ${(data && data.message) ? data.message : 'Server error'}</td></tr>`;
+            tbody.replaceChildren(emptyRow(5, `Unable to load evidence: ${(data && data.message) ? data.message : 'Server error'}`));
             return;
         }
 
         if (!data.results || data.results.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; padding: 32px;">No matching evidence</td></tr>`;
+            tbody.replaceChildren(emptyRow(5, 'No matching evidence events found.'));
             return;
         }
 
-        tbody.innerHTML = data.results.map(r => `
-            <tr class="clickable" onclick="inspectEventEncoded('${encodeURIComponent(r.event_id)}')">
-                <td>${r.timestamp || '-'}</td>
-                <td>${r.event_type || r.source}</td>
-                <td>${r.process_name || '-'}</td>
-                <td>${r.pid || '-'}</td>
-                <td><span class="mono clickable-id">${r.event_id}</span></td>
-            </tr>
-        `).join('');
+        const rows = data.results.map(r =>
+            safeRow([
+                r.timestamp || '-',
+                r.event_type || r.source,
+                r.process_name || '-',
+                r.pid || '-',
+                { node: el('span', { className: 'mono clickable-id', text: r.event_id }) },
+            ], { clickable: true, onclick: () => inspectEvent(r.event_id) })
+        );
+        tbody.replaceChildren(...rows);
     };
 
     if (btn) btn.addEventListener('click', doSearch);
@@ -370,117 +827,1648 @@ function initEvidence() {
     doSearch();
 }
 
-function initTimeline() {
-    const container = document.getElementById('timeline-container');
-    if (state.timeline.length === 0) {
-        container.innerHTML = `<div class="empty-state">No timeline data available.</div>`;
+// ==========================================
+// 7. Investigation Hub
+// ==========================================
+async function initInvestigation() {
+    if (!state.currentCaseId) return;
+
+    const statusEl = document.getElementById('inv-status');
+    const nodesEl = document.getElementById('inv-nodes');
+    const edgesEl = document.getElementById('inv-edges');
+    const validStatusEl = document.getElementById('inv-valid-status');
+    const graphSumEl = document.getElementById('inv-graph-summary');
+    const validSumEl = document.getElementById('inv-validation-summary');
+
+    const invData = await api(`/investigation/${encodeURIComponent(state.currentCaseId)}`);
+    if (invData && !invData._error && invData.summary) {
+        statusEl.textContent = 'ACTIVE';
+        nodesEl.textContent = invData.summary.total_nodes !== undefined ? invData.summary.total_nodes : '-';
+        edgesEl.textContent = invData.summary.total_edges !== undefined ? invData.summary.total_edges : '-';
+    }
+
+    const graphData = await api(`/investigation/${encodeURIComponent(state.currentCaseId)}/graph`);
+    if (graphData && !graphData._error && graphData.nodes) {
+        const procNodes = graphData.nodes.filter(n => n.node_type === 'process' || n.label === 'Process');
+        const fileNodes = graphData.nodes.filter(n => n.node_type === 'file' || n.label === 'File');
+        const netNodes = graphData.nodes.filter(n => n.node_type === 'network' || n.label === 'Network');
+
+        graphSumEl.replaceChildren(
+            el('div', { className: 'prop-list' }, [
+                kv('Processes in Graph', procNodes.length, { mono: true }),
+                kv('File Nodes in Graph', fileNodes.length, { mono: true }),
+                kv('Network Nodes in Graph', netNodes.length, { mono: true }),
+                kv('Total Edges', (graphData.edges || []).length, { mono: true }),
+            ]),
+            el('div', { className: 'mt-md', style: 'display: flex; gap: 8px;' }, [
+                el('button', { className: 'btn btn-sm btn-primary', text: 'View Process Tree →', onclick: () => switchView('tree') }),
+                el('button', { className: 'btn btn-sm', text: 'Attack Reconstruction →', onclick: () => switchView('reconstruction') }),
+            ])
+        );
+    } else {
+        graphSumEl.replaceChildren(el('div', { className: 'empty-state', text: 'No graph data generated for this case. Ingest evidence to build the investigation graph.' }));
+    }
+
+    const valData = await api(`/investigation/${encodeURIComponent(state.currentCaseId)}/validation`);
+    if (valData && !valData._error && valData.validation) {
+        const v = valData.validation;
+        const isValid = v.valid !== false && (!v.errors || v.errors.length === 0);
+        validStatusEl.textContent = isValid ? 'VALID' : 'FLAGGED';
+        validStatusEl.className = `stat-val ${isValid ? 'text-success' : 'text-critical'}`;
+
+        const items = [
+            kv('Validation Status', isValid ? 'PASSED' : 'ANOMALIES DETECTED'),
+            kv('Checks Performed', v.checks_performed !== undefined ? String(v.checks_performed) : 'Complete', { mono: true }),
+            kv('Errors / Warnings', String((v.errors || []).length), { mono: true }),
+        ];
+        if (v.errors && v.errors.length > 0) {
+            const errList = v.errors.map(err => el('div', { className: 'prop-val', text: err, style: 'color: var(--re-critical);' }));
+            items.push(el('div', { className: 'prop-item' }, [
+                el('span', { className: 'prop-key', text: 'Details' }),
+                el('div', {}, errList),
+            ]));
+        }
+        validSumEl.replaceChildren(el('div', { className: 'prop-list' }, items));
+    } else {
+        validStatusEl.textContent = 'CHECKED';
+        validSumEl.replaceChildren(el('div', { className: 'empty-state', text: 'Validation checks complete. No discrepancies found.' }));
+    }
+}
+
+// ==========================================
+// 8. Process Tree
+// ==========================================
+async function initTree() {
+    if (!state.currentCaseId) return;
+    const container = document.getElementById('tree-container');
+
+    const data = await api(`/tree/${encodeURIComponent(state.currentCaseId)}`);
+    // API may return tree as a flat list or an object with {nodes, children, roots}; normalize to a list.
+    let roots = null;
+    if (data && !data._error && data.tree) {
+        if (Array.isArray(data.tree)) {
+            roots = data.tree;
+        } else if (data.tree.nodes && data.tree.roots) {
+            const resolve = (pid) => {
+                const node = data.tree.nodes[pid];
+                if (!node) return null;
+                const kids = (data.tree.children && data.tree.children[pid]) || [];
+                return { ...node, name: node.name || node.process_name, children: kids.map(resolve).filter(Boolean) };
+            };
+            roots = data.tree.roots.map(resolve).filter(Boolean);
+        }
+    }
+    if (!roots || roots.length === 0) {
+        container.replaceChildren(el('div', { className: 'empty-state', text: 'No process tree available. Ingest evidence containing process creation events to build the tree.' }));
         return;
     }
 
-    container.innerHTML = state.timeline.map(t => `
-        <div class="timeline-item">
-            <div class="timeline-time">${t.timestamp || 'Unknown Time'}</div>
-            <div class="timeline-content">
-                <strong>${t.description}</strong>
-                ${t.process_name ? `<span class="clickable-id mono mt-sm" onclick="inspectProcess('${t.process_guid || t.pid}')" style="display: inline-block;">Process: ${t.process_name} (PID: ${t.pid})</span>` : ''}
-            </div>
-        </div>
-    `).join('');
+    function renderTreeNodes(nodes, depth) {
+        const frag = document.createDocumentFragment();
+        for (const n of nodes) {
+            const indent = (depth || 0) * 24;
+            const procIdent = n.guid || n.pid;
+
+            const nameEl = el('strong', { text: n.name || 'Unknown' });
+            const pidEl = document.createTextNode(` (PID: ${n.pid || '-'})`);
+            const nameRow = el('div', {}, [nameEl, pidEl]);
+
+            const nodeDiv = el('div', { className: 'tree-node current clickable-id',
+                style: 'display: flex; justify-content: space-between; align-items: center; border-radius: 4px;',
+                onclick: () => inspectProcess(procIdent) }, [nameRow]);
+
+            if (n.command_line) {
+                const cmdEl = el('div', { text: n.command_line, style: 'font-size: 11px; color: var(--re-text-muted); margin-top: 2px;' });
+                nameRow.appendChild(cmdEl);
+            }
+
+            if (n.guid) {
+                nodeDiv.appendChild(el('span', { className: 'mono', text: n.guid.slice(0, 8) + '...', style: 'font-size: 10px; color: var(--re-text-muted);' }));
+            }
+
+            const wrapper = el('div', { style: `margin-left: ${indent}px; margin-bottom: 8px;` }, [nodeDiv]);
+
+            if (n.children && n.children.length > 0) {
+                wrapper.appendChild(renderTreeNodes(n.children, (depth || 0) + 1));
+            }
+            frag.appendChild(wrapper);
+        }
+        return frag;
+    }
+
+    container.replaceChildren(el('div', { className: 'prop-list' }, [renderTreeNodes(roots, 0)]));
 }
 
+// ==========================================
+// 9. Timeline
+// ==========================================
+function formatTimelineTime(isoString) {
+    if (!isoString) {
+        return { display: 'Timestamp Unavailable', utc: 'N/A', iso: '' };
+    }
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) {
+        return { display: String(isoString), utc: String(isoString), iso: String(isoString) };
+    }
+
+    // Format to IST (Asia/Kolkata, UTC + 05:30) for presentation
+    const istOffsetMs = 5.5 * 60 * 60 * 1000;
+    const istDate = new Date(d.getTime() + istOffsetMs);
+    const pad = (n, len = 2) => String(n).padStart(len, '0');
+
+    const h = pad(istDate.getUTCHours());
+    const m = pad(istDate.getUTCMinutes());
+    const s = pad(istDate.getUTCSeconds());
+    const ms = pad(d.getUTCMilliseconds(), 3);
+    const display = `${h}:${m}:${s}.${ms} IST`;
+
+    // Preserved forensic UTC timestamp
+    const utcYear = d.getUTCFullYear();
+    const utcMonth = pad(d.getUTCMonth() + 1);
+    const utcDay = pad(d.getUTCDate());
+    const utcH = pad(d.getUTCHours());
+    const utcM = pad(d.getUTCMinutes());
+    const utcS = pad(d.getUTCSeconds());
+    const utc = `${utcYear}-${utcMonth}-${utcDay} ${utcH}:${utcM}:${utcS}.${ms} UTC`;
+
+    return { display, utc, iso: isoString };
+}
+
+function getTimelineCategoryMeta(entryType) {
+    const et = String(entryType || '').toUpperCase();
+    if (et.includes('COMMAND') || et.includes('POWERSHELL') || et.includes('LOLBIN')) {
+        return { label: 'COMMAND', badgeClass: 'badge critical', itemClass: 'item-critical', cardClass: 'card-critical' };
+    }
+    if (et.includes('MASS') || et.includes('ENCRYPTION') || et.includes('RANSOM')) {
+        return { label: et.includes('NOTE') ? 'RANSOM NOTE' : 'MASS MODIFICATION', badgeClass: 'badge critical', itemClass: 'item-critical', cardClass: 'card-critical' };
+    }
+    if (et.includes('SUSPICIOUS_EXECUTABLE') || et.includes('STATIC')) {
+        return { label: 'SUSPICIOUS PE', badgeClass: 'badge critical', itemClass: 'item-critical', cardClass: 'card-critical' };
+    }
+    if (et.includes('PROCESS')) {
+        return { label: 'PROCESS', badgeClass: 'badge info', itemClass: 'item-info', cardClass: 'card-info' };
+    }
+    if (et.includes('NETWORK') || et.includes('DNS') || et.includes('CONNECT')) {
+        return { label: 'NETWORK', badgeClass: 'badge warning', itemClass: 'item-warning', cardClass: 'card-warning' };
+    }
+    if (et.includes('PHISH')) {
+        return { label: 'PHISHING', badgeClass: 'badge warning', itemClass: 'item-warning', cardClass: 'card-warning' };
+    }
+    if (et.includes('SCRIPT')) {
+        return { label: 'SCRIPT', badgeClass: 'badge warning', itemClass: 'item-warning', cardClass: 'card-warning' };
+    }
+    if (et.includes('CORRELATION')) {
+        return { label: 'CORRELATION', badgeClass: 'badge correlation', itemClass: 'item-correlation', cardClass: 'card-correlation' };
+    }
+    if (et.includes('FILE')) {
+        return { label: 'FILE ACTIVITY', badgeClass: 'badge low', itemClass: 'item-info', cardClass: 'card-info' };
+    }
+    return { label: (entryType || 'EVENT').replace(/_/g, ' ').toUpperCase(), badgeClass: 'badge low', itemClass: '', cardClass: '' };
+}
+
+function initTimeline() {
+    const container = document.getElementById('timeline-container');
+    if (!container) return;
+
+    if (!state.timeline || state.timeline.length === 0) {
+        container.replaceChildren(el('div', {
+            className: 'empty-state',
+            text: 'No timeline events available for this case. Ingest evidence to build the timeline.'
+        }));
+        return;
+    }
+
+    const frag = [];
+
+    // 1. Case Assessment & Timeline Header Summary Bar
+    const assessment = state.timelineAssessment || state.assessment;
+    if (assessment) {
+        const summaryBar = el('div', { className: 'timeline-summary-bar' }, [
+            el('div', { className: 'timeline-summary-col' }, [
+                el('span', { className: 'prop-key', text: 'Case Assessment: ' }),
+                badge(`${assessment.severity || 'UNKNOWN'} (${assessment.score != null ? assessment.score + '/100' : '-'})`, (assessment.severity || 'low').toLowerCase()),
+            ]),
+            el('div', { className: 'timeline-summary-col' }, [
+                el('span', { className: 'prop-key', text: 'Host: ' }),
+                el('span', { className: 'prop-val mono', text: assessment.host || (state.currentCase ? state.currentCase.host : 'Unknown') }),
+            ]),
+            el('div', { className: 'timeline-summary-col' }, [
+                el('span', { className: 'prop-key', text: 'Events: ' }),
+                el('span', { className: 'prop-val mono', text: String(state.timeline.filter(t => t.entry_type !== 'ASSESSMENT').length) }),
+            ]),
+            el('div', { className: 'timeline-summary-col timeline-tz-indicator' }, [
+                el('span', { className: 'prop-key', text: 'Timezone: ' }),
+                el('span', { className: 'prop-val', text: 'IST (UTC+05:30) | Tooltips: UTC' }),
+            ]),
+        ]);
+        frag.push(summaryBar);
+    }
+
+    // 2. Timeline items list (chronological security events)
+    const timelineEvents = state.timeline.filter(t => t.entry_type !== 'ASSESSMENT');
+    const items = timelineEvents.map(t => {
+        const timeInfo = formatTimelineTime(t.timestamp);
+        const catMeta = getTimelineCategoryMeta(t.entry_type);
+
+        // Header row: Time badge, category badge, title, and incident correlation pills
+        const headerChildren = [
+            el('span', {
+                className: 'timeline-time-badge mono',
+                text: timeInfo.display,
+                title: `Forensic UTC: ${timeInfo.utc} (Raw: ${timeInfo.iso || '-'})`,
+            }),
+            el('span', {
+                className: catMeta.badgeClass,
+                text: catMeta.label,
+            }),
+            el('span', {
+                className: 'timeline-item-title',
+                text: t.title || 'Security Event',
+            }),
+        ];
+
+        // Compact annotation for correlations attached to this event
+        if (Array.isArray(t.correlation_ids) && t.correlation_ids.length > 0) {
+            t.correlation_ids.forEach(cid => {
+                headerChildren.push(el('span', {
+                    className: 'mono timeline-corr-pill clickable-id',
+                    text: cid,
+                    title: `Associated Incident: ${cid}. Click to inspect incident.`,
+                    onclick: (e) => {
+                        e.stopPropagation();
+                        inspectIncident(cid);
+                    }
+                }));
+            });
+        }
+
+        const headerRow = el('div', { className: 'timeline-header-row' }, headerChildren);
+
+        // Card body
+        const cardChildren = [headerRow];
+
+        // Description / summary (avoid redundant title repetition)
+        if (t.description && t.description !== t.title) {
+            cardChildren.push(el('div', { className: 'timeline-desc', text: t.description }));
+        }
+
+        // Meta row: Process / Parent / Evidence / Findings
+        const metaChildren = [];
+
+        if (t.process_name) {
+            const pidStr = t.pid != null ? ` (PID: ${t.pid})` : '';
+            metaChildren.push(el('span', {
+                className: 'timeline-meta-tag clickable-id mono',
+                text: `Process: ${t.process_name}${pidStr}`,
+                title: 'Click to inspect process lineage',
+                onclick: () => inspectProcess(t.process_guid || t.pid || t.process_name),
+            }));
+        }
+
+        if (t.parent_process_name) {
+            metaChildren.push(el('span', {
+                className: 'timeline-meta-tag',
+                text: `Parent: ${t.parent_process_name}`,
+            }));
+        }
+
+        if (Array.isArray(t.evidence_ids) && t.evidence_ids.length > 0) {
+            if (t.evidence_ids.length === 1) {
+                const eid = t.evidence_ids[0];
+                metaChildren.push(el('span', {
+                    className: 'timeline-meta-tag clickable-id mono',
+                    text: `EVID:${eid}`,
+                    title: 'Click to inspect raw evidence event',
+                    onclick: () => inspectEvent(eid),
+                }));
+            } else {
+                metaChildren.push(el('span', {
+                    className: 'timeline-meta-tag mono',
+                    text: `Evidence: ${t.evidence_ids.length} events`,
+                    title: t.evidence_ids.join(', '),
+                }));
+            }
+        }
+
+        if (Array.isArray(t.finding_ids) && t.finding_ids.length > 0) {
+            t.finding_ids.forEach(fid => {
+                const fObj = state.findings.find(f => String(f.finding_id) === String(fid) || String(f.id) === String(fid));
+                const targetEid = (fObj && fObj.event_ids && fObj.event_ids.length) ? fObj.event_ids[0] : (t.evidence_ids && t.evidence_ids[0]);
+                metaChildren.push(el('span', {
+                    className: 'timeline-meta-tag clickable-id mono',
+                    text: `FINDING:${fid}`,
+                    style: 'color: var(--re-critical); border-color: rgba(255, 77, 95, 0.3);',
+                    title: 'Click to inspect finding evidence',
+                    onclick: () => { if (targetEid) inspectEvent(targetEid); },
+                }));
+            });
+        }
+
+        if (metaChildren.length > 0) {
+            cardChildren.push(el('div', { className: 'timeline-meta-row mt-sm' }, metaChildren));
+        }
+
+        // Expandable details area for long command line, raw finding reason, or attributes
+        const hasCmd = Boolean(t.command_line && t.command_line.trim());
+        const hasReason = Boolean(t.finding_reason && t.finding_reason.trim() && t.finding_reason !== t.description);
+        const hasFilePath = Boolean(t.file_path && t.file_path.trim() && !(t.description && t.description.includes(t.file_path)));
+        const attrs = (t.attributes && typeof t.attributes === 'object') ? t.attributes : {};
+        const hasNetwork = Boolean(attrs.destination_ip || attrs.destination_port || attrs.query_name);
+
+        if (hasCmd || hasReason || hasFilePath || hasNetwork) {
+            const details = el('details', { className: 'timeline-details' });
+            details.appendChild(el('summary', { text: 'Telemetry Details & Parameters' }));
+
+            const detailBody = el('div', { className: 'timeline-details-body' });
+
+            if (hasCmd) {
+                detailBody.appendChild(el('div', { className: 'prop-key mt-sm', text: 'Command Line Execution:' }));
+                detailBody.appendChild(el('div', { className: 'timeline-code-block', text: t.command_line }));
+            }
+
+            if (hasReason) {
+                detailBody.appendChild(el('div', { className: 'prop-key mt-sm', text: 'Forensic Detection Reason:' }));
+                detailBody.appendChild(el('div', { className: 'timeline-reason-box', text: t.finding_reason }));
+            }
+
+            if (hasFilePath) {
+                detailBody.appendChild(kv('Target Path', t.file_path, { mono: true }));
+            }
+
+            if (hasNetwork) {
+                if (attrs.destination_ip) {
+                    const dest = attrs.destination_port ? `${attrs.destination_ip}:${attrs.destination_port}` : attrs.destination_ip;
+                    detailBody.appendChild(kv('Network Target', dest, { mono: true }));
+                }
+                if (attrs.query_name) {
+                    detailBody.appendChild(kv('DNS Query Domain', attrs.query_name, { mono: true }));
+                }
+                if (attrs.query_results) {
+                    detailBody.appendChild(kv('DNS Results', attrs.query_results, { mono: true }));
+                }
+            }
+
+            details.appendChild(detailBody);
+            cardChildren.push(details);
+        }
+
+        const card = el('div', { className: `timeline-card ${catMeta.cardClass}` }, cardChildren);
+        return el('div', { className: `timeline-item ${catMeta.itemClass}` }, [card]);
+    });
+
+    const listContainer = el('div', { className: 'timeline-list' }, items);
+    frag.push(listContainer);
+
+    container.replaceChildren(...frag);
+}
+
+// ==========================================
+// 10. Reconstruction — with clickable evidence/finding IDs
+// ==========================================
 function initReconstruction() {
     const container = document.getElementById('reconstruction-container');
     if (!state.reconstruction || state.reconstruction.length === 0) {
-        container.innerHTML = `<div class="empty-state"><p>No reconstructed attack stages available for this case.</p></div>`;
+        container.replaceChildren(el('div', { className: 'empty-state' }, [
+            el('p', { text: 'No reconstructed attack stages available for this case. Ingest evidence and run analysis to reconstruct the attack.' }),
+        ]));
         return;
     }
 
-    container.innerHTML = '<div class="timeline-list">' + state.reconstruction.map(stage => {
-        let detailsHtml = '';
-        if (stage.evidence_ids && stage.evidence_ids.length > 0) {
-            detailsHtml += `<div class="mt-sm"><span class="prop-key">Evidence (${stage.evidence_ids.length}):</span> <span class="mono">${stage.evidence_ids.length > 0 ? stage.evidence_ids[0] : ''}</span></div>`;
-        }
-        if (stage.finding_ids && stage.finding_ids.length > 0) {
-            detailsHtml += `<div class="mt-sm"><span class="prop-key">Findings (${stage.finding_ids.length}):</span> <span class="mono">${stage.finding_ids.length > 0 ? stage.finding_ids[0] : ''}</span></div>`;
+    const items = state.reconstruction.map(stage => {
+        const content = el('div', { className: 'timeline-content', style: 'border-left: 3px solid var(--re-critical);' });
+
+        content.appendChild(el('div', { text: stage.stage_type, style: 'font-size: 11px; text-transform: uppercase; color: var(--re-critical); font-weight: 600; margin-bottom: 4px;' }));
+        content.appendChild(el('strong', { text: stage.title, style: 'font-size: 14px;' }));
+
+        if (stage.description) {
+            content.appendChild(el('div', { className: 'mt-sm', text: stage.description, style: 'color: var(--re-text-secondary);' }));
         }
 
-        return `
-        <div class="timeline-item">
-            <div class="timeline-time">${stage.timestamp || 'Unknown Time'}</div>
-            <div class="timeline-content" style="border-left: 3px solid var(--re-critical);">
-                <div style="font-size: 11px; text-transform: uppercase; color: var(--re-critical); font-weight: 600; margin-bottom: 4px;">${stage.stage_type}</div>
-                <strong style="font-size: 14px;">${stage.title}</strong>
-                <div class="mt-sm" style="color: var(--re-text-secondary);">${stage.description || ''}</div>
-                ${detailsHtml}
-            </div>
-        </div>
-        `;
-    }).join('') + '</div>';
+        if (stage.evidence_ids && stage.evidence_ids.length > 0) {
+            const evRow = el('div', { className: 'mt-sm' }, [
+                el('span', { className: 'prop-key', text: `Evidence (${stage.evidence_ids.length}): ` }),
+            ]);
+            stage.evidence_ids.slice(0, 3).forEach(eid => {
+                evRow.appendChild(el('span', { className: 'mono clickable-id', text: String(eid).slice(0, 16),
+                    title: eid, style: 'margin-right: 6px; cursor: pointer; font-size: 11px;',
+                    onclick: () => inspectEvent(eid) }));
+            });
+            if (stage.evidence_ids.length > 3) {
+                evRow.appendChild(el('span', { className: 'mono', text: `+${stage.evidence_ids.length - 3} more`, style: 'font-size: 11px; color: var(--re-text-muted);' }));
+            }
+            content.appendChild(evRow);
+        }
+
+        if (stage.finding_ids && stage.finding_ids.length > 0) {
+            const fnRow = el('div', { className: 'mt-sm' }, [
+                el('span', { className: 'prop-key', text: `Findings (${stage.finding_ids.length}): ` }),
+            ]);
+            stage.finding_ids.forEach(fid => {
+                const fObj = state.findings.find(fn => String(fn.finding_id) === String(fid) || String(fn.id) === String(fid));
+                const targetEid = (fObj && fObj.event_ids && fObj.event_ids.length) ? fObj.event_ids[0] : (stage.evidence_ids && stage.evidence_ids[0]);
+                fnRow.appendChild(el('span', {
+                    className: 'mono clickable-id',
+                    text: `FINDING:${fid}`,
+                    style: 'margin-right: 6px; font-size: 11px; color: var(--re-critical); cursor: pointer;',
+                    onclick: () => { if (targetEid) inspectEvent(targetEid); }
+                }));
+            });
+            content.appendChild(fnRow);
+        }
+
+        return el('div', { className: 'timeline-item' }, [
+            el('div', { className: 'timeline-time', text: stage.timestamp || 'Unknown Time' }),
+            content,
+        ]);
+    });
+
+    container.replaceChildren(el('div', { className: 'timeline-list' }, items));
 }
 
+// ==========================================
+// 11. Reports
+// ==========================================
 function initReports() {
-    const btn = document.getElementById('btn-gen-report');
-    if (!btn) return;
+    const btnText = document.getElementById('btn-gen-report');
+    const btnPdf = document.getElementById('btn-export-pdf');
+    const pdfFb = document.getElementById('pdf-report-feedback');
+    const resultDiv = document.getElementById('report-result');
+    const pathEl = document.getElementById('report-path');
+    const contentEl = document.getElementById('report-content');
 
-    btn.addEventListener('click', async () => {
-        if (!state.currentCaseId) return;
-        btn.textContent = 'Generating...';
-        btn.disabled = true;
+    if (btnPdf) {
+        btnPdf.addEventListener('click', async () => {
+            if (!state.currentCaseId) {
+                if (pdfFb) {
+                    pdfFb.className = 'alert alert-error';
+                    pdfFb.textContent = 'Please select an active case first.';
+                    pdfFb.classList.remove('hidden');
+                }
+                return;
+            }
 
-        const data = await api(`/report/${encodeURIComponent(state.currentCaseId)}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: '{}'
+            btnPdf.textContent = 'Generating PDF...';
+            btnPdf.disabled = true;
+            if (pdfFb) {
+                pdfFb.className = 'alert alert-info';
+                pdfFb.textContent = 'Compiling professional DFIR PDF report with case findings, timeline, and chain of custody...';
+                pdfFb.classList.remove('hidden');
+            }
+
+            try {
+                const response = await fetch(`/api/report/${encodeURIComponent(state.currentCaseId)}/pdf`);
+                if (!response.ok) {
+                    let errMsg = `Server returned HTTP ${response.status}`;
+                    try {
+                        const errJson = await response.json();
+                        if (errJson && errJson.message) errMsg = errJson.message;
+                    } catch (_) {}
+                    throw new Error(errMsg);
+                }
+
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const downloadLink = document.createElement('a');
+                const filename = `RansomEye_${state.currentCaseId}_Report.pdf`;
+                downloadLink.href = url;
+                downloadLink.download = filename;
+                document.body.appendChild(downloadLink);
+                downloadLink.click();
+                document.body.removeChild(downloadLink);
+                window.URL.revokeObjectURL(url);
+
+                if (pdfFb) {
+                    pdfFb.className = 'alert alert-success';
+                    pdfFb.replaceChildren(
+                        el('strong', { text: 'PDF Forensic Report Downloaded' }),
+                        el('br'),
+                        document.createTextNode(`File: ${filename} (${Math.round(blob.size / 1024)} KB). Embeds official RansomEye header logo on every page, complete 10-section DFIR findings, and cryptographic integrity ledger.`)
+                    );
+                    pdfFb.classList.remove('hidden');
+                }
+            } catch (err) {
+                if (pdfFb) {
+                    pdfFb.className = 'alert alert-error';
+                    pdfFb.textContent = `PDF generation failed: ${err.message || err}`;
+                    pdfFb.classList.remove('hidden');
+                }
+            } finally {
+                btnPdf.textContent = 'EXPORT AS PDF';
+                btnPdf.disabled = false;
+            }
         });
+    }
 
-        const resultDiv = document.getElementById('report-result');
-        const pathEl = document.getElementById('report-path');
-        const contentEl = document.getElementById('report-content');
+    if (btnText) {
+        btnText.addEventListener('click', async () => {
+            if (!state.currentCaseId) return;
+            btnText.textContent = 'Generating Text...';
+            btnText.disabled = true;
 
-        if (data && !data._error && data.content) {
-            resultDiv.classList.remove('hidden');
-            pathEl.textContent = data.path || 'Generated';
-            contentEl.value = data.content;
-        } else {
-            resultDiv.classList.remove('hidden');
-            pathEl.textContent = 'Report Generation Error';
-            contentEl.value = `Unable to generate report: ${(data && data.message) ? data.message : 'Server error'}`;
+            const data = await api(`/report/${encodeURIComponent(state.currentCaseId)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: '{}'
+            });
+
+            if (data && !data._error && data.content) {
+                resultDiv.classList.remove('hidden');
+                pathEl.textContent = data.path || 'Generated';
+                contentEl.value = data.content;
+            } else {
+                resultDiv.classList.remove('hidden');
+                pathEl.textContent = 'Report Generation Error';
+                contentEl.value = `Unable to generate report: ${(data && data.message) ? data.message : 'Server error'}`;
+            }
+
+            btnText.textContent = 'GENERATE TEXT REPORT';
+            btnText.disabled = false;
+        });
+    }
+}
+
+// ==========================================
+// 12. Collection & Ingestion
+// ==========================================
+async function initCollection() {
+    const caseInp = document.getElementById('ingest-case-id');
+    const fileInp = document.getElementById('ingest-file-path');
+    const formatSel = document.getElementById('ingest-format');
+    const btnIngest = document.getElementById('btn-submit-ingest');
+    const fbIngest = document.getElementById('ingest-feedback');
+
+    if (state.currentCaseId && caseInp) {
+        caseInp.value = state.currentCaseId;
+    }
+
+    btnIngest.addEventListener('click', async () => {
+        const cid = caseInp.value.trim();
+        const fpath = fileInp.value.trim();
+        const fmt = formatSel.value;
+
+        if (!cid || !fpath) {
+            fbIngest.className = 'alert alert-error mt-md';
+            fbIngest.textContent = 'Target Case ID and Evidence File Path are required.';
+            fbIngest.classList.remove('hidden');
+            return;
         }
 
-        btn.textContent = 'GENERATE CASE REPORT';
-        btn.disabled = false;
+        btnIngest.textContent = 'Ingesting...';
+        btnIngest.disabled = true;
+
+        const res = await api('/ingest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ case_id: cid, file_path: fpath, format: fmt })
+        });
+
+        btnIngest.textContent = 'Start Ingestion';
+        btnIngest.disabled = false;
+
+        if (res && !res._error) {
+            fbIngest.className = 'alert alert-success mt-md';
+            fbIngest.replaceChildren(
+                el('strong', { text: 'Ingestion Complete' }),
+                el('br'),
+                document.createTextNode(`Events Ingested: ${res.events_ingested !== undefined ? res.events_ingested : '-'}`),
+                el('br'),
+                document.createTextNode(`Findings Generated: ${res.findings_generated !== undefined ? res.findings_generated : '-'}`),
+                el('br'),
+                document.createTextNode(`Incidents Correlated: ${res.incidents_correlated !== undefined ? res.incidents_correlated : '-'}`),
+            );
+            fbIngest.classList.remove('hidden');
+            await fetchCases();
+            if (state.currentCaseId === cid) await loadCase(cid);
+        } else {
+            fbIngest.className = 'alert alert-error mt-md';
+            fbIngest.textContent = res ? res.message : 'Ingestion failed.';
+            fbIngest.classList.remove('hidden');
+        }
+    });
+
+    const statusVal = document.getElementById('col-status-val');
+    const nameVal = document.getElementById('col-name-val');
+    const detailsVal = document.getElementById('col-details-val');
+    const btnStart = document.getElementById('btn-collect-start');
+    const btnStop = document.getElementById('btn-collect-stop');
+    const fbCollect = document.getElementById('collect-feedback');
+
+    const refreshCollectStatus = async () => {
+        const res = await api('/collect/status');
+        if (res && !res._error) {
+            statusVal.textContent = (typeof res.status === 'object' ? (res.status.pipeline_state || 'READY') : res.status) || 'READY';
+            nameVal.textContent = res.collector || 'Windows Endpoint Collector';
+            detailsVal.textContent = res.details || 'Awaiting live endpoint hook';
+        }
+    };
+
+    btnStart.addEventListener('click', async () => {
+        const res = await api('/collect/start', { method: 'POST' });
+        fbCollect.className = res && !res._error ? 'alert alert-success mt-md' : 'alert alert-error mt-md';
+        fbCollect.textContent = res ? (res.message || res.status) : 'Failed to start collector';
+        fbCollect.classList.remove('hidden');
+        await refreshCollectStatus();
+    });
+
+    btnStop.addEventListener('click', async () => {
+        const res = await api('/collect/stop', { method: 'POST' });
+        fbCollect.className = res && !res._error ? 'alert alert-info mt-md' : 'alert alert-error mt-md';
+        fbCollect.textContent = res ? (res.message || res.status) : 'Failed to stop collector';
+        fbCollect.classList.remove('hidden');
+        await refreshCollectStatus();
+    });
+
+    await refreshCollectStatus();
+}
+
+// ==========================================
+// 13. Integrity Verification
+// ==========================================
+function initIntegrity() {
+    const hashTarget = document.getElementById('hash-target-path');
+    const hashManifest = document.getElementById('hash-manifest-path');
+    const btnHash = document.getElementById('btn-run-hash');
+    const fbHash = document.getElementById('hash-feedback');
+
+    btnHash.addEventListener('click', async () => {
+        const target = hashTarget.value.trim();
+        const manifest = hashManifest.value.trim();
+        if (!target) {
+            fbHash.className = 'alert alert-error mt-md';
+            fbHash.textContent = 'Target Directory or File path is required.';
+            fbHash.classList.remove('hidden');
+            return;
+        }
+
+        btnHash.textContent = 'Generating...';
+        btnHash.disabled = true;
+
+        const res = await api('/integrity/hash', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target_path: target, manifest_path: manifest })
+        });
+
+        btnHash.textContent = 'Generate Manifest';
+        btnHash.disabled = false;
+
+        if (res && !res._error) {
+            fbHash.className = 'alert alert-success mt-md';
+            fbHash.replaceChildren(
+                el('strong', { text: 'Manifest Generated' }),
+                el('br'),
+                document.createTextNode('Saved to: '),
+                el('span', { className: 'mono', text: res.manifest_path || manifest }),
+                el('br'),
+                document.createTextNode(`Files Hashed: ${res.files_count !== undefined ? res.files_count : '-'}`),
+            );
+            fbHash.classList.remove('hidden');
+        } else {
+            fbHash.className = 'alert alert-error mt-md';
+            fbHash.textContent = res ? res.message : 'Manifest generation failed.';
+            fbHash.classList.remove('hidden');
+        }
+    });
+
+    const verifyTarget = document.getElementById('verify-target-path');
+    const verifyManifest = document.getElementById('verify-manifest-path');
+    const btnVerify = document.getElementById('btn-run-verify');
+    const fbVerify = document.getElementById('verify-feedback');
+
+    btnVerify.addEventListener('click', async () => {
+        const target = verifyTarget.value.trim();
+        const manifest = verifyManifest.value.trim();
+        if (!target || !manifest) {
+            fbVerify.className = 'alert alert-error mt-md';
+            fbVerify.textContent = 'Both target path and manifest path are required for verification.';
+            fbVerify.classList.remove('hidden');
+            return;
+        }
+
+        btnVerify.textContent = 'Verifying...';
+        btnVerify.disabled = true;
+
+        const res = await api('/integrity/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target_path: target, manifest_path: manifest })
+        });
+
+        btnVerify.textContent = 'Verify Integrity';
+        btnVerify.disabled = false;
+
+        if (res && !res._error) {
+            const verified = res.verified || res.status === 'OK' || res.status === 'MATCHED';
+            fbVerify.className = `alert ${verified ? 'alert-success' : 'alert-error'} mt-md`;
+            fbVerify.replaceChildren(
+                el('strong', { text: `Integrity Verification: ${verified ? 'PASSED (MATCHED)' : 'FAILED / TAMPERED'}` }),
+                el('br'),
+                document.createTextNode('Status: '),
+                el('span', { className: 'mono', text: res.status || (verified ? 'MATCHED' : 'FAILED') }),
+                el('br'),
+                document.createTextNode(res.mismatches && res.mismatches.length > 0 ? `Mismatches: ${res.mismatches.join(', ')}` : 'All cryptographic hashes match manifest.'),
+            );
+            fbVerify.classList.remove('hidden');
+        } else {
+            fbVerify.className = 'alert alert-error mt-md';
+            fbVerify.textContent = res ? res.message : 'Verification failed.';
+            fbVerify.classList.remove('hidden');
+        }
     });
 }
 
-// Drawers (Inspectors)
+// ==========================================
+// 14. Chain of Custody
+// ==========================================
+async function initCustody() {
+    const tbody = document.getElementById('custody-tbody');
+    const artifactInp = document.getElementById('custody-artifact');
+    const actionSel = document.getElementById('custody-action');
+    const analystInp = document.getElementById('custody-analyst');
+    const notesInp = document.getElementById('custody-notes');
+    const btnRecord = document.getElementById('btn-record-custody');
+    const fbCustody = document.getElementById('custody-feedback');
+
+    const loadCustodyEntries = async () => {
+        if (!state.currentCaseId) return;
+        const res = await api(`/custody/${encodeURIComponent(state.currentCaseId)}`);
+        if (!res || res._error || !res.entries || res.entries.length === 0) {
+            tbody.replaceChildren(emptyRow(6, 'No chain of custody entries recorded for this case.'));
+            return;
+        }
+
+        const rows = res.entries.map(e => {
+            const tr = el('tr');
+            const ts = e.timestamp || e.recorded_at;
+            const art = e.artifact || e.artifact_path;
+            const nts = e.notes || e.note;
+            const act = e.action || 'created';
+            const isHigh = act === 'COLLECTED' || act === 'created' || act === 'EXPORTED';
+            const cells = [
+                el('td', { className: 'mono', text: ts ? String(ts).slice(0, 19) : '-', style: 'font-size: 11px;' }),
+                el('td', { className: 'mono' }, [el('strong', { text: art || '-' })]),
+                el('td', {}, [badge(act, isHigh ? 'high' : 'low')]),
+                el('td', { text: e.analyst || '-' }),
+                el('td', { className: 'mono', text: e.sha256 ? e.sha256.slice(0, 16) + '...' : '-', style: 'font-size: 10px;' }),
+                el('td', { text: nts || '-', style: 'font-size: 12px;' }),
+            ];
+            cells.forEach(td => tr.appendChild(td));
+            return tr;
+        });
+        tbody.replaceChildren(...rows);
+    };
+
+    btnRecord.addEventListener('click', async () => {
+        if (!state.currentCaseId) return;
+        const art = artifactInp.value.trim();
+        const act = actionSel.value;
+        const ana = analystInp.value.trim();
+        const nts = notesInp.value.trim();
+
+        if (!art || !ana) {
+            fbCustody.className = 'alert alert-error mt-md';
+            fbCustody.textContent = 'Artifact path and Analyst name are required.';
+            fbCustody.classList.remove('hidden');
+            return;
+        }
+
+        btnRecord.textContent = 'Recording...';
+        btnRecord.disabled = true;
+
+        const res = await api(`/custody/${encodeURIComponent(state.currentCaseId)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ artifact: art, action: act, analyst: ana, notes: nts })
+        });
+
+        btnRecord.textContent = 'Record Entry';
+        btnRecord.disabled = false;
+
+        if (res && !res._error) {
+            fbCustody.className = 'alert alert-success mt-md';
+            fbCustody.textContent = 'Chain of custody entry recorded successfully.';
+            fbCustody.classList.remove('hidden');
+            artifactInp.value = '';
+            notesInp.value = '';
+            await loadCustodyEntries();
+        } else {
+            fbCustody.className = 'alert alert-error mt-md';
+            fbCustody.textContent = res ? res.message : 'Failed to record entry.';
+            fbCustody.classList.remove('hidden');
+        }
+    });
+
+    await loadCustodyEntries();
+}
+
+// ==========================================
+// 15. Case Export & Lock Management
+// ==========================================
+async function initExport() {
+    if (!state.currentCaseId) return;
+
+    const outDirInp = document.getElementById('export-out-dir');
+    const btnExport = document.getElementById('btn-run-export');
+    const fbExport = document.getElementById('export-feedback');
+
+    const lockStatusVal = document.getElementById('lock-status-val');
+    const lockOwnerVal = document.getElementById('lock-owner-val');
+    const lockTimeVal = document.getElementById('lock-time-val');
+    const chkUnlock = document.getElementById('confirm-unlock');
+    const btnUnlock = document.getElementById('btn-force-unlock');
+    const fbUnlock = document.getElementById('unlock-feedback');
+
+    const refreshLock = async () => {
+        const res = await api(`/export/lock?case_id=${encodeURIComponent(state.currentCaseId)}`);
+        if (res && !res._error) {
+            const isLocked = res.locked;
+            lockStatusVal.textContent = isLocked ? 'LOCKED' : 'UNLOCKED';
+            lockStatusVal.className = `prop-val ${isLocked ? 'text-critical' : 'text-success'}`;
+            lockOwnerVal.textContent = res.owner ? `${res.owner} (PID: ${res.pid || '-'})` : '-';
+            lockTimeVal.textContent = res.timestamp || '-';
+        }
+    };
+
+    chkUnlock.addEventListener('change', () => { btnUnlock.disabled = !chkUnlock.checked; });
+
+    btnUnlock.addEventListener('click', async () => {
+        btnUnlock.textContent = 'Releasing...';
+        btnUnlock.disabled = true;
+
+        // The checkbox above ("confirm-unlock") is the operator's explicit authorization
+        // to force a lock removal, including breaking another process's active lock —
+        // the server no longer assumes this by default.
+        const res = await api('/export/unlock', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ case_id: state.currentCaseId, force: true, break_lock: true })
+        });
+
+        btnUnlock.textContent = 'Release Lock';
+        btnUnlock.disabled = false;
+        chkUnlock.checked = false;
+
+        if (res && !res._error) {
+            fbUnlock.className = 'alert alert-success mt-md';
+            fbUnlock.textContent = 'Export concurrency lock released.';
+            fbUnlock.classList.remove('hidden');
+            await refreshLock();
+        } else {
+            fbUnlock.className = 'alert alert-error mt-md';
+            fbUnlock.textContent = res ? res.message : 'Failed to release lock.';
+            fbUnlock.classList.remove('hidden');
+        }
+    });
+
+    btnExport.addEventListener('click', async () => {
+        const outDir = outDirInp.value.trim() || 'exports';
+        btnExport.textContent = 'Exporting...';
+        btnExport.disabled = true;
+
+        const res = await api('/export', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ case_id: state.currentCaseId, output_dir: outDir })
+        });
+
+        btnExport.textContent = 'Export Case Bundle';
+        btnExport.disabled = false;
+
+        if (res && !res._error) {
+            fbExport.className = 'alert alert-success mt-md';
+            fbExport.replaceChildren(
+                el('strong', { text: 'Case Export Successful' }),
+                el('br'),
+                document.createTextNode('Bundle saved to: '),
+                el('span', { className: 'mono text-cyan', text: res.export_path || res.path || 'exports/' }),
+            );
+            fbExport.classList.remove('hidden');
+            await refreshLock();
+        } else {
+            fbExport.className = 'alert alert-error mt-md';
+            fbExport.textContent = res ? res.message : 'Export failed.';
+            fbExport.classList.remove('hidden');
+            await refreshLock();
+        }
+    });
+
+    await refreshLock();
+}
+
+// ==========================================
+// 16. Database Maintenance
+// ==========================================
+function initDatabase() {
+    const btnCheck = document.getElementById('btn-db-check');
+    const resCheck = document.getElementById('db-check-result');
+
+    btnCheck.addEventListener('click', async () => {
+        btnCheck.textContent = 'Checking...';
+        btnCheck.disabled = true;
+
+        const res = await api('/database/check', { method: 'POST' });
+        btnCheck.textContent = 'Run Integrity Check';
+        btnCheck.disabled = false;
+
+        if (res && !res._error) {
+            resCheck.className = 'alert alert-success mt-md';
+            resCheck.replaceChildren(
+                el('strong', { text: `Integrity Check: ${res.status || 'OK'}` }),
+                el('br'),
+                document.createTextNode(res.details || 'PRAGMA integrity_check: ok'),
+            );
+            resCheck.classList.remove('hidden');
+        } else {
+            resCheck.className = 'alert alert-error mt-md';
+            resCheck.textContent = res ? res.message : 'Database check failed.';
+            resCheck.classList.remove('hidden');
+        }
+    });
+
+    const bkpPathInp = document.getElementById('db-backup-path');
+    const btnBackup = document.getElementById('btn-db-backup');
+    const resBackup = document.getElementById('db-backup-result');
+
+    btnBackup.addEventListener('click', async () => {
+        const dest = bkpPathInp.value.trim();
+        btnBackup.textContent = 'Backing up...';
+        btnBackup.disabled = true;
+
+        const res = await api('/database/backup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ backup_path: dest })
+        });
+
+        btnBackup.textContent = 'Create Backup';
+        btnBackup.disabled = false;
+
+        if (res && !res._error) {
+            resBackup.className = 'alert alert-success mt-md';
+            resBackup.replaceChildren(
+                el('strong', { text: 'Backup Created' }),
+                el('br'),
+                document.createTextNode('Saved to: '),
+                el('span', { className: 'mono', text: res.backup_path || dest }),
+            );
+            resBackup.classList.remove('hidden');
+        } else {
+            resBackup.className = 'alert alert-error mt-md';
+            resBackup.textContent = res ? res.message : 'Backup failed.';
+            resBackup.classList.remove('hidden');
+        }
+    });
+
+    const rstPathInp = document.getElementById('db-restore-path');
+    const chkRestore = document.getElementById('confirm-db-restore');
+    const btnRestore = document.getElementById('btn-db-restore');
+    const resRestore = document.getElementById('db-restore-result');
+
+    chkRestore.addEventListener('change', () => { btnRestore.disabled = !chkRestore.checked; });
+
+    btnRestore.addEventListener('click', async () => {
+        const src = rstPathInp.value.trim();
+        if (!src) {
+            resRestore.className = 'alert alert-error mt-md';
+            resRestore.textContent = 'Backup source path is required.';
+            resRestore.classList.remove('hidden');
+            return;
+        }
+
+        btnRestore.textContent = 'Restoring...';
+        btnRestore.disabled = true;
+
+        // The restore target is no longer implicit server-side — resolve the live
+        // database path explicitly so the operator's confirmation (the checkbox above)
+        // corresponds to a known, named target rather than a silent default.
+        const dbInfo = await api('/database/check', { method: 'POST' });
+        if (!dbInfo || dbInfo._error || !dbInfo.database) {
+            btnRestore.textContent = 'Restore Database';
+            btnRestore.disabled = false;
+            resRestore.className = 'alert alert-error mt-md';
+            resRestore.textContent = 'Could not resolve the live database path; restore aborted.';
+            resRestore.classList.remove('hidden');
+            return;
+        }
+
+        const res = await api('/database/restore', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ backup_path: src, target_path: dbInfo.database, confirm: true })
+        });
+
+        btnRestore.textContent = 'Restore Database';
+        btnRestore.disabled = false;
+        chkRestore.checked = false;
+
+        if (res && !res._error) {
+            resRestore.className = 'alert alert-success mt-md';
+            resRestore.textContent = 'Database restored successfully. Please refresh the console.';
+            resRestore.classList.remove('hidden');
+            await fetchCases();
+        } else {
+            resRestore.className = 'alert alert-error mt-md';
+            resRestore.textContent = res ? res.message : 'Database restore failed.';
+            resRestore.classList.remove('hidden');
+        }
+    });
+}
+
+// ==========================================
+// 17. Static Analysis
+// ==========================================
+function initStatic() {
+    const fpathInp = document.getElementById('static-file-path');
+    const caseSel = document.getElementById('static-case');
+    const caseStatus = document.getElementById('static-case-status');
+    const btnRun = document.getElementById('btn-run-static');
+    const fbStatic = document.getElementById('static-feedback');
+    const resBox = document.getElementById('static-results');
+
+    const typeEl = document.getElementById('static-type');
+    const sizeEl = document.getElementById('static-size');
+    const entropyEl = document.getElementById('static-entropy');
+    const countEl = document.getElementById('static-indicator-count');
+    const pathEl = document.getElementById('static-path');
+    const shaEl = document.getElementById('static-sha256');
+    const indicsEl = document.getElementById('static-indicators');
+    const secTbody = document.getElementById('static-sections-tbody');
+
+    populateCaseSelector(caseSel, { required: true, statusEl: caseStatus });
+
+    btnRun.addEventListener('click', async () => {
+        const fpath = fpathInp.value.trim();
+        const cid = (caseSel.value || '').trim();
+        if (!fpath) {
+            fbStatic.className = 'alert alert-error mt-md';
+            fbStatic.textContent = 'Artifact file path is required.';
+            fbStatic.classList.remove('hidden');
+            return;
+        }
+        if (!cid) {
+            fbStatic.className = 'alert alert-error mt-md';
+            fbStatic.textContent = 'Select a case before running analysis.';
+            fbStatic.classList.remove('hidden');
+            return;
+        }
+
+        btnRun.textContent = 'Analyzing...';
+        btnRun.disabled = true;
+
+        const res = await api('/static/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ file_path: fpath, case_id: cid })
+        });
+
+        btnRun.textContent = 'Analyze Artifact';
+        btnRun.disabled = false;
+
+        if (res && !res._error && res.analysis) {
+            fbStatic.className = 'alert alert-success mt-md';
+            if (res.case_id) {
+                const findingLabel = (res.finding_id == null) ? '-' : String(res.finding_id);
+                fbStatic.textContent = 'Analysis complete. Evidence persisted under case: '
+                    + res.case_id + ' (finding #' + findingLabel + ').';
+            } else {
+                fbStatic.textContent = 'Analysis complete.';
+            }
+            fbStatic.classList.remove('hidden');
+            resBox.classList.remove('hidden');
+
+            const a = res.analysis;
+            typeEl.textContent = a.file_type || 'Unknown';
+            sizeEl.textContent = typeof a.file_size === 'number' ? a.file_size.toLocaleString() + ' B' : '-';
+            entropyEl.textContent = typeof a.total_entropy === 'number' ? a.total_entropy.toFixed(3) : '-';
+            pathEl.textContent = a.file_path || fpath;
+            shaEl.textContent = a.sha256 || '-';
+
+            const indics = [];
+            const apis = a.suspicious_apis || {};
+            Object.keys(apis).sort().forEach(category => {
+                (apis[category] || []).forEach(apiName => indics.push({ text: category + ': ' + apiName, severity: 'critical' }));
+            });
+            const keywords = (a.extracted_iocs && a.extracted_iocs.ransom_keywords) || [];
+            keywords.forEach(kw => indics.push({ text: 'ransom keyword: ' + kw, severity: 'high' }));
+            countEl.textContent = String(indics.length);
+
+            indicsEl.replaceChildren(...(indics.length > 0
+                ? indics.map(i => badge(i.text, i.severity))
+                : [badge('None detected', 'low')]));
+
+            const secs = a.sections || [];
+            const rows = secs.map(sec => {
+                const tr = el('tr');
+                [
+                    el('td', { className: 'mono' }, [el('strong', { text: sec.name || '-' })]),
+                    el('td', { className: 'mono', text: sec.virtual_size !== undefined ? String(sec.virtual_size) : '-' }),
+                    el('td', { className: 'mono', text: sec.raw_size !== undefined ? String(sec.raw_size) : '-' }),
+                    el('td', { className: 'mono', text: typeof sec.entropy === 'number' ? sec.entropy.toFixed(3) : '-' }),
+                ].forEach(td => tr.appendChild(td));
+                return tr;
+            });
+            if (rows.length === 0) {
+                const tr = el('tr');
+                const td = el('td', { className: 'mono', text: 'No PE sections found (not a PE binary).', style: 'text-align: center;' });
+                td.colSpan = 4;
+                tr.appendChild(td);
+                rows.push(tr);
+            }
+            secTbody.replaceChildren(...rows);
+        } else {
+            fbStatic.className = 'alert alert-error mt-md';
+            fbStatic.textContent = res ? res.message : 'Static analysis failed.';
+            fbStatic.classList.remove('hidden');
+            resBox.classList.add('hidden');
+        }
+    });
+}
+
+// ==========================================
+// 17b. Script Analysis
+// ==========================================
+const SCRIPT_SEVERITY_META = {
+    NONE: { label: 'No indicators found', badge: 'low' },
+    LOW: { label: 'Low', badge: 'low' },
+    MEDIUM: { label: 'Medium', badge: 'medium' },
+    HIGH: { label: 'High', badge: 'high' },
+    CRITICAL: { label: 'Critical', badge: 'critical' },
+};
+
+const SCRIPT_CATEGORY_PHRASES = {
+    download: 'downloads content from the internet',
+    execution: 'runs further commands or code',
+    obfuscation: 'hides what it really does through encoding or obfuscation',
+    defense_evasion: 'tries to weaken or evade security controls',
+    recovery_inhibition: 'attempts to destroy backups or recovery data',
+    impact: 'shows file-encryption or destruction behaviour',
+    persistence: 'tries to keep itself running across reboots',
+    lolbin: 'abuses a built-in Windows tool to run code',
+    auto_execution: 'is set to run automatically when a document opens',
+};
+
+function scriptPlainSummary(analysis) {
+    const cats = [];
+    for (const ind of analysis.indicators || []) {
+        const phrase = SCRIPT_CATEGORY_PHRASES[ind.category];
+        if (phrase && !cats.includes(phrase)) cats.push(phrase);
+    }
+    if (cats.length === 0) {
+        return 'No known malicious patterns were found. Static analysis cannot prove a script is safe.';
+    }
+    const joined = cats.length === 1 ? cats[0]
+        : cats.slice(0, -1).join(', ') + ' and ' + cats[cats.length - 1];
+    return `This script ${joined}.`;
+}
+
+function renderScriptResult(container, analysis, findingIds) {
+    container.replaceChildren();
+    const status = analysis.analysis_status;
+
+    if (status !== 'complete') {
+        const warn = (analysis.warnings && analysis.warnings[0]) || 'This content type is not supported by script analysis.';
+        container.appendChild(el('div', { className: 'empty-state' }, [
+            el('h3', { text: 'Not analyzed' }),
+            el('p', { text: warn }),
+            el('p', { style: 'color: var(--re-text-muted); font-size: 12px;',
+                text: 'This is never reported as safe. For program files use Static Analysis.' }),
+        ]));
+        return;
+    }
+
+    const sev = String(analysis.severity || 'NONE').toUpperCase();
+    const meta = SCRIPT_SEVERITY_META[sev] || SCRIPT_SEVERITY_META.NONE;
+
+    const verdict = el('div', { className: 'panel', style: 'padding: 16px; margin-bottom: 16px;' });
+    const verdictHead = el('div', { style: 'display: flex; align-items: center; gap: 12px; flex-wrap: wrap;' }, [
+        el('span', { className: 'badge ' + meta.badge, text: meta.label, style: 'font-size: 13px;' }),
+        el('span', { className: 'mono', text: `Score ${analysis.score}/100`, style: 'color: var(--re-text-secondary);' }),
+        el('span', { className: 'mono', text: `Confidence ${(Number(analysis.confidence) * 100).toFixed(0)}%`, style: 'color: var(--re-text-secondary);' }),
+    ]);
+    verdict.appendChild(verdictHead);
+    verdict.appendChild(el('p', { style: 'margin-top: 10px;', text: scriptPlainSummary(analysis) }));
+    const advice = (analysis.indicators && analysis.indicators.length)
+        ? 'Do not run this file. Treat it as suspicious and investigate.'
+        : 'No known malicious patterns were found. Static analysis cannot guarantee the file is safe.';
+    verdict.appendChild(el('p', { style: 'margin-top: 4px; color: var(--re-text-muted); font-size: 12px;', text: advice }));
+    container.appendChild(verdict);
+
+    container.appendChild(el('div', { className: 'prop-list mb-lg' }, [
+        kv('Language', analysis.language),
+        kv('File size', `${analysis.file_size} bytes`, { mono: true }),
+        kv('SHA-256', analysis.sha256, { mono: true }),
+        kv('Decoded layers', String((analysis.decoded_layers || []).length), { mono: true }),
+        kv('MITRE techniques', (analysis.techniques || []).join(', ') || 'None', { mono: true }),
+    ]));
+
+    if (Array.isArray(findingIds)) {
+        const msg = findingIds.length
+            ? `Added to case: ${findingIds.length} finding(s) created (IDs ${findingIds.join(', ')}). See the Findings and Evidence views.`
+            : 'Already recorded against this evidence; no new findings were added.';
+        container.appendChild(el('div', { className: 'alert alert-success mb-lg', text: msg }));
+    }
+
+    const indicators = analysis.indicators || [];
+    const highOpen = indicators.some(i => i.severity === 'high' || i.severity === 'critical');
+    const indRows = indicators.map(ind => el('tr', {}, [
+        el('td', { className: 'mono', text: ind.rule_id }),
+        el('td', { text: ind.title }),
+        el('td', {}, [el('span', { className: 'badge ' + (SCRIPT_SEVERITY_META[String(ind.severity).toUpperCase()] || { badge: 'low' }).badge, text: ind.severity })]),
+        el('td', { className: 'mono', text: ind.technique }),
+        el('td', { className: 'mono', text: `${ind.layer_index}/${ind.line}` }),
+        el('td', { className: 'mono', text: ind.excerpt, title: ind.excerpt }),
+    ]));
+    const indBody = [];
+    if (indRows.length) {
+        indBody.push(el('table', { className: 'data-table' }, [
+            el('thead', {}, [el('tr', {}, [
+                el('th', { text: 'Rule' }), el('th', { text: 'Title' }),
+                el('th', { text: 'Severity' }), el('th', { text: 'MITRE' }),
+                el('th', { text: 'Layer/Line' }), el('th', { text: 'Excerpt' }),
+            ])]),
+            el('tbody', {}, indRows),
+        ]));
+    } else {
+        indBody.push(el('div', { className: 'empty-state', text: 'No indicators matched.' }));
+    }
+    container.appendChild(section(`Indicators (${indicators.length})`, highOpen || indicators.length > 0, indBody));
+
+    const layers = analysis.decoded_layers || [];
+    if (layers.length) {
+        const layerNodes = layers.map(layer => {
+            const head = el('div', { className: 'mono', style: 'color: var(--re-text-secondary); font-size: 12px;',
+                text: `#${layer.index} depth ${layer.depth} from #${layer.parent_index} · ${layer.method} · ${layer.size} bytes · ${layer.is_text ? layer.encoding : 'binary'}` });
+            const sha = el('div', { className: 'mono', style: 'color: var(--re-text-muted); font-size: 11px; word-break: break-all;', text: `sha256 ${layer.sha256}` });
+            const pre = el('pre', { style: 'white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; background: var(--re-surface-hover); padding: 10px; border-radius: 6px; margin-top: 6px;' });
+            pre.textContent = layer.is_text ? (layer.preview || '') : '(binary payload)';
+            return el('div', { style: 'margin-bottom: 14px;' }, [head, sha, pre]);
+        });
+        container.appendChild(section(`Decoded layers (${layers.length})`, false, layerNodes));
+    }
+
+    const iocs = analysis.iocs || {};
+    const iocNodes = [];
+    for (const [name, values] of Object.entries(iocs)) {
+        if (!values || !values.length) continue;
+        iocNodes.push(el('div', { style: 'margin-bottom: 8px;' }, [
+            el('div', { className: 'prop-key', text: name.replace(/_/g, ' ') }),
+            el('div', { className: 'mono', style: 'word-break: break-all; font-size: 12px;', text: values.join('\n') }),
+        ]));
+    }
+    if (iocNodes.length) container.appendChild(section('Indicators of compromise', false, iocNodes));
+}
+
+function initScript() {
+    const tabFile = document.getElementById('script-tab-file');
+    const tabPaste = document.getElementById('script-tab-paste');
+    const paneFile = document.getElementById('script-pane-file');
+    const panePaste = document.getElementById('script-pane-paste');
+    const filePathInp = document.getElementById('script-file-path');
+    const textInp = document.getElementById('script-text');
+    const caseSel = document.getElementById('script-file-case');
+    const langSel = document.getElementById('script-language');
+    const btnRun = document.getElementById('btn-run-script');
+    const fb = document.getElementById('script-feedback');
+    const results = document.getElementById('script-results');
+
+    let mode = 'file';
+
+    populateCaseSelector(caseSel, { required: false });
+
+    function selectMode(next) {
+        mode = next;
+        tabFile.classList.toggle('active', next === 'file');
+        tabPaste.classList.toggle('active', next === 'paste');
+        paneFile.classList.toggle('active', next === 'file');
+        panePaste.classList.toggle('active', next === 'paste');
+    }
+    tabFile.addEventListener('click', () => selectMode('file'));
+    tabPaste.addEventListener('click', () => selectMode('paste'));
+
+    function showError(message) {
+        fb.className = 'alert alert-error mt-md';
+        fb.textContent = message;
+        fb.classList.remove('hidden');
+    }
+
+    btnRun.addEventListener('click', async () => {
+        fb.classList.add('hidden');
+        const body = { language: langSel.value };
+
+        if (mode === 'file') {
+            const fpath = filePathInp.value.trim();
+            if (!fpath) { showError('A script file path is required.'); return; }
+            body.file_path = fpath;
+            const cid = caseSel.value;
+            if (cid) body.case_id = cid;
+        } else {
+            const text = textInp.value;
+            if (!text.trim()) { showError('Paste some script text to analyze.'); return; }
+            body.text = text;
+        }
+
+        btnRun.textContent = 'Analyzing...';
+        btnRun.disabled = true;
+        const res = await api('/script/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        btnRun.textContent = 'Analyze';
+        btnRun.disabled = false;
+
+        if (!res || res._error || !res.analysis) {
+            showError(res ? res.message : 'Script analysis failed.');
+            results.replaceChildren(el('div', { className: 'empty-state', text: 'Analysis could not be completed.' }));
+            return;
+        }
+        renderScriptResult(results, res.analysis, res.finding_ids);
+    });
+}
+
+// ==========================================
+// 18. Phishing Analysis
+// ==========================================
+const PHISH_BADGE = {
+    benign: 'low', low: 'low', medium: 'medium',
+    suspicious: 'high', high: 'high', critical: 'critical',
+};
+
+function phishBadge(severity) {
+    return 'badge ' + (PHISH_BADGE[String(severity || '').toLowerCase()] || 'medium');
+}
+
+function phishUrlFlags(u) {
+    const flags = [];
+    if (u.is_ip_hostname) flags.push('RAW_IP');
+    if (u.is_brand_subdomain) flags.push('BRAND_IN_SUBDOMAIN');
+    if (u.is_punycode) flags.push('PUNYCODE');
+    if (u.is_shortener) flags.push('SHORTENER');
+    if (u.has_suspicious_tld) flags.push('SUSPICIOUS_TLD');
+    return flags;
+}
+
+function renderPhishingResult(container, a) {
+    container.replaceChildren();
+
+    const sev = String(a.threat_level || a.risk_level || a.severity || 'LOW').toUpperCase();
+    const score = a.score != null ? a.score : (a.risk_score != null ? a.risk_score : '-');
+    const indicators = a.indicators || a.reasons || [];
+    const urls = a.extracted_urls || a.urls || [];
+    const attachments = a.attachment_findings || [];
+    const techniques = a.mitre_techniques || a.techniques || [];
+    const recommendations = a.recommendations || [];
+    const critical = sev === 'HIGH' || sev === 'CRITICAL';
+    const valCls = 'stat-val ' + (critical ? 'text-critical' : 'text-warning');
+
+    container.appendChild(el('div', { className: 'grid-overview' }, [
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Risk Score' }),
+            el('span', { className: valCls, text: String(score) }),
+        ]),
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Threat Level' }),
+            el('span', { className: valCls, text: sev }),
+        ]),
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Indicators' }),
+            el('span', { className: 'stat-val mono', text: String(indicators.length) }),
+        ]),
+    ]));
+
+    container.appendChild(el('div', { className: 'prop-list mb-lg' }, [
+        kv('Confidence', a.confidence || '-'),
+        kv('MITRE techniques', techniques.join(', ') || 'None', { mono: true }),
+    ]));
+
+    const indRows = indicators.map(ind => {
+        if (ind && typeof ind === 'object') {
+            return el('tr', {}, [
+                el('td', { className: 'mono', text: ind.rule_id }),
+                el('td', {}, [el('span', { className: phishBadge(ind.severity), text: ind.severity })]),
+                el('td', { text: ind.description }),
+                el('td', { className: 'mono', text: ind.matched_evidence, title: ind.matched_evidence }),
+            ]);
+        }
+        return el('tr', {}, [
+            el('td', { className: 'mono', text: '-' }),
+            el('td', {}, [el('span', { className: phishBadge(sev), text: sev.toLowerCase() })]),
+            el('td', { text: String(ind) }),
+            el('td', { className: 'mono', text: '' }),
+        ]);
+    });
+    const indBody = [];
+    if (indRows.length) {
+        indBody.push(el('table', { className: 'data-table' }, [
+            el('thead', {}, [el('tr', {}, [
+                el('th', { text: 'Rule' }), el('th', { text: 'Severity' }),
+                el('th', { text: 'Description' }), el('th', { text: 'Matched evidence' }),
+            ])]),
+            el('tbody', {}, indRows),
+        ]));
+    } else {
+        indBody.push(el('div', { className: 'empty-state', text: 'No high-risk indicators detected.' }));
+    }
+    container.appendChild(section(`Detected indicators (${indicators.length})`, indicators.length > 0, indBody));
+
+    if (urls.length) {
+        const urlNodes = urls.map(u => {
+            const raw = (u && typeof u === 'object') ? (u.url || u.hostname || '') : u;
+            const flags = (u && typeof u === 'object') ? phishUrlFlags(u) : [];
+            const line = el('div', { style: 'margin-bottom: 6px; word-break: break-all;' }, [
+                el('span', { className: 'mono', style: 'font-size: 11px;', text: raw }),
+            ]);
+            if (flags.length) {
+                line.appendChild(el('span', {
+                    className: 'mono',
+                    style: 'color: var(--re-text-muted); font-size: 11px;',
+                    text: `  [${flags.join(', ')}]`,
+                }));
+            }
+            return line;
+        });
+        container.appendChild(section(`Extracted URLs / domains (${urls.length})`, false, urlNodes));
+    }
+
+    if (attachments.length) {
+        const attRows = attachments.map(att => el('tr', {}, [
+            el('td', { className: 'mono', text: att.filename, title: att.filename }),
+            el('td', {}, [el('span', { className: phishBadge(att.risk), text: att.risk })]),
+            el('td', { text: att.reason }),
+        ]));
+        container.appendChild(section(`Attachments (${attachments.length})`, false, [
+            el('table', { className: 'data-table' }, [
+                el('thead', {}, [el('tr', {}, [
+                    el('th', { text: 'Filename' }), el('th', { text: 'Risk' }), el('th', { text: 'Reason' }),
+                ])]),
+                el('tbody', {}, attRows),
+            ]),
+        ]));
+    }
+
+    if (recommendations.length) {
+        const list = el('ul', { style: 'margin: 0; padding-left: 18px;' },
+            recommendations.map(r => el('li', { text: r })));
+        container.appendChild(section(`Recommendations (${recommendations.length})`, false, [list]));
+    }
+
+    const phishWarnings = a.warnings || [];
+    if (phishWarnings.length) {
+        const warnNodes = phishWarnings.map(w =>
+            el('div', { className: 'prop-val', text: w, style: 'color: var(--re-text-muted); font-size: 12px;' }));
+        container.appendChild(section(`Bounded-analysis warnings (${phishWarnings.length})`, true, warnNodes));
+    }
+}
+
+function initPhishing() {
+    const tabFile = document.getElementById('phishing-tab-file');
+    const tabPaste = document.getElementById('phishing-tab-paste');
+    const paneFile = document.getElementById('phishing-pane-file');
+    const panePaste = document.getElementById('phishing-pane-paste');
+    const filePathInp = document.getElementById('phishing-file-path');
+    const subjInp = document.getElementById('phishing-subject');
+    const sendInp = document.getElementById('phishing-sender');
+    const bodyInp = document.getElementById('phishing-body');
+    const caseSel = document.getElementById('phishing-case');
+    const caseStatus = document.getElementById('phishing-case-status');
+    const btnRun = document.getElementById('btn-run-phishing');
+    const fbPhish = document.getElementById('phishing-feedback');
+    const resBox = document.getElementById('phishing-results');
+
+    let mode = 'file';
+
+    populateCaseSelector(caseSel, { required: true, statusEl: caseStatus });
+
+    function selectMode(next) {
+        mode = next;
+        if (tabFile) tabFile.classList.toggle('active', next === 'file');
+        if (tabPaste) tabPaste.classList.toggle('active', next === 'paste');
+        if (paneFile) paneFile.classList.toggle('active', next === 'file');
+        if (panePaste) panePaste.classList.toggle('active', next === 'paste');
+    }
+    if (tabFile) tabFile.addEventListener('click', () => selectMode('file'));
+    if (tabPaste) tabPaste.addEventListener('click', () => selectMode('paste'));
+
+    btnRun.addEventListener('click', async () => {
+        fbPhish.classList.add('hidden');
+        const cid = (caseSel.value || '').trim();
+        if (!cid) {
+            fbPhish.className = 'alert alert-error mt-md';
+            fbPhish.textContent = 'Select a case before running analysis.';
+            fbPhish.classList.remove('hidden');
+            return;
+        }
+
+        const payload = { case_id: cid };
+        if (mode === 'file') {
+            const fpath = filePathInp ? filePathInp.value.trim() : '';
+            if (!fpath) {
+                fbPhish.className = 'alert alert-error mt-md';
+                fbPhish.textContent = 'Email artifact file path is required.';
+                fbPhish.classList.remove('hidden');
+                return;
+            }
+            payload.file_path = fpath;
+        } else {
+            const bodyText = bodyInp ? bodyInp.value.trim() : '';
+            if (!bodyText) {
+                fbPhish.className = 'alert alert-error mt-md';
+                fbPhish.textContent = 'Message body or headers content is required.';
+                fbPhish.classList.remove('hidden');
+                return;
+            }
+            payload.body = bodyText;
+            if (subjInp && subjInp.value.trim()) payload.subject = subjInp.value.trim();
+            if (sendInp && sendInp.value.trim()) payload.sender = sendInp.value.trim();
+        }
+
+        btnRun.textContent = 'Analyzing...';
+        btnRun.disabled = true;
+
+        const res = await api('/phishing/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        btnRun.textContent = 'Analyze Message';
+        btnRun.disabled = false;
+
+        if (res && !res._error && res.assessment) {
+            fbPhish.className = 'alert alert-success mt-md';
+            if (res.case_id) {
+                fbPhish.textContent = `Analysis complete. Evidence persisted under case: ${res.case_id} (finding #${res.finding_id ?? '-'}).`;
+            } else {
+                fbPhish.textContent = 'Analysis complete.';
+            }
+            fbPhish.classList.remove('hidden');
+            renderPhishingResult(resBox, res.assessment);
+        } else {
+            fbPhish.className = 'alert alert-error mt-md';
+            fbPhish.textContent = res ? res.message : 'Phishing analysis failed.';
+            fbPhish.classList.remove('hidden');
+        }
+    });
+}
+
+// ==========================================
+// Drawers (Inspectors) — Safe DOM
+// ==========================================
 async function inspectIncident(incId) {
     const inc = state.incidents.find(i => i.incident_id === incId);
     if (!inc) return;
 
     dom.drawerTitle.textContent = `Incident: ${incId}`;
-    let html = `
-        <div class="prop-list">
-            <div class="prop-item"><span class="prop-key">Severity</span><span class="badge ${inc.severity.toLowerCase()}" style="align-self: flex-start;">${inc.severity}</span></div>
-            <div class="prop-item"><span class="prop-key">Timeframe</span><span class="prop-val">${inc.start_time} - ${inc.end_time}</span></div>
-            <div class="prop-item"><span class="prop-key">Duration</span><span class="prop-val">${inc.duration} seconds</span></div>
-        </div>
 
-        <h4 class="mt-xl" style="margin-bottom: 12px; font-size: 11px; text-transform: uppercase; color: var(--re-text-muted);">Associated Findings (${(inc.finding_ids || []).length})</h4>
-        <div class="prop-list">
-            ${(inc.finding_ids || []).map(f => `<div class="prop-val mono" style="color: var(--re-critical); border-left: 3px solid var(--re-critical);">FINDING:${f}</div>`).join('')}
-        </div>
+    const content = el('div', {}, [
+        el('div', { className: 'prop-list' }, [
+            el('div', { className: 'prop-item' }, [
+                el('span', { className: 'prop-key', text: 'Severity' }),
+                badge(inc.severity, (inc.severity || '').toLowerCase()),
+            ]),
+            kv('Timeframe', `${inc.start_time || '-'} - ${inc.end_time || '-'}`),
+            kv('Duration', `${inc.duration || '-'} seconds`),
+        ]),
+    ]);
 
-        <h4 class="mt-xl" style="margin-bottom: 12px; font-size: 11px; text-transform: uppercase; color: var(--re-text-muted);">Processes Involved</h4>
-        <div class="prop-list">
-            ${(inc.processes || []).map(p => `
-                <div class="prop-val mono clickable-id" onclick="inspectProcess('${p.process_guid || p.pid}')">
-                    ${p.process_name} (PID: ${p.pid})<br>
-                    <span style="color: var(--re-text-muted); font-size: 11px;">GUID: ${p.process_guid}</span>
-                </div>
-            `).join('')}
-        </div>
-    `;
-    dom.drawerContent.innerHTML = html;
+    // Associated Findings
+    const findingIds = inc.finding_ids || [];
+    content.appendChild(el('h4', { className: 'mt-xl', text: `Associated Findings (${findingIds.length})`,
+        style: 'margin-bottom: 12px; font-size: 11px; text-transform: uppercase; color: var(--re-text-muted);' }));
+    const findingList = el('div', { className: 'prop-list' });
+    findingIds.forEach(f => {
+        const fObj = state.findings.find(fn => String(fn.finding_id) === String(f) || String(fn.id) === String(f));
+        const evIds = fObj ? (fObj.event_ids || []) : [];
+        const item = el('div', {
+            className: 'prop-val mono' + (evIds.length > 0 ? ' clickable-id' : ''),
+            text: `FINDING:${f}` + (fObj ? ` — ${fObj.finding_type || fObj.type || ''}` : ''),
+            style: 'color: var(--re-critical); border-left: 3px solid var(--re-critical);' + (evIds.length > 0 ? ' cursor: pointer;' : ''),
+            onclick: () => {
+                if (evIds.length > 0) inspectEvent(evIds[0]);
+            }
+        });
+        findingList.appendChild(item);
+    });
+    if (findingIds.length === 0) findingList.appendChild(el('div', { className: 'prop-val', text: 'No findings associated.', style: 'color: var(--re-text-muted);' }));
+    content.appendChild(findingList);
+
+    // Processes Involved
+    const processes = inc.processes || [];
+    content.appendChild(el('h4', { className: 'mt-xl', text: 'Processes Involved',
+        style: 'margin-bottom: 12px; font-size: 11px; text-transform: uppercase; color: var(--re-text-muted);' }));
+    const procList = el('div', { className: 'prop-list' });
+    processes.forEach(p => {
+        const procEl = el('div', { className: 'prop-val mono clickable-id',
+            onclick: () => inspectProcess(p.process_guid || p.pid) });
+        procEl.appendChild(document.createTextNode(`${p.process_name || '-'} (PID: ${p.pid || '-'})`));
+        procEl.appendChild(el('br'));
+        procEl.appendChild(el('span', { text: `GUID: ${p.process_guid || '-'}`, style: 'color: var(--re-text-muted); font-size: 11px;' }));
+        procList.appendChild(procEl);
+    });
+    if (processes.length === 0) procList.appendChild(el('div', { className: 'prop-val', text: 'No process context available.', style: 'color: var(--re-text-muted);' }));
+    content.appendChild(procList);
+
+    dom.drawerContent.replaceChildren(content);
     dom.drawer.classList.add('open');
 }
 
@@ -491,13 +2479,13 @@ window.inspectEventEncoded = function(encEventId) {
 
 async function inspectEvent(eventId) {
     if (!state.currentCaseId || !eventId) return;
-    dom.drawerTitle.textContent = `Loading Evidence...`;
-    dom.drawerContent.innerHTML = '<div class="empty-state">Loading...</div>';
+    dom.drawerTitle.textContent = 'Loading Evidence...';
+    dom.drawerContent.replaceChildren(el('div', { className: 'empty-state', text: 'Loading...' }));
     dom.drawer.classList.add('open');
 
     const data = await api(`/inspect/${encodeURIComponent(state.currentCaseId)}?event_id=${encodeURIComponent(eventId)}`);
     if (!data || data._error || !data.event) {
-        dom.drawerContent.innerHTML = `<div class="empty-state">Failed to load evidence event ${eventId}.</div>`;
+        dom.drawerContent.replaceChildren(el('div', { className: 'empty-state', text: `Failed to load evidence event.` }));
         return;
     }
 
@@ -508,71 +2496,107 @@ async function inspectEvent(eventId) {
         process_guid: (ev.process_guid && ev.process_guid !== 'null' && ev.process_guid !== 'undefined') ? ev.process_guid : null,
     };
 
-    dom.drawerTitle.textContent = `Evidence Inspection`;
-
+    dom.drawerTitle.textContent = 'Evidence Inspection';
     const procIdent = state.lastEventMeta.process_guid || state.lastEventMeta.pid;
 
-    let processSectionHtml = '';
+    // Tabs
+    const tabProps = el('div', { className: 'tab active', text: 'Properties' });
+    const tabTrace = el('div', { className: 'tab', text: 'Evidence Trace' });
+    const tabRaw = el('div', { className: 'tab', text: 'Raw Data' });
+    const tabs = el('div', { className: 'tabs' }, [tabProps, tabTrace, tabRaw]);
+
+    // Properties panel
+    const propsPane = el('div', { className: 'tab-content active prop-list' });
+    propsPane.append(
+        kv('Event ID', ev.event_id, { mono: true }),
+        kv('Timestamp', ev.timestamp || '-'),
+        kv('Source', ev.source),
+        kv('Event Type', ev.event_type || '-'),
+    );
+
     if (procIdent) {
-        processSectionHtml = `
-            <div class="prop-item"><span class="prop-key">Process Name</span><span class="prop-val mono" style="color: var(--re-cyan-bright);">${ev.process_name || ev.image_path || '-'}</span></div>
-            <div class="prop-item"><span class="prop-key">PID</span><span class="prop-val mono">${ev.pid || '-'}</span></div>
-            <div class="prop-item"><span class="prop-key">Process GUID</span><span class="prop-val mono" style="font-size: 11px;">${ev.process_guid || '-'}</span></div>
-            <div class="mt-sm mb-md">
-                <button class="btn btn-primary btn-open-process-profile" onclick="inspectProcess('${procIdent}')" style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 8px 16px; cursor: pointer;">
-                    OPEN PROCESS PROFILE &rarr;
-                </button>
-            </div>`;
+        propsPane.append(
+            kv('Process Name', ev.process_name || ev.image_path || '-', { mono: true }),
+            kv('PID', ev.pid || '-', { mono: true }),
+            kv('Process GUID', ev.process_guid || '-', { mono: true }),
+            el('div', { className: 'mt-sm mb-md' }, [
+                el('button', { className: 'btn btn-primary', text: 'OPEN PROCESS PROFILE →',
+                    style: 'display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 8px 16px; cursor: pointer;',
+                    onclick: () => inspectProcess(procIdent) }),
+            ]),
+        );
     } else {
-        processSectionHtml = `
-            <div class="prop-item">
-                <span class="prop-key">Process Context</span>
-                <span class="prop-val text-muted" style="color: var(--re-text-muted);">No process context available</span>
-            </div>`;
+        propsPane.appendChild(kv('Process Context', 'No process context available'));
+    }
+    propsPane.append(
+        kv('Command Line', ev.command_line || '-'),
+        kv('Image Path', ev.image_path || '-'),
+    );
+
+    // Trace panel
+    const tracePane = el('div', { className: 'tab-content' });
+    const traceContainer = el('div', { className: 'trace-container' });
+
+    traceContainer.appendChild(el('div', { className: 'trace-node mono', text: `EVENT: ${ev.event_type || 'Unknown'} (${ev.event_id})`, style: 'border-color: var(--re-cyan);' }));
+    traceContainer.appendChild(el('div', { className: 'trace-edge' }));
+
+    if (data.trace.findings.length > 0) {
+        data.trace.findings.forEach(f => {
+            traceContainer.appendChild(el('div', { className: 'trace-node mono', text: `FINDING: ${f.finding_type || '-'}`, style: 'border-color: var(--re-critical); color: var(--re-critical);' }));
+            traceContainer.appendChild(el('div', { className: 'trace-edge' }));
+        });
+    } else {
+        traceContainer.appendChild(el('div', { className: 'trace-node', text: 'No Findings', style: 'color: var(--re-text-muted);' }));
+        traceContainer.appendChild(el('div', { className: 'trace-edge' }));
     }
 
-    let html = `
-        <div class="tabs">
-            <div class="tab active" onclick="switchDrawerTab(this, 'ev-props')">Properties</div>
-            <div class="tab" onclick="switchDrawerTab(this, 'ev-trace')">Evidence Trace</div>
-            <div class="tab" onclick="switchDrawerTab(this, 'ev-raw')">Raw Data</div>
-        </div>
+    if (data.trace.incidents.length > 0) {
+        data.trace.incidents.forEach(i => {
+            traceContainer.appendChild(el('div', { className: 'trace-node mono clickable-id', text: `INCIDENT: ${i.incident_id || '-'}`,
+                onclick: () => inspectIncident(i.incident_id) }));
+            traceContainer.appendChild(el('div', { className: 'trace-edge' }));
+        });
+    } else {
+        traceContainer.appendChild(el('div', { className: 'trace-node', text: 'No Incidents', style: 'color: var(--re-text-muted);' }));
+        traceContainer.appendChild(el('div', { className: 'trace-edge' }));
+    }
 
-        <div id="ev-props" class="tab-content active prop-list">
-            <div class="prop-item"><span class="prop-key">Event ID</span><span class="prop-val mono">${ev.event_id}</span></div>
-            <div class="prop-item"><span class="prop-key">Timestamp</span><span class="prop-val">${ev.timestamp || '-'}</span></div>
-            <div class="prop-item"><span class="prop-key">Source</span><span class="prop-val">${ev.source}</span></div>
-            <div class="prop-item"><span class="prop-key">Event Type</span><span class="prop-val">${ev.event_type || '-'}</span></div>
-            ${processSectionHtml}
-            <div class="prop-item"><span class="prop-key">Command Line</span><span class="prop-val" style="color: var(--re-cyan-bright);">${ev.command_line || '-'}</span></div>
-            <div class="prop-item"><span class="prop-key">Image Path</span><span class="prop-val">${ev.image_path || '-'}</span></div>
-        </div>
+    if (data.trace.processes.length > 0) {
+        data.trace.processes.forEach(p => {
+            traceContainer.appendChild(el('div', { className: 'trace-node mono clickable-id', text: `PROCESS: ${p.process_name || p.pid || '-'}`,
+                onclick: () => inspectProcess(p.guid || p.pid) }));
+        });
+    } else {
+        traceContainer.appendChild(el('div', { className: 'trace-node', text: 'No Process Context', style: 'color: var(--re-text-muted);' }));
+    }
+    tracePane.appendChild(traceContainer);
 
-        <div id="ev-trace" class="tab-content">
-            <div class="trace-container">
-                <div class="trace-node mono" style="border-color: var(--re-cyan);">EVENT: ${ev.event_type || 'Unknown'} (${ev.event_id})</div>
-                <div class="trace-edge"></div>
-                ${data.trace.findings.length > 0 ? data.trace.findings.map(f => `<div class="trace-node mono" style="border-color: var(--re-critical); color: var(--re-critical);">FINDING: ${f.finding_type}</div>`).join('<div class="trace-edge"></div>') : `<div class="trace-node" style="color: var(--re-text-muted);">No Findings</div>`}
-                <div class="trace-edge"></div>
-                ${data.trace.incidents.length > 0 ? data.trace.incidents.map(i => `<div class="trace-node mono clickable-id" onclick="inspectIncident('${i.incident_id}')">INCIDENT: ${i.incident_id}</div>`).join('<div class="trace-edge"></div>') : `<div class="trace-node" style="color: var(--re-text-muted);">No Incidents</div>`}
-                <div class="trace-edge"></div>
-                ${data.trace.processes.length > 0 ? data.trace.processes.map(p => `<div class="trace-node mono clickable-id" onclick="inspectProcess('${p.guid || p.pid}')">PROCESS: ${p.process_name || p.pid}</div>`).join('<div class="trace-edge"></div>') : `<div class="trace-node" style="color: var(--re-text-muted);">No Process Context</div>`}
-            </div>
-        </div>
+    // Raw panel
+    const rawPane = el('div', { className: 'tab-content' });
+    const rawArea = el('textarea', { className: 'code-block', attrs: { rows: '20', readonly: '' } });
+    rawArea.value = JSON.stringify(ev, null, 2);
+    rawPane.appendChild(rawArea);
 
-        <div id="ev-raw" class="tab-content">
-            <textarea class="code-block" rows="20" readonly>${JSON.stringify(ev, null, 2)}</textarea>
-        </div>
-    `;
+    // Tab switching
+    const panes = [propsPane, tracePane, rawPane];
+    const tabEls = [tabProps, tabTrace, tabRaw];
+    tabEls.forEach((t, idx) => {
+        t.addEventListener('click', () => {
+            tabEls.forEach(tt => tt.classList.remove('active'));
+            panes.forEach(pp => pp.classList.remove('active'));
+            t.classList.add('active');
+            panes[idx].classList.add('active');
+        });
+    });
 
-    dom.drawerContent.innerHTML = html;
+    dom.drawerContent.replaceChildren(tabs, ...panes);
 }
 
-async function inspectProcess(procId, meta = null) {
+async function inspectProcess(procId, meta) {
     if (!state.currentCaseId || !procId || procId === 'null' || procId === 'undefined') return;
 
-    dom.drawerTitle.textContent = `Loading Process...`;
-    dom.drawerContent.innerHTML = '<div class="empty-state">Loading...</div>';
+    dom.drawerTitle.textContent = 'Loading Process...';
+    dom.drawerContent.replaceChildren(el('div', { className: 'empty-state', text: 'Loading...' }));
     dom.drawer.classList.add('open');
 
     const m = meta || state.lastEventMeta || {};
@@ -582,74 +2606,502 @@ async function inspectProcess(procId, meta = null) {
 
     const data = await api(`/process/${encodeURIComponent(state.currentCaseId)}/${encodeURIComponent(procId)}`);
     if (!data || data._error || !data.process) {
-        dom.drawerTitle.textContent = `Process Profile`;
-        dom.drawerContent.innerHTML = `
-            <div class="empty-state" style="padding: 24px 12px; text-align: left;">
-                <div class="badge warning mb-md" style="font-size: 13px; font-weight: 700; display: inline-block;">PROCESS PROFILE UNAVAILABLE</div>
-                <p style="color: var(--re-text); font-size: 13px; margin-bottom: 16px;">No matching process node exists for this case in the investigation graph.</p>
-                <h4 style="font-size: 11px; text-transform: uppercase; color: var(--re-text-muted); margin-bottom: 8px;">Event Process Metadata</h4>
-                <div class="prop-list mb-lg">
-                    <div class="prop-item"><span class="prop-key">Process Name</span><span class="prop-val mono">${procName}</span></div>
-                    <div class="prop-item"><span class="prop-key">PID</span><span class="prop-val mono">${procPid}</span></div>
-                    <div class="prop-item"><span class="prop-key">Process GUID</span><span class="prop-val mono" style="font-size: 11px;">${procGuid}</span></div>
-                </div>
-                <button class="btn btn-secondary mt-md" onclick="dom.drawer.classList.remove('open')" style="display: inline-flex; align-items: center; gap: 6px;">
-                    &larr; BACK TO EVIDENCE
-                </button>
-            </div>`;
+        dom.drawerTitle.textContent = 'Process Profile';
+        dom.drawerContent.replaceChildren(
+            el('div', { className: 'empty-state', style: 'padding: 24px 12px; text-align: left;' }, [
+                badge('PROCESS PROFILE UNAVAILABLE', 'warning'),
+                el('p', { text: 'No matching process node exists for this case in the investigation graph.', style: 'color: var(--re-text); font-size: 13px; margin: 16px 0;' }),
+                el('h4', { text: 'Event Process Metadata', style: 'font-size: 11px; text-transform: uppercase; color: var(--re-text-muted); margin-bottom: 8px;' }),
+                el('div', { className: 'prop-list mb-lg' }, [
+                    kv('Process Name', procName, { mono: true }),
+                    kv('PID', procPid, { mono: true }),
+                    kv('Process GUID', procGuid, { mono: true }),
+                ]),
+                el('button', { className: 'btn btn-secondary mt-md', text: '← BACK TO EVIDENCE',
+                    onclick: () => dom.drawer.classList.remove('open') }),
+            ])
+        );
         return;
     }
 
     const p = data.process;
-    dom.drawerTitle.textContent = `Process Profile`;
+    dom.drawerTitle.textContent = 'Process Profile';
 
-    let html = `
-        <div class="prop-list mb-lg">
-            <div class="prop-item"><span class="prop-key">Process Name</span><span class="prop-val mono" style="font-size: 16px; color: var(--re-cyan-bright); border-color: var(--re-cyan);">${p.name || '-'}</span></div>
-            <div class="prop-item"><span class="prop-key">PID</span><span class="prop-val mono">${p.pid || '-'}</span></div>
-            <div class="prop-item"><span class="prop-key">GUID</span><span class="prop-val mono" style="font-size: 11px;">${p.guid || '-'}</span></div>
-            <div class="prop-item"><span class="prop-key">Command Line</span><span class="prop-val" style="color: var(--re-text);">${p.command_line || '-'}</span></div>
-        </div>
+    // Identity
+    const identity = el('div', { className: 'prop-list mb-lg' }, [
+        el('div', { className: 'prop-item' }, [
+            el('span', { className: 'prop-key', text: 'Process Name' }),
+            el('span', { className: 'prop-val mono', text: p.name || '-', style: 'font-size: 16px; color: var(--re-cyan-bright); border-color: var(--re-cyan);' }),
+        ]),
+        kv('PID', p.pid || '-', { mono: true }),
+        kv('GUID', p.guid || '-', { mono: true }),
+        kv('Command Line', p.command_line || '-'),
+    ]);
 
-        <div class="tabs mt-lg">
-            <div class="tab active" onclick="switchDrawerTab(this, 'proc-lineage')">Lineage</div>
-            <div class="tab" onclick="switchDrawerTab(this, 'proc-files')">Files (${data.files.length})</div>
-            <div class="tab" onclick="switchDrawerTab(this, 'proc-net')">Network (${data.network.length})</div>
-            <div class="tab" onclick="switchDrawerTab(this, 'proc-find')">Findings (${data.findings.length})</div>
-        </div>
+    // Tabs
+    const tabLineage = el('div', { className: 'tab active', text: 'Lineage' });
+    const tabFiles = el('div', { className: 'tab', text: `Files (${data.files.length})` });
+    const tabNet = el('div', { className: 'tab', text: `Network (${data.network.length})` });
+    const tabFind = el('div', { className: 'tab', text: `Findings (${data.findings.length})` });
+    const tabBar = el('div', { className: 'tabs mt-lg' }, [tabLineage, tabFiles, tabNet, tabFind]);
 
-        <div id="proc-lineage" class="tab-content active" style="background: var(--re-bg); border: 1px solid var(--re-border); padding: 16px; border-radius: 4px;">
-            ${data.parent ? `<div class="tree-node parent clickable-id" onclick="inspectProcess('${data.parent.guid || data.parent.pid}')">${data.parent.name} (PID: ${data.parent.pid})</div>` : '<div class="tree-node parent">Unknown Parent</div>'}
-            <div class="tree-node current">${p.name} (PID: ${p.pid})</div>
-            ${data.children.length > 0 ? data.children.map(c => `<div class="tree-node child clickable-id" onclick="inspectProcess('${c.guid || c.pid}')">${c.name} (PID: ${c.pid})</div>`).join('') : '<div class="tree-node child" style="color: var(--re-text-muted);">No children</div>'}
-        </div>
+    // Lineage pane
+    const lineagePane = el('div', { className: 'tab-content active', style: 'background: var(--re-bg); border: 1px solid var(--re-border); padding: 16px; border-radius: 4px;' });
+    if (data.parent) {
+        lineagePane.appendChild(el('div', { className: 'tree-node parent clickable-id', text: `${data.parent.name || '-'} (PID: ${data.parent.pid || '-'})`,
+            onclick: () => inspectProcess(data.parent.guid || data.parent.pid) }));
+    } else {
+        lineagePane.appendChild(el('div', { className: 'tree-node parent', text: 'Unknown Parent' }));
+    }
+    lineagePane.appendChild(el('div', { className: 'tree-node current', text: `${p.name || '-'} (PID: ${p.pid || '-'})` }));
+    if (data.children.length > 0) {
+        data.children.forEach(c => {
+            lineagePane.appendChild(el('div', { className: 'tree-node child clickable-id', text: `${c.name || '-'} (PID: ${c.pid || '-'})`,
+                onclick: () => inspectProcess(c.guid || c.pid) }));
+        });
+    } else {
+        lineagePane.appendChild(el('div', { className: 'tree-node child', text: 'No children', style: 'color: var(--re-text-muted);' }));
+    }
 
-        <div id="proc-files" class="tab-content prop-list">
-            ${data.files.length > 0 ? data.files.map(f => `<div class="prop-val mono"><strong style="color: var(--re-text-secondary); width: 80px; display: inline-block;">${f.rel}</strong> ${f.path}</div>`).join('') : '<div class="empty-state">No file modifications recorded.</div>'}
-        </div>
+    // Files pane
+    const filesPane = el('div', { className: 'tab-content prop-list' });
+    if (data.files.length > 0) {
+        data.files.forEach(f => {
+            const row = el('div', { className: 'prop-val mono' }, [
+                el('strong', { text: f.rel, style: 'color: var(--re-text-secondary); width: 80px; display: inline-block;' }),
+                document.createTextNode(' '),
+            ]);
+            row.appendChild(document.createTextNode(f.path));
+            filesPane.appendChild(row);
+        });
+    } else {
+        filesPane.appendChild(el('div', { className: 'empty-state', text: 'No file modifications recorded.' }));
+    }
 
-        <div id="proc-net" class="tab-content prop-list">
-            ${data.network.length > 0 ? data.network.map(n => `<div class="prop-val mono"><strong style="color: var(--re-text-secondary);">CONNECT</strong> ${n.destination_ip}:${n.destination_port} [${n.protocol}]</div>`).join('') : '<div class="empty-state">No network connections recorded.</div>'}
-        </div>
+    // Network pane
+    const netPane = el('div', { className: 'tab-content prop-list' });
+    if (data.network.length > 0) {
+        data.network.forEach(n => {
+            const row = el('div', { className: 'prop-val mono' }, [
+                el('strong', { text: 'CONNECT', style: 'color: var(--re-text-secondary);' }),
+                document.createTextNode(` ${n.destination_ip || '-'}:${n.destination_port || '-'} [${n.protocol || '-'}]`),
+            ]);
+            netPane.appendChild(row);
+        });
+    } else {
+        netPane.appendChild(el('div', { className: 'empty-state', text: 'No network connections recorded.' }));
+    }
 
-        <div id="proc-find" class="tab-content prop-list">
-            ${data.findings.length > 0 ? data.findings.map(f => `<div class="prop-val mono" style="color: var(--re-critical); border-left: 3px solid var(--re-critical);">FINDING: ${f.finding_type} (${f.technique})</div>`).join('') : '<div class="empty-state">No associated findings.</div>'}
-        </div>
-    `;
+    // Findings pane
+    const findingsPane = el('div', { className: 'tab-content prop-list' });
+    if (data.findings.length > 0) {
+        data.findings.forEach(f => {
+            findingsPane.appendChild(el('div', { className: 'prop-val mono', text: `FINDING: ${f.finding_type || '-'} (${f.technique || '-'})`,
+                style: 'color: var(--re-critical); border-left: 3px solid var(--re-critical);' }));
+        });
+    } else {
+        findingsPane.appendChild(el('div', { className: 'empty-state', text: 'No associated findings.' }));
+    }
 
-    dom.drawerContent.innerHTML = html;
+    // Tab switching
+    const panes = [lineagePane, filesPane, netPane, findingsPane];
+    const tabEls = [tabLineage, tabFiles, tabNet, tabFind];
+    tabEls.forEach((t, idx) => {
+        t.addEventListener('click', () => {
+            tabEls.forEach(tt => tt.classList.remove('active'));
+            panes.forEach(pp => pp.classList.remove('active'));
+            t.classList.add('active');
+            panes[idx].classList.add('active');
+        });
+    });
+
+    dom.drawerContent.replaceChildren(identity, tabBar, ...panes);
 }
 
-// Global Tab Switcher for Drawer
-window.switchDrawerTab = function (el, targetId) {
-    const tabs = el.parentElement.querySelectorAll('.tab');
-    const contents = el.parentElement.nextElementSibling.parentElement.querySelectorAll('.tab-content');
-
+// Global Tab Switcher for Drawer (legacy support)
+window.switchDrawerTab = function (elRef, targetId) {
+    const tabs = elRef.parentElement.querySelectorAll('.tab');
+    const contents = elRef.parentElement.nextElementSibling.parentElement.querySelectorAll('.tab-content');
     tabs.forEach(t => t.classList.remove('active'));
     contents.forEach(c => c.classList.remove('active'));
-
-    el.classList.add('active');
-    document.getElementById(targetId).classList.add('active');
+    elRef.classList.add('active');
+    const target = document.getElementById(targetId);
+    if (target) target.classList.add('active');
 };
+
+// ==========================================
+// 19. PCAP Network Analysis
+// ==========================================
+const PCAP_SEVERITY_BADGE = { low: 'low', medium: 'medium', high: 'high', critical: 'critical' };
+
+function pcapBadge(severity) {
+    return 'badge ' + (PCAP_SEVERITY_BADGE[String(severity || '').toLowerCase()] || 'low');
+}
+
+function renderPcapResult(container, analysis, findingIds) {
+    container.replaceChildren();
+
+    if (analysis.analysis_status !== 'complete') {
+        container.appendChild(el('div', { className: 'empty-state' }, [
+            el('h3', { text: 'Not analyzed' }),
+            el('p', { text: (analysis.warnings && analysis.warnings[0]) || 'This capture could not be analyzed.' }),
+            el('p', { style: 'color: var(--re-text-muted); font-size: 12px;',
+                text: 'Classic libpcap format is supported. Re-export the capture as .pcap if needed.' }),
+        ]));
+        if (analysis.warnings && analysis.warnings.length > 1) {
+            const warnNodes = analysis.warnings.map(w => el('div', { className: 'prop-val', text: w }));
+            container.appendChild(section(`Warnings (${analysis.warnings.length})`, false, warnNodes));
+        }
+        return;
+    }
+
+    const indicators = analysis.indicators || [];
+    const critical = indicators.some(i => i.severity === 'high' || i.severity === 'critical');
+    const sevLabel = indicators.length === 0
+        ? 'No indicators'
+        : (critical ? 'Elevated' : 'Low / Medium indicators detected');
+    const valCls = 'stat-val ' + (critical ? 'text-critical' : (indicators.length ? 'text-warning' : ''));
+
+    // Verdict / summary panel
+    const verdict = el('div', { className: 'panel', style: 'padding: 16px; margin-bottom: 16px;' });
+    verdict.appendChild(el('div', { style: 'display: flex; align-items: center; gap: 12px; flex-wrap: wrap;' }, [
+        el('span', { className: 'badge ' + (critical ? 'critical' : (indicators.length ? 'medium' : 'low')), text: sevLabel, style: 'font-size: 13px;' }),
+        el('span', { className: 'mono', text: `Indicators ${indicators.length}`, style: 'color: var(--re-text-secondary);' }),
+        el('span', { className: 'mono', text: `Flows ${(analysis.flows || []).length}`, style: 'color: var(--re-text-secondary);' }),
+        el('span', { className: 'mono', text: `DNS ${analysis.dns_count}`, style: 'color: var(--re-text-secondary);' }),
+    ]));
+    verdict.appendChild(el('p', { style: 'margin-top: 10px; color: var(--re-text-muted); font-size: 12px;',
+        text: indicators.length
+            ? 'PCAP indicators are deterministic observations. Review each in context before escalation; a single network pattern is rarely proof of ransomware on its own.'
+            : 'No deterministic indicators were raised by RansomEye rules. Static analysis cannot guarantee the capture is benign.' }));
+    container.appendChild(verdict);
+
+    // Capture summary
+    container.appendChild(el('div', { className: 'grid-overview', style: 'grid-template-columns: 1fr 1fr 1fr;' }, [
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Total packets' }),
+            el('span', { className: valCls, text: String(analysis.total_packets) }),
+        ]),
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Parsed' }),
+            el('span', { className: 'stat-val mono', text: String(analysis.parsed_packets) }),
+        ]),
+        el('div', { className: 'stat-card' }, [
+            el('span', { className: 'stat-label', text: 'Malformed' }),
+            el('span', { className: 'stat-val mono', text: String(analysis.malformed_packets) }),
+        ]),
+    ]));
+
+    container.appendChild(el('div', { className: 'prop-list mb-lg', style: 'margin-top: 16px;' }, [
+        kv('Capture file', analysis.file_name, { mono: true }),
+        kv('SHA-256', analysis.sha256, { mono: true }),
+        kv('Link type', analysis.link_type_name + ' (' + analysis.link_type + ')', { mono: true }),
+        kv('File size', `${analysis.file_size} bytes`, { mono: true }),
+        kv('TCP / UDP', `${analysis.tcp_count} / ${analysis.udp_count}`, { mono: true }),
+        kv('DNS / HTTP', `${analysis.dns_count} / ${analysis.http_count}`, { mono: true }),
+    ]));
+
+    if (Array.isArray(findingIds)) {
+        const msg = findingIds.length
+            ? `Added to case: ${findingIds.length} finding(s) created (IDs ${findingIds.join(', ')}). Flows and DNS queries are stored as evidence events linked to those findings.`
+            : 'This capture is already recorded against the case; no new findings were added.';
+        container.appendChild(el('div', { className: 'alert alert-success mb-lg', text: msg }));
+    }
+
+    // Indicator table
+    const indRows = indicators.map(ind => el('tr', {}, [
+        el('td', { className: 'mono', text: ind.rule_id }),
+        el('td', {}, [el('span', { className: pcapBadge(ind.severity), text: ind.severity })]),
+        el('td', { text: ind.title }),
+        el('td', { className: 'mono', text: ind.technique }),
+        el('td', { className: 'mono', text: ind.excerpt, title: ind.excerpt }),
+    ]));
+    const indBody = indRows.length ? [
+        el('table', { className: 'data-table' }, [
+            el('thead', {}, [el('tr', {}, [
+                el('th', { text: 'Rule' }), el('th', { text: 'Severity' }),
+                el('th', { text: 'Finding' }), el('th', { text: 'MITRE' }), el('th', { text: 'Evidence excerpt' }),
+            ])]),
+            el('tbody', {}, indRows),
+        ]),
+    ] : [el('div', { className: 'empty-state', text: 'No deterministic indicators matched.' })];
+    container.appendChild(section(`Network findings (${indicators.length})`, indicators.length > 0, indBody));
+
+    // DNS queries
+    const dns = analysis.dns_queries || [];
+    if (dns.length) {
+        const dnsRows = dns.slice(0, 50).map(d => el('tr', {}, [
+            el('td', { className: 'mono', text: d.timestamp, style: 'font-size: 11px;' }),
+            el('td', { className: 'mono', text: d.qname, title: d.qname }),
+            el('td', { className: 'mono', text: d.qtype }),
+            el('td', { className: 'mono', text: `${d.src_ip} → ${d.dst_ip}` }),
+            el('td', { className: 'mono', text: String(d.packet_index) }),
+        ]));
+        container.appendChild(section(`DNS queries (${dns.length})`, false, [
+            el('table', { className: 'data-table' }, [
+                el('thead', {}, [el('tr', {}, [
+                    el('th', { text: 'Timestamp' }), el('th', { text: 'QNAME' }),
+                    el('th', { text: 'Type' }), el('th', { text: 'Src → Dst' }), el('th', { text: 'Packet #' }),
+                ])]),
+                el('tbody', {}, dnsRows),
+            ]),
+        ]));
+    }
+
+    // Flows
+    const flows = analysis.flows || [];
+    if (flows.length) {
+        const flowRows = flows.slice(0, 100).map(f => el('tr', {}, [
+            el('td', { className: 'mono', text: f.first_seen, style: 'font-size: 11px;' }),
+            el('td', { className: 'mono', text: f.protocol }),
+            el('td', { className: 'mono', text: `${f.src_ip}:${f.src_port}` }),
+            el('td', { className: 'mono', text: `${f.dst_ip}:${f.dst_port}` }),
+            el('td', { className: 'mono', text: String(f.packets) }),
+            el('td', { className: 'mono', text: String(f.packet_index) }),
+        ]));
+        container.appendChild(section(`Flows (${flows.length})`, false, [
+            el('table', { className: 'data-table' }, [
+                el('thead', {}, [el('tr', {}, [
+                    el('th', { text: 'First seen' }), el('th', { text: 'Protocol' }),
+                    el('th', { text: 'Source' }), el('th', { text: 'Destination' }),
+                    el('th', { text: 'Packets' }), el('th', { text: 'Packet #' }),
+                ])]),
+                el('tbody', {}, flowRows),
+            ]),
+        ]));
+    }
+
+    // HTTP records
+    const http = analysis.http_records || [];
+    if (http.length) {
+        const httpRows = http.slice(0, 50).map(h => el('tr', {}, [
+            el('td', { className: 'mono', text: h.timestamp, style: 'font-size: 11px;' }),
+            el('td', { className: 'mono', text: h.method }),
+            el('td', { className: 'mono', text: h.host, title: h.host }),
+            el('td', { className: 'mono', text: h.user_agent, title: h.user_agent }),
+            el('td', { className: 'mono', text: `${h.src_ip} → ${h.dst_ip}` }),
+        ]));
+        container.appendChild(section(`HTTP records (${http.length})`, false, [
+            el('table', { className: 'data-table' }, [
+                el('thead', {}, [el('tr', {}, [
+                    el('th', { text: 'Timestamp' }), el('th', { text: 'Method' }),
+                    el('th', { text: 'Host' }), el('th', { text: 'User-Agent' }), el('th', { text: 'Src → Dst' }),
+                ])]),
+                el('tbody', {}, httpRows),
+            ]),
+        ]));
+    }
+
+    // Warnings
+    if (analysis.warnings && analysis.warnings.length) {
+        const warnNodes = analysis.warnings.map(w =>
+            el('div', { className: 'prop-val', text: w, style: 'color: var(--re-text-muted); font-size: 12px;' }));
+        container.appendChild(section(`Warnings (${analysis.warnings.length})`, false, warnNodes));
+    }
+}
+
+function initPcap() {
+    const pathInp = document.getElementById('pcap-file-path');
+    const caseSel = document.getElementById('pcap-case');
+    const btn = document.getElementById('btn-run-pcap');
+    const fb = document.getElementById('pcap-feedback');
+    const results = document.getElementById('pcap-results');
+
+    populateCaseSelector(caseSel, { required: false });
+
+    btn.addEventListener('click', async () => {
+        fb.classList.add('hidden');
+        const fpath = pathInp.value.trim();
+        if (!fpath) {
+            fb.className = 'alert alert-error mt-md';
+            fb.textContent = 'A capture file path is required.';
+            fb.classList.remove('hidden');
+            return;
+        }
+        const body = { file_path: fpath };
+        const cid = caseSel.value;
+        if (cid) body.case_id = cid;
+
+        btn.textContent = 'Analyzing...';
+        btn.disabled = true;
+        const res = await api('/pcap/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        btn.textContent = 'Analyze Capture';
+        btn.disabled = false;
+
+        if (!res || res._error || !res.analysis) {
+            fb.className = 'alert alert-error mt-md';
+            fb.textContent = res ? res.message : 'PCAP analysis failed.';
+            fb.classList.remove('hidden');
+            results.replaceChildren(el('div', { className: 'empty-state', text: 'Analysis could not be completed.' }));
+            return;
+        }
+        renderPcapResult(results, res.analysis, res.finding_ids);
+    });
+}
+
+// ==========================================
+// 20. IOC Extraction
+// ==========================================
+const IOC_TYPE_LABEL = {
+    ipv4: 'IPv4', ipv6: 'IPv6', domain: 'Domain', url: 'URL',
+    email: 'Email', md5: 'MD5', sha1: 'SHA-1', sha256: 'SHA-256',
+    btc: 'BTC wallet', eth: 'ETH candidate', lolbin: 'LOLBIN command'
+};
+
+function iocBadgeSeverity(ioc_type) {
+    if (ioc_type === 'lolbin') return 'medium';
+    if (ioc_type === 'btc' || ioc_type === 'eth') return 'low';
+    return 'low';
+}
+
+function renderIocResult(container, analysis, findingIds) {
+    container.replaceChildren();
+
+    if (analysis.analysis_status !== 'complete') {
+        container.appendChild(el('div', { className: 'empty-state' }, [
+            el('h3', { text: 'Not analyzed' }),
+            el('p', { text: (analysis.warnings && analysis.warnings[0]) || 'This artifact could not be analyzed.' }),
+        ]));
+        return;
+    }
+
+    const totalObs = (analysis.observations || []).length;
+    const typeCount = Object.keys(analysis.counts || {}).length;
+    const hasLolbin = (analysis.counts || {}).lolbin > 0;
+
+    // Verdict
+    const verdict = el('div', { className: 'panel', style: 'padding: 16px; margin-bottom: 16px;' });
+    verdict.appendChild(el('div', { style: 'display: flex; align-items: center; gap: 12px; flex-wrap: wrap;' }, [
+        el('span', { className: 'badge ' + (hasLolbin ? 'medium' : (totalObs ? 'low' : 'low')),
+            text: totalObs ? `${totalObs} IOC observations` : 'No IOCs observed', style: 'font-size: 13px;' }),
+        el('span', { className: 'mono', text: `Types ${typeCount}`, style: 'color: var(--re-text-secondary);' }),
+        el('span', { className: 'mono', text: analysis.is_binary ? 'Binary input' : 'Text input', style: 'color: var(--re-text-secondary);' }),
+    ]));
+    verdict.appendChild(el('p', { style: 'margin-top: 10px; color: var(--re-text-muted); font-size: 12px;',
+        text: totalObs
+            ? 'IOC observations are informational: existence of an IP, domain, URL, hash, or email in an artifact does not prove maliciousness. Review the context of each observation.'
+            : 'No IOCs matched the extraction rules. Static extraction cannot guarantee the artifact is benign.' }));
+    container.appendChild(verdict);
+
+    // Artifact summary
+    container.appendChild(el('div', { className: 'prop-list mb-lg' }, [
+        kv('Artifact', analysis.file_name, { mono: true }),
+        kv('SHA-256', analysis.sha256, { mono: true }),
+        kv('SHA-1', analysis.sha1, { mono: true }),
+        kv('MD5', analysis.md5, { mono: true }),
+        kv('File size', `${analysis.file_size} bytes`, { mono: true }),
+    ]));
+
+    if (Array.isArray(findingIds)) {
+        const msg = findingIds.length
+            ? `Added to case: ${findingIds.length} finding(s) created (IDs ${findingIds.join(', ')}). Each type is linked to the provenance evidence event.`
+            : 'This artifact is already recorded against the case; no new findings were added.';
+        container.appendChild(el('div', { className: 'alert alert-success mb-lg', text: msg }));
+    }
+
+    // Type-count table
+    const counts = analysis.counts || {};
+    if (Object.keys(counts).length) {
+        const rows = Object.keys(counts).sort().map(t => {
+            const label = IOC_TYPE_LABEL[t] || t;
+            return el('tr', {}, [
+                el('td', { className: 'mono', text: t }),
+                el('td', { text: label }),
+                el('td', {}, [badge(t === 'lolbin' ? 'medium' : (t === 'btc' || t === 'eth' ? 'low' : 'informational'),
+                    iocBadgeSeverity(t))]),
+                el('td', { className: 'mono', text: String(counts[t]) }),
+            ]);
+        });
+        container.appendChild(section('IOC counts by type', true, [
+            el('table', { className: 'data-table' }, [
+                el('thead', {}, [el('tr', {}, [
+                    el('th', { text: 'Type' }), el('th', { text: 'Label' }),
+                    el('th', { text: 'Severity' }), el('th', { text: 'Count' }),
+                ])]),
+                el('tbody', {}, rows),
+            ]),
+        ]));
+    }
+
+    // Observations table (bounded to 200 rows for UI)
+    const observations = analysis.observations || [];
+    if (observations.length) {
+        const rows = observations.slice(0, 200).map(o => el('tr', {}, [
+            el('td', { className: 'mono', text: o.rule_id }),
+            el('td', { className: 'mono', text: o.ioc_type }),
+            el('td', { className: 'mono', text: o.value_normalized, title: o.value_normalized }),
+            el('td', { className: 'mono', text: o.value_original, title: o.value_original, style: 'color: var(--re-text-muted); font-size: 11px;' }),
+            el('td', { className: 'mono', text: o.source, style: 'font-size: 11px;' }),
+            el('td', { className: 'mono', text: String(o.offset) }),
+            el('td', { className: 'mono', text: o.context_preview, title: o.context_preview, style: 'font-size: 11px; color: var(--re-text-muted);' }),
+        ]));
+        container.appendChild(section(`Observations (${observations.length})`, observations.length <= 50, [
+            el('table', { className: 'data-table' }, [
+                el('thead', {}, [el('tr', {}, [
+                    el('th', { text: 'Rule' }), el('th', { text: 'Type' }),
+                    el('th', { text: 'Normalized value' }), el('th', { text: 'Original' }),
+                    el('th', { text: 'Source' }), el('th', { text: 'Offset' }), el('th', { text: 'Context' }),
+                ])]),
+                el('tbody', {}, rows),
+            ]),
+        ]));
+    } else {
+        container.appendChild(el('div', { className: 'empty-state', text: 'No IOC observations matched the deterministic rules.' }));
+    }
+
+    // Warnings
+    if (analysis.warnings && analysis.warnings.length) {
+        const warnNodes = analysis.warnings.map(w =>
+            el('div', { className: 'prop-val', text: w, style: 'color: var(--re-text-muted); font-size: 12px;' }));
+        container.appendChild(section(`Warnings (${analysis.warnings.length})`, false, warnNodes));
+    }
+}
+
+function initIoc() {
+    const pathInp = document.getElementById('ioc-file-path');
+    const caseSel = document.getElementById('ioc-case');
+    const btn = document.getElementById('btn-run-ioc');
+    const fb = document.getElementById('ioc-feedback');
+    const results = document.getElementById('ioc-results');
+
+    populateCaseSelector(caseSel, { required: false });
+
+    btn.addEventListener('click', async () => {
+        fb.classList.add('hidden');
+        const fpath = pathInp.value.trim();
+        if (!fpath) {
+            fb.className = 'alert alert-error mt-md';
+            fb.textContent = 'An artifact file path is required.';
+            fb.classList.remove('hidden');
+            return;
+        }
+        const body = { file_path: fpath };
+        const cid = caseSel.value;
+        if (cid) body.case_id = cid;
+
+        btn.textContent = 'Extracting...';
+        btn.disabled = true;
+        const res = await api('/ioc/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        btn.textContent = 'Extract IOCs';
+        btn.disabled = false;
+
+        if (!res || res._error || !res.analysis) {
+            fb.className = 'alert alert-error mt-md';
+            fb.textContent = res ? res.message : 'IOC extraction failed.';
+            fb.classList.remove('hidden');
+            results.replaceChildren(el('div', { className: 'empty-state', text: 'Extraction could not be completed.' }));
+            return;
+        }
+        renderIocResult(results, res.analysis, res.finding_ids);
+    });
+}
 
 document.addEventListener('DOMContentLoaded', init);

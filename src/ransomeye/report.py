@@ -341,11 +341,65 @@ def write_case_report(
     case_id: str,
     output_path: str | Path,
     assessment: dict[str, Any] | None = None,
+    format: str = "text",
 ) -> Path:
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    fmt = format.lower().strip() if format else "text"
+
+    if fmt == "pdf" or output.suffix.lower() == ".pdf":
+        from ransomeye.pdf_report import write_case_pdf_report
+
+        return write_case_pdf_report(
+            database_path=database_path,
+            case_id=case_id,
+            output_path=output,
+            assessment=assessment,
+        )
+
     output.write_text(
         generate_case_report(database_path, case_id, assessment=assessment),
         encoding="utf-8",
     )
     return output
+
+
+def write_case_pdf_report(
+    database_path: str | Path,
+    case_id: str,
+    output_path: str | Path,
+    assessment: dict[str, Any] | None = None,
+) -> Path:
+    from ransomeye.pdf_report import write_case_pdf_report as _write_pdf
+
+    return _write_pdf(
+        database_path=database_path,
+        case_id=case_id,
+        output_path=output_path,
+        assessment=assessment,
+    )
+
+
+def generate_case_pdf_report(
+    database_path: str | Path,
+    case_id: str,
+    output_path: str | Path | None = None,
+    assessment: dict[str, Any] | None = None,
+) -> bytes:
+    from ransomeye.pdf_report import generate_case_pdf_report as _gen_pdf
+
+    return _gen_pdf(
+        database_path=database_path,
+        case_id=case_id,
+        output_path=output_path,
+        assessment=assessment,
+    )
+
+
+def is_pdf_report_available() -> bool:
+    """Return True if PDF report generation is available in the current environment."""
+    try:
+        from ransomeye.pdf_report import is_pdf_available
+        return is_pdf_available()
+    except Exception:
+        return False

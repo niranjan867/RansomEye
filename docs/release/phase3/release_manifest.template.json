@@ -1,0 +1,183 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "product_name": "RansomEye",
+  "product_tagline": "From ransomware signal to forensic proof.",
+  "release_version": "1.0.0-rc.3",
+  "distribution_channel": "Windows Standalone x64",
+  "release_classification": "Official Release Candidate",
+  "generated_at_utc": "2026-10-26T15:30:00Z",
+  "build_provenance": {
+    "git_repository": "https://github.com/niranjan867/RansomEye",
+    "git_branch": "integration/12x-capabilities",
+    "git_commit": "da617241d4e8a597b556869e5bf59575955935af",
+    "working_tree_clean": false,
+    "build_toolchain": {
+      "python_version": "Python 3.13.15 64-bit",
+      "pyinstaller_version": "6.22.3",
+      "pyinstaller_contrib_hooks": "2026.9",
+      "host_os": "Windows 11 Enterprise (Build 10.0.26300)",
+      "compiler_pe_architecture": "x64 (0x8664)"
+    }
+  },
+  "candidate_artifacts": {
+    "unsigned_candidate": {
+      "relative_path": "dist_phase2g_rc/RansomEye.exe",
+      "sha256": "F22F93B2A5855FA906CF8816EB893D77769FCE095216E5B36A55F251C11CB871",
+      "size_bytes": 21100919,
+      "authenticode_status": "NotSigned",
+      "source_snapshot": {
+        "_provenance_limitation": "Retroactive capture of source files as they exist at capture time. Does NOT cryptographically prove these exact file contents were consumed during the historical Phase 2G build. Build-time per-file hashes were not recorded. mtime + git porcelain-subset evidence from Phase 3D is corroborating only.",
+        "captured_at_utc": "2026-10-26T16:50:20Z",
+        "capture_phase": "3F",
+        "manifest_path": "build_phase2g_rc/logs/retro_source_manifest_20261026T165020Z.json",
+        "manifest_sha256": "5E0F3CFFCCDBBF6159520D908D4CD2DDE83F5EEAC3A32C37EC6383862FB75199",
+        "archive_path": "build_phase2g_rc/logs/retro_source_snapshot_20261026T165020Z_v2.zip",
+        "archive_sha256": "92285336A76C20D5576D1201C3522411129F35D9B07275C1CCDA8E1DA5667485",
+        "superseded_archive_path": "build_phase2g_rc/logs/retro_source_snapshot_20261026T165020Z.zip",
+        "superseded_archive_sha256": "D4386F0A3FC32F275FD029A2A17EA486CA113FCD1EB48FB42E0D5757AFA2E75C",
+        "superseded_archive_reason": "First zip flattened directory structure (two __init__.py entries collided); preserved on disk per 'never overwrite' rule. v2 is the authoritative archive.",
+        "entries_total": 45,
+        "entries_present": 45,
+        "entries_absent": 0,
+        "classifications": [
+          "ransomeye_source_module (38 Python modules from src/ransomeye/ enumerated in build_phase2g_rc/ransomeye/Analysis-00.toc)",
+          "ransomeye_static_asset (4 files under src/ransomeye/static/)",
+          "build_recipe (scripts/ransomeye.spec, pyproject.toml)",
+          "bundled_data_file (THIRD_PARTY_NOTICES.md packaged by spec)"
+        ],
+        "unpinned_build_environment_notes": [
+          "Python 3.13.15 runtime: version string only; interpreter binary not individually hashed in this manifest.",
+          "PyInstaller 6.22.3: version string only; wheel contents not individually hashed.",
+          "Transitive Python package dependencies (ReportLab, Pillow, etc.): UNPINNED. Repository contains no requirements.txt / poetry.lock / uv.lock / pdm.lock / pip freeze record. Phase 2G build used whatever versions were resolved into .venv at build time; this cannot be reconstructed from the current provenance artifacts."
+        ]
+      }
+    },
+    "signed_candidate": {
+      "relative_path": "dist_phase3_signed/RansomEye.exe",
+      "sha256": "<INSERT_POST_SIGNING_SHA256_HEX>",
+      "size_bytes": null,
+      "authenticode_status": "<INSERT_AFTER_SIGNING>",
+      "signing_details": {
+        "signer_subject": "<INSERT_CERT_SUBJECT>",
+        "signer_issuer": "<INSERT_CERT_ISSUER>",
+        "signer_thumbprint": "<INSERT_CERT_THUMBPRINT_SHA1>",
+        "signature_algorithm": "SHA256withRSA",
+        "timestamp_authority": "http://timestamp.digicert.com",
+        "timestamp_standard": "RFC 3161",
+        "signed_timestamp_utc": null
+      }
+    }
+  },
+  "empirical_test_evidence": {
+    "_comment": "Phase 3B D15 remediation: previously pre-filled totals were stale. All counts and timings MUST be captured from actual test output for the exact release source revision (git_commit above) before this manifest is finalized. Scenario name lists are retained because they identify WHICH checks must pass; their 'passed' / 'total_scenarios' counters remain null until the signing release workstation re-runs them. Do not invent replacement counts.",
+    "full_regression_suite": {
+      "test_framework": "pytest-9.1.1",
+      "total_tests": null,
+      "passed": null,
+      "failed": null,
+      "skipped": null,
+      "pass_rate_percentage": null,
+      "runtime_seconds": null,
+      "capture_command": "pytest -q",
+      "capture_log_sha256": null,
+      "historical_regression_report": {
+        "_evidence_grade": "Phase 3C report-only. No raw pytest log file was persisted to disk during Phase 3C; only the terminal transcript recorded these numbers. Phase 3F DID NOT re-run the suite.",
+        "report_phase": "3C",
+        "reported_result": {
+          "total_tests": 1011,
+          "passed": 1011,
+          "failed": 0,
+          "skipped": 0,
+          "runtime_seconds": 158.56,
+          "exit_code": 0
+        },
+        "exclusions": [
+          {
+            "file": "tests/test_pdf_report.py",
+            "reason": "ModuleNotFoundError: No module named 'pypdf'. Phase 3C/3F safety constraints forbid dependency installation. PDF-report coverage therefore remains unverified in this environment."
+          }
+        ],
+        "raw_log_available": false,
+        "raw_log_path": null,
+        "raw_log_sha256": null,
+        "note": "capture_log_sha256 is null because the Phase 3C pytest invocation redirected output to the terminal only. Any future finalization of this manifest must capture a fresh pytest run on the frozen source snapshot with stdout + stderr redirected to a persistent log, then record the log hash here."
+      }
+    },
+    "packaged_database_migration_scenarios": {
+      "total_scenarios": null,
+      "passed": null,
+      "scenarios": [
+        "current_schema_no_unnecessary_backup",
+        "historical_schema_creates_verified_backup",
+        "existing_backup_collision_handling",
+        "backup_failure_prevents_migration",
+        "migration_failure_preserves_backup",
+        "fresh_database_initialization"
+      ]
+    },
+    "packaged_dashboard_cors_scenarios": {
+      "total_scenarios": null,
+      "passed": null,
+      "scenarios": [
+        "same_origin_html_no_cors",
+        "same_origin_api_cases_no_cors",
+        "no_wildcard_cors_emitted",
+        "untrusted_preflight_rejected_403",
+        "untrusted_get_receives_no_cors_header",
+        "approved_origin_preflight_200",
+        "approved_origin_get_receives_exact_header",
+        "missing_origin_handled_cleanly",
+        "packaged_pdf_report_download",
+        "dashboard_clean_shutdown"
+      ]
+    },
+    "packaged_forensic_capability_workflows": {
+      "total_workflows": null,
+      "passed": null,
+      "workflows": [
+        "cli_help_dispatch",
+        "static_pe_analysis",
+        "script_ast_analysis",
+        "pcap_capture_analysis",
+        "text_report_generation",
+        "pdf_report_generation",
+        "case_lifecycle_state",
+        "custody_ledger_inspection",
+        "ioc_extraction",
+        "investigation_reconstruction",
+        "dashboard_api_service",
+        "pdf_download_endpoint"
+      ]
+    },
+    "clean_environment_execution": {
+      "total_tests": null,
+      "passed": null,
+      "environment": "Zero host Python, sanitized PATH, stripped env vars"
+    }
+  },
+  "cryptographic_preservation_invariants": {
+    "production_database": {
+      "path": "data/ransomeye.db",
+      "sha256": "9B0896FCB8EB108063DA3266B8A9C6CFEB1689940501F62E6136EA0A447A52DB",
+      "preserved": true
+    },
+    "baseline_release_executable": {
+      "path": "dist/RansomEye.exe",
+      "sha256": "65F413F27315C3D0FF9E06AC0FA0710E7F03EF6B13718401040F8526665AE542",
+      "preserved": true
+    },
+    "phase2d_isolated_executable": {
+      "path": "dist_isolated/RansomEye.exe",
+      "sha256": "49D2D87526F72E97FB284B1A683E0E10C50485890449F2C388E5369A8AA6653E",
+      "preserved": true
+    }
+  },
+  "release_governance": {
+    "go_no_go_checklist_ref": "docs/release/phase3/release_go_no_go_checklist.md",
+    "signing_readiness_ref": "docs/release/phase3/signing_readiness_report.md",
+    "signing_workflow_ref": "docs/release/phase3/signing_workflow.md",
+    "lead_release_engineer_approval": false,
+    "security_lead_approval": false,
+    "product_owner_approval": false
+  }
+}

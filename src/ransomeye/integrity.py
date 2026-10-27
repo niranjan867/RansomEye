@@ -21,9 +21,37 @@ def verify_file(path: Path, expected_hash: str) -> bool:
 
 
 def verify_manifest(path: Path, manifest_path: Path) -> bool:
-    manifest_lines = manifest_path.read_text(encoding="utf-8").splitlines()
-    if len(manifest_lines) < 2:
+    path = Path(path)
+    manifest_path = Path(manifest_path)
+    if not path.exists() or not manifest_path.is_file():
         return False
 
-    expected_hash = manifest_lines[-1].strip()
+    try:
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+
+    manifest_lines = [line.strip() for line in manifest_text.splitlines() if line.strip()]
+    if not manifest_lines:
+        return False
+
+    if path.is_dir():
+        for line in manifest_lines:
+            parts = line.split(maxsplit=1)
+            if len(parts) != 2:
+                continue
+            expected_hash, rel_path = parts[0], parts[1]
+            target_file = path / rel_path
+            if not target_file.is_file():
+                return False
+            if sha256_file(target_file).lower() != expected_hash.lower():
+                return False
+        return True
+
+    if len(manifest_lines) >= 2 and manifest_lines[0].startswith("SHA256"):
+        expected_hash = manifest_lines[-1].strip()
+    else:
+        parts = manifest_lines[-1].split()
+        expected_hash = parts[0] if parts else ""
+
     return verify_file(path, expected_hash)

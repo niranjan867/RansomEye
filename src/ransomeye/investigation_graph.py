@@ -167,9 +167,13 @@ def _get_process_id(event: EvidenceEvent | dict[str, Any]) -> str | None:
         guid = event.get("process_guid")
         pid = event.get("pid")
 
-    if guid:
+    # Treat empty strings (how SQLite returns NULL-defaulted TEXT columns on
+    # non-process evidence such as PCAP / IOC / phishing / static) as absent,
+    # so we never fabricate a PROCESS:PID: node for network/file evidence that
+    # defensibly has no process attribution.
+    if guid and str(guid).strip():
         return f"PROCESS:{guid}"
-    if pid is not None:
+    if pid is not None and str(pid).strip() != "":
         return f"PROCESS:PID:{pid}"
     return None
 
@@ -266,25 +270,64 @@ def build_investigation_graph(investigation: Investigation) -> InvestigationGrap
 
                 _accumulate_edge(proc_id, file_id, rel, event.event_id)
 
-            # Network relationships (CONNECTED_TO)
-            if event.event_type == "network_connect" and event.network:
-                dest_ip = event.network.get("destination_ip")
-                if dest_ip:
-                    dest_port = event.network.get("destination_port")
-                    if dest_port:
-                        net_id = f"NETWORK:{dest_ip}:{dest_port}"
-                        label = f"{dest_ip}:{dest_port}"
-                    else:
-                        net_id = f"NETWORK:{dest_ip}"
-                        label = str(dest_ip)
+        # Network relationships (CONNECTED_TO / OBSERVED / DNS_QUERIED).
+        # Lives outside the `if proc_id:` block so PCAP-sourced network and
+        # DNS evidence (which has no endpoint process attribution) can still
+        # anchor NETWORK nodes to the graph. Accepts BOTH key conventions:
+        # the Sysmon/legacy ``destination_ip`` / ``destination_port`` names
+        # and the PCAP parser's ``dst_ip`` / ``dst_port`` names, so no
+        # stored evidence has to be renamed.
+        if event.event_type == "network_connect" and event.network:
+            dest_ip = event.network.get("destination_ip") or event.network.get("dst_ip")
+            if dest_ip:
+                dest_port = event.network.get("destination_port") or event.network.get("dst_port")
+                if dest_port:
+                    net_id = f"NETWORK:{dest_ip}:{dest_port}"
+                    label = f"{dest_ip}:{dest_port}"
+                else:
+                    net_id = f"NETWORK:{dest_ip}"
+                    label = str(dest_ip)
 
-                    graph.add_node(GraphNode(
-                        node_id=net_id,
-                        node_type="NETWORK",
-                        label=label,
-                        attributes=dict(event.network)
-                    ))
+                graph.add_node(GraphNode(
+                    node_id=net_id,
+                    node_type="NETWORK",
+                    label=label,
+                    attributes=dict(event.network)
+                ))
+                if proc_id:
                     _accumulate_edge(proc_id, net_id, "CONNECTED_TO", event.event_id)
+                else:
+                    # No endpoint process attribution available (e.g. PCAP).
+                    # Anchor the NETWORK node to the EVIDENCE node directly
+                    # so it is still part of the investigation graph.
+                    _accumulate_edge(ev_node_id, net_id, "OBSERVED", event.event_id)
+
+        # DNS query nodes: PCAP emits dns_query events with query_name /
+        # query_type in the network dict and NO process attribution. Surface
+        # each distinct query_name as a NETWORK node so PCAP DNS evidence
+        # appears on the investigation graph.
+        #
+        # Sysmon-style dns_query events already carry a process_guid; those
+        # are intentionally not expanded into a separate NETWORK node here
+        # (they already attach to the process node through the EVIDENCE
+        # relationship), preserving pre-existing non-PCAP graph behavior.
+        if event.event_type == "dns_query" and event.network and not proc_id:
+            qname = (
+                event.network.get("query_name")
+                or event.network.get("qname")
+                or event.network.get("name")
+            )
+            if qname:
+                qtype = event.network.get("query_type") or event.network.get("qtype") or ""
+                net_id = f"NETWORK:dns:{qname}"
+                label = f"DNS {qname}" + (f" ({qtype})" if qtype else "")
+                graph.add_node(GraphNode(
+                    node_id=net_id,
+                    node_type="NETWORK",
+                    label=label,
+                    attributes=dict(event.network)
+                ))
+                _accumulate_edge(ev_node_id, net_id, "DNS_QUERIED", event.event_id)
 
     # 3. FINDING NODES & EVIDENCE -> FINDING
     finding_nodes = {}

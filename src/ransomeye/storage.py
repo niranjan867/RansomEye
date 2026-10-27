@@ -16,6 +16,21 @@ from ransomeye.logging import try_write_audit_event
 
 
 
+class StorageError(Exception):
+    """Base exception for RansomEye storage operations."""
+    pass
+
+
+class MigrationError(StorageError, RuntimeError):
+    """Raised when database schema migration fails or an unsupported version is encountered."""
+    pass
+
+
+class MigrationBackupError(MigrationError):
+    """Raised when pre-migration backup creation or verification fails."""
+    pass
+
+
 CURRENT_SCHEMA_VERSION = 6
 
 CASE_STATUSES = {"OPEN", "TRIAGED", "CONTAINED", "CLOSED", "REOPENED"}
@@ -166,6 +181,7 @@ class EvidenceStore:
         self.connection = sqlite3.connect(self.database_path)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
+        self.last_migration_backup: Path | None = None
         self._initialize_schema()
 
     def _get_schema_version(self) -> int:
@@ -176,37 +192,171 @@ class EvidenceStore:
         self.connection.execute(f"PRAGMA user_version = {version}")
         self.connection.commit()
 
+    def _generate_migration_backup_path(self, from_version: int) -> Path:
+        """Determine a safe, non-destructive backup path before migrating an existing database."""
+        # 1. Primary predictable name: e.g. case.db.bak
+        primary = self.database_path.with_name(f"{self.database_path.name}.bak")
+        if not primary.exists():
+            return primary
+
+        # 2. Secondary versioned name: e.g. case.db.v1.bak
+        versioned = self.database_path.with_name(f"{self.database_path.name}.v{from_version}.bak")
+        if not versioned.exists():
+            return versioned
+
+        # 3. Timestamped fallback to prevent ever overwriting existing backups
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        candidate = self.database_path.with_name(f"{self.database_path.name}.v{from_version}_{ts}.bak")
+        if not candidate.exists():
+            return candidate
+
+        counter = 1
+        while True:
+            candidate = self.database_path.with_name(f"{self.database_path.name}.v{from_version}_{ts}_{counter}.bak")
+            if not candidate.exists():
+                return candidate
+            counter += 1
+
+    def _create_and_verify_migration_backup(self, from_version: int) -> Path:
+        """Create a transactionally consistent backup using SQLite's online backup API, and verify it."""
+        backup_path = self._generate_migration_backup_path(from_version)
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Atomic creation with O_CREAT | O_EXCL to prevent silent overwriting
+        try:
+            fd = os.open(backup_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+        except FileExistsError as exc:
+            raise MigrationBackupError(
+                f"Migration backup destination already exists: {backup_path}"
+            ) from exc
+
+        try:
+            # Use SQLite Online Backup API on the active connection to capture WAL / dirty pages
+            dest_conn = sqlite3.connect(backup_path)
+            try:
+                self.connection.backup(dest_conn)
+            finally:
+                dest_conn.close()
+
+            # Verify the backup is readable, valid, and retains the pre-migration schema version
+            vconn = sqlite3.connect(f"{backup_path.resolve().as_uri()}?mode=ro", uri=True)
+            try:
+                integrity = vconn.execute("PRAGMA integrity_check").fetchone()[0]
+                if integrity != "ok":
+                    raise sqlite3.DatabaseError(f"Integrity check failed on backup: {integrity}")
+                backup_ver = int(vconn.execute("PRAGMA user_version").fetchone()[0])
+                if backup_ver != from_version:
+                    raise ValueError(
+                        f"Backup schema version mismatch: expected {from_version}, got {backup_ver}"
+                    )
+            finally:
+                vconn.close()
+
+            log_path = os.environ.get("RANSOMEYE_LOG_PATH", "logs/audit.jsonl")
+            try_write_audit_event(
+                log_path,
+                "database_migration_backup",
+                "success",
+                database=str(self.database_path),
+                backup=str(backup_path),
+                from_version=from_version,
+                to_version=CURRENT_SCHEMA_VERSION,
+            )
+            return backup_path
+
+        except Exception as exc:
+            backup_path.unlink(missing_ok=True)
+            log_path = os.environ.get("RANSOMEYE_LOG_PATH", "logs/audit.jsonl")
+            try_write_audit_event(
+                log_path,
+                "database_migration_backup",
+                "failure",
+                database=str(self.database_path),
+                backup=str(backup_path),
+                error=str(exc),
+            )
+            raise MigrationBackupError(
+                f"Failed to create and verify pre-migration backup for {self.database_path}: {exc}"
+            ) from exc
+
     def _initialize_schema(self) -> None:
         version = self._get_schema_version()
 
         if version < 1:
+            # Fresh database: create base schema directly, no migration needed
             self._create_base_schema()
             self._set_schema_version(CURRENT_SCHEMA_VERSION)
-            version = CURRENT_SCHEMA_VERSION
-        elif version == 1:
-            self._upgrade_schema_v1_to_v2()
-            version = 2
+            return
 
-        if version == 2:
-            self._upgrade_schema_v2_to_v3()
-            version = 3
+        if version == CURRENT_SCHEMA_VERSION:
+            # Already at latest version: zero modification, preserve current behavior
+            return
 
-        if version == 3:
-            self._upgrade_schema_v3_to_v4()
-            version = 4
-
-        if version == 4:
-            self._upgrade_schema_v4_to_v5()
-            version = 5
-
-        if version == 5:
-            self._upgrade_schema_v5_to_v6()
-            version = CURRENT_SCHEMA_VERSION
-
-        if version != CURRENT_SCHEMA_VERSION:
-            raise RuntimeError(
-                f"Unsupported database schema version: {version}"
+        if version > CURRENT_SCHEMA_VERSION:
+            raise MigrationError(
+                f"Unsupported database schema version: {version} "
+                f"(current application supports up to v{CURRENT_SCHEMA_VERSION})"
             )
+
+        # Historical database requiring migration (1 <= version < CURRENT_SCHEMA_VERSION)
+        initial_version = version
+        backup_path = self._create_and_verify_migration_backup(initial_version)
+        self.last_migration_backup = backup_path
+
+        try:
+            if version == 1:
+                self._upgrade_schema_v1_to_v2()
+                version = 2
+
+            if version == 2:
+                self._upgrade_schema_v2_to_v3()
+                version = 3
+
+            if version == 3:
+                self._upgrade_schema_v3_to_v4()
+                version = 4
+
+            if version == 4:
+                self._upgrade_schema_v4_to_v5()
+                version = 5
+
+            if version == 5:
+                self._upgrade_schema_v5_to_v6()
+                version = CURRENT_SCHEMA_VERSION
+
+            if version != CURRENT_SCHEMA_VERSION:
+                raise MigrationError(
+                    f"Unsupported database schema version after migration: {version}"
+                )
+
+            log_path = os.environ.get("RANSOMEYE_LOG_PATH", "logs/audit.jsonl")
+            try_write_audit_event(
+                log_path,
+                "database_migration",
+                "success",
+                database=str(self.database_path),
+                backup=str(backup_path),
+                from_version=initial_version,
+                to_version=CURRENT_SCHEMA_VERSION,
+            )
+
+        except Exception as exc:
+            log_path = os.environ.get("RANSOMEYE_LOG_PATH", "logs/audit.jsonl")
+            try_write_audit_event(
+                log_path,
+                "database_migration",
+                "failure",
+                database=str(self.database_path),
+                backup=str(backup_path),
+                from_version=initial_version,
+                error=str(exc),
+            )
+            # Do NOT automatically restore or overwrite; preserve database and point clearly to backup
+            raise MigrationError(
+                f"Database migration from v{initial_version} to v{CURRENT_SCHEMA_VERSION} failed: {exc}. "
+                f"Pre-migration backup is safely preserved at: {backup_path}"
+            ) from exc
 
     def _create_base_schema(self) -> None:
         self.connection.executescript(SCHEMA)
@@ -901,10 +1051,13 @@ def check_database_integrity(database_path: Path | str) -> bool:
     uri = f"{database_path.resolve().as_uri()}?mode=ro"
 
     try:
-        with sqlite3.connect(uri, uri=True) as connection:
+        connection = sqlite3.connect(uri, uri=True)
+        try:
             result = connection.execute(
                 "PRAGMA integrity_check"
             ).fetchone()
+        finally:
+            connection.close()
         is_ok = result == ("ok",)
         try_write_audit_event(
             log_path,

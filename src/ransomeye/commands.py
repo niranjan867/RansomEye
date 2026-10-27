@@ -154,8 +154,8 @@ def ingest_evidence(
                 event_ids = [str(finding["event_id"])]
             store.save_finding(case_id, finding, event_ids=event_ids)
 
-        assessment = assess_threat(all_case_events)
-        store.save_assessment(case_id, assessment)
+        from ransomeye.threat_assessment import assess_case
+        assessment = assess_case(store, case_id)
 
         events_read = accepted_count + duplicate_count + rejected_count
 
@@ -355,14 +355,38 @@ def show_investigation_process(database_path: str | Path, case_id: str, process_
         process_nodes = graph.get_process_nodes()
         matched_nodes = []
 
-        target_id = f"PROCESS:{process_query}"
-        node = graph.get_node(target_id)
-        if node:
-            matched_nodes = [node]
-        else:
+        cleaned_query = process_query.strip()
+        if cleaned_query.startswith("PROCESS:"):
+            cleaned_query = cleaned_query[8:]
+        elif cleaned_query.startswith("guid:"):
+            cleaned_query = cleaned_query[5:]
+        elif cleaned_query.startswith("PID:"):
+            cleaned_query = cleaned_query[4:]
+
+        for cand in [
+            process_query,
+            f"PROCESS:{process_query}",
+            f"PROCESS:{cleaned_query}",
+            f"PROCESS:PID:{cleaned_query}",
+            f"PROCESS:{{{cleaned_query.strip('{}')}}}",
+            f"PROCESS:{cleaned_query.strip('{}')}",
+        ]:
+            node = graph.get_node(cand)
+            if node and node not in matched_nodes:
+                matched_nodes.append(node)
+                break
+
+        if not matched_nodes:
             for n in process_nodes:
-                if str(n.attributes.get("pid")) == str(process_query):
+                if str(n.attributes.get("pid")) == cleaned_query:
                     matched_nodes.append(n)
+            if not matched_nodes:
+                norm_q = cleaned_query.strip("{}").lower()
+                for n in process_nodes:
+                    node_guid = n.node_id.replace("PROCESS:", "").strip("{}").lower()
+                    attr_guid = str(n.attributes.get("guid", "")).strip("{}").lower()
+                    if node_guid == norm_q or attr_guid == norm_q:
+                        matched_nodes.append(n)
 
         if not matched_nodes:
             print(f"Process not found in case: {process_query}")
@@ -400,7 +424,6 @@ def show_investigation_process(database_path: str | Path, case_id: str, process_
                     timestamp = str(ev.timestamp)
                 if image_path != "unavailable" and command_line != "unavailable" and timestamp != "unavailable":
                     break
-        print(f"DEBUG: after loop image_path={image_path}")
         print("RANSOMEYE PROCESS PROFILE")
         print("=========================\n")
         print(f"Case: {case_id}")
@@ -1042,21 +1065,480 @@ def print_case_history(database_path: str | Path, case_id: str) -> None:
         store.close()
 
 
-def write_integrity_manifest(input_path: str | Path, output_path: str | Path) -> Path:
+def write_integrity_manifest(input_path: str | Path, output_path: str | Path | None = None) -> Path:
     input_file = Path(input_path)
-    output_file = Path(output_path)
+    if not input_file.exists():
+        raise FileNotFoundError(f"Input path not found: {input_path}")
+
+    if output_path is None:
+        if input_file.is_dir():
+            output_file = input_file / "MANIFEST.sha256"
+        else:
+            output_file = input_file.with_name(f"{input_file.name}.sha256")
+    else:
+        output_file = Path(output_path)
+        if output_file.is_dir() or str(output_path).endswith(("/", "\\")):
+            if input_file.is_dir():
+                output_file = output_file / "MANIFEST.sha256"
+            else:
+                output_file = output_file / f"{input_file.name}.sha256"
+
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    digest = sha256_file(input_file)
-    output_file.write_text(
-        f"SHA256  {input_file.name}\n{digest}\n",
-        encoding="utf-8",
-    )
+    if input_file.is_dir():
+        manifest_lines: list[str] = []
+        for file_item in sorted(input_file.rglob("*")):
+            if file_item.is_file() and file_item.resolve() != output_file.resolve():
+                rel_path = file_item.relative_to(input_file)
+                digest = sha256_file(file_item)
+                manifest_lines.append(f"{digest}  {rel_path}")
+        output_file.write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
+    else:
+        digest = sha256_file(input_file)
+        output_file.write_text(
+            f"SHA256  {input_file.name}\n{digest}\n",
+            encoding="utf-8",
+        )
     return output_file
 
 
 def verify_integrity_manifest(artifact_path: str | Path, manifest_path: str | Path) -> bool:
     return verify_manifest(Path(artifact_path), Path(manifest_path))
+
+
+def run_phishing_command(
+    text: str | None = None,
+    file_path: Path | None = None,
+    sender: str = "",
+    as_json: bool = False,
+    database_path: Path | None = None,
+    case_id: str | None = None,
+    export_path: Path | None = None,
+) -> int:
+    """Analyze a suspicious message, email, or SMS for phishing and fraud indicators."""
+    import re
+    from ransomeye.phishing import PhishingDetector, MessagePayload, ingest_phishing_finding
+
+    if not text and not file_path:
+        raise ValueError("Either --text or --file must be provided for phishing analysis.")
+
+    if file_path:
+        path = Path(file_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Message file not found: {path}")
+
+        if path.suffix.lower() == ".json":
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                payload = MessagePayload.from_dict(data)
+            except Exception as e:
+                raise ValueError(f"Failed to parse JSON message: {e}")
+        elif path.suffix.lower() in (".eml", ".msg"):
+            payload = MessagePayload.from_email_file(path)
+        else:
+            raw_content = path.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"^(From|Subject|To):", raw_content, re.MULTILINE):
+                try:
+                    payload = MessagePayload.from_email_bytes(path.read_bytes())
+                except Exception:
+                    payload = MessagePayload.from_text(raw_content, sender=sender)
+            else:
+                payload = MessagePayload.from_text(raw_content, sender=sender)
+    else:
+        payload = MessagePayload.from_text(str(text), sender=sender)
+
+    detector = PhishingDetector()
+    result = detector.analyze(payload)
+
+    if database_path and case_id:
+        store = EvidenceStore(database_path)
+        try:
+            case = store.get_case(case_id)
+            if not case:
+                raise KeyError(f"Case not found: {case_id}")
+            finding_id = ingest_phishing_finding(
+                store=store,
+                case_id=case_id,
+                result=result,
+                source_artifact=str(file_path.name if file_path else "cli_text"),
+                payload=payload,
+            )
+            if not as_json:
+                print(f"[+] Phishing finding ingested into case {case_id}: finding_id={finding_id}\n")
+        finally:
+            store.close()
+
+    if as_json:
+        output_str = json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+        print(output_str)
+    else:
+        output_str = result.to_summary_text()
+        print(output_str)
+
+    if export_path:
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        if as_json or export_path.suffix.lower() == ".json":
+            export_path.write_text(json.dumps(result.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        else:
+            export_path.write_text(output_str, encoding="utf-8")
+        if not as_json:
+            print(f"\n[+] Report exported to: {export_path}")
+
+    return 0
+
+
+def run_dashboard_command(
+    database_path: Path | None = None,
+    host: str = "127.0.0.1",
+    port: int = 8080,
+    allowed_origins: list[str] | None = None,
+) -> int:
+    """Launch the RansomEye HTTP Analyst Dashboard server."""
+    import ransomeye.dashboard_server as ds
+
+    if database_path:
+        ds.DB_PATH = Path(database_path)
+    elif os.environ.get("RANSOMEYE_DB"):
+        ds.DB_PATH = Path(os.environ["RANSOMEYE_DB"])
+    elif Path("data/ransomeye.db").is_file():
+        ds.DB_PATH = Path("data/ransomeye.db")
+
+    if allowed_origins:
+        ds.set_allowed_origins(allowed_origins)
+
+    ds.run_server(host=host, port=port)
+    return 0
+
+
+def run_static_analysis_command(
+    file_path: Path,
+    as_json: bool = False,
+    database_path: Path | None = None,
+    case_id: str | None = None,
+    export_path: Path | None = None,
+) -> int:
+    """Perform non-executing static analysis of a file or executable binary."""
+    from ransomeye.static_analyzer import StaticAnalyzer, ingest_static_finding
+
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Target file not found: {path}")
+
+    analyzer = StaticAnalyzer()
+    result = analyzer.analyze_file(path)
+
+    if database_path and case_id:
+        store = EvidenceStore(database_path)
+        try:
+            case = store.get_case(case_id)
+            if not case:
+                raise KeyError(f"Case not found: {case_id}")
+            finding_id = ingest_static_finding(
+                store=store,
+                case_id=case_id,
+                result=result,
+            )
+            if not as_json:
+                print(f"[+] Static analysis finding ingested into case {case_id}: finding_id={finding_id}\n")
+        finally:
+            store.close()
+
+    if as_json:
+        output_str = json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+        print(output_str)
+    else:
+        output_str = result.to_summary_text()
+        print(output_str)
+
+    if export_path:
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        if as_json or export_path.suffix.lower() == ".json":
+            export_path.write_text(json.dumps(result.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        else:
+            export_path.write_text(output_str, encoding="utf-8")
+        if not as_json:
+            print(f"\n[+] Report exported to: {export_path}")
+
+    return 0
+
+
+def _export_report_no_overwrite(export_path: Path, content: str) -> None:
+    """Write a report to disk, refusing to overwrite an existing file (O_EXCL)."""
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(export_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as exc:
+        raise FileExistsError(f"Export destination already exists: {export_path}") from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+    except Exception:
+        export_path.unlink(missing_ok=True)
+        raise
+
+
+def run_script_analysis_command(
+    file_path: Path | None = None,
+    text: str | None = None,
+    event_id: str | None = None,
+    language: str | None = None,
+    as_json: bool = False,
+    database_path: Path | None = None,
+    case_id: str | None = None,
+    export_path: Path | None = None,
+) -> int:
+    """Statically analyze a script, command line, or stored event's command line.
+
+    Exactly one input source is used: a file, inline text, or a stored event id.
+    Persistence rules follow the approved design: a file artifact or a stored
+    event may be linked into a case; pasted text is never persisted. Returns 0
+    when analysis completes (at any severity) and raises on input or operational
+    errors, which the CLI maps to exit code 1.
+    """
+    from ransomeye.script_analyzer import ScriptAnalyzer, ingest_script_finding
+
+    provided = [name for name, value in
+                (("--file", file_path), ("--text", text), ("--event", event_id)) if value]
+    if len(provided) != 1:
+        raise ValueError("Provide exactly one of --file, --text, or --event.")
+
+    want_persist = bool(database_path and case_id)
+    analyzer = ScriptAnalyzer()
+    created: list[int] | None = None
+
+    if event_id is not None:
+        if not (database_path and case_id):
+            raise ValueError("--event requires --database and --case.")
+        store = EvidenceStore(database_path)
+        try:
+            if store.get_case(case_id) is None:
+                raise KeyError(f"Case not found: {case_id}")
+            event = store.get_event(case_id, event_id)
+            if event is None:
+                raise KeyError(f"Event not found in case {case_id}: {event_id}")
+            command_line = event.get("command_line")
+            if not command_line or not str(command_line).strip():
+                raise ValueError(f"Event {event_id} has no command line to analyze.")
+            result = analyzer.analyze_text(str(command_line), file_name=event_id, language=language)
+            created = ingest_script_finding(store, case_id, result, event_id=event_id)
+        finally:
+            store.close()
+
+    elif file_path is not None:
+        path = Path(file_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Script file not found: {path}")
+        result = analyzer.analyze_file(path, language=language)
+        if want_persist:
+            store = EvidenceStore(database_path)
+            try:
+                if store.get_case(case_id) is None:
+                    raise KeyError(f"Case not found: {case_id}")
+                created = ingest_script_finding(store, case_id, result)
+            finally:
+                store.close()
+
+    else:
+        if want_persist:
+            raise ValueError(
+                "Pasted --text cannot be added to a case. Analyze a --file or a "
+                "stored --event so the finding stays traceable to evidence."
+            )
+        result = analyzer.analyze_text(str(text), language=language)
+
+    if created is not None and not as_json:
+        print(f"[+] Script findings ingested into case {case_id}: {len(created)} finding(s) {created}\n")
+
+    if as_json:
+        output_str = json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+    else:
+        output_str = result.to_summary_text()
+    print(output_str)
+
+    if export_path:
+        export_content = (
+            json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+            if as_json or Path(export_path).suffix.lower() == ".json"
+            else output_str
+        )
+        _export_report_no_overwrite(Path(export_path), export_content)
+        if not as_json:
+            print(f"\n[+] Report exported to: {export_path}")
+
+    return 0
+
+
+def run_ioc_analysis_command(
+    file_path: Path,
+    as_json: bool = False,
+    database_path: Path | None = None,
+    case_id: str | None = None,
+    export_path: Path | None = None,
+) -> int:
+    """Statically extract IOC observations from an artifact and optionally ingest into a case."""
+    from ransomeye.ioc_extractor import IocExtractor, ingest_ioc_finding
+
+    extractor = IocExtractor()
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"IOC input file not found: {path}")
+
+    result = extractor.analyze_file(path)
+    created: list[int] | None = None
+
+    if database_path and case_id:
+        store = EvidenceStore(database_path)
+        try:
+            if store.get_case(case_id) is None:
+                raise KeyError(f"Case not found: {case_id}")
+            created = ingest_ioc_finding(store, case_id, result)
+        finally:
+            store.close()
+    elif database_path or case_id:
+        raise ValueError("Both --database and --case are required to ingest findings.")
+
+    if as_json:
+        output_str = json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+    else:
+        output_str = _format_ioc_summary(result)
+    print(output_str)
+    if created is not None and not as_json:
+        print(f"\n[+] IOC findings ingested into case {case_id}: {len(created)} finding(s) {created}")
+
+    if export_path:
+        export_content = (
+            json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+            if as_json or Path(export_path).suffix.lower() == ".json"
+            else output_str
+        )
+        _export_report_no_overwrite(Path(export_path), export_content)
+        if not as_json:
+            print(f"\n[+] Report exported to: {export_path}")
+
+    return 0
+
+
+def _format_ioc_summary(result) -> str:
+    lines = [
+        "=" * 72,
+        "  RANSOMEYE IOC EXTRACTION",
+        "=" * 72,
+        f"  Artifact       : {result.file_name}",
+        f"  Path           : {result.file_path}",
+        f"  SHA-256        : {result.sha256}",
+        f"  SHA-1          : {result.sha1}",
+        f"  MD5            : {result.md5}",
+        f"  File size      : {result.file_size} bytes",
+        f"  Binary         : {result.is_binary}",
+        f"  Status         : {result.analysis_status}",
+        f"  Observations   : {len(result.observations)}",
+        "-" * 72,
+    ]
+    if result.counts:
+        lines.append("  Counts by type:")
+        for t in sorted(result.counts):
+            lines.append(f"    {t:10} {result.counts[t]}")
+    if result.observations:
+        lines.append("-" * 72)
+        lines.append("  First observations (bounded):")
+        for o in result.observations[:40]:
+            lines.append(
+                f"    [{o.rule_id}] {o.ioc_type:7} offset={o.offset:>8} "
+                f"src={o.source:14} norm={o.value_normalized[:80]}"
+            )
+    if result.warnings:
+        lines.append("-" * 72)
+        lines.append("  Warnings:")
+        for w in result.warnings[:20]:
+            lines.append(f"    - {w}")
+    lines.append("=" * 72)
+    return "\n".join(lines)
+
+
+def run_pcap_analysis_command(
+    file_path: Path,
+    as_json: bool = False,
+    database_path: Path | None = None,
+    case_id: str | None = None,
+    export_path: Path | None = None,
+) -> int:
+    """Statically analyze a PCAP capture and optionally ingest findings into a case."""
+    from ransomeye.pcap_analyzer import PcapAnalyzer, ingest_pcap_finding
+
+    analyzer = PcapAnalyzer()
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"PCAP file not found: {path}")
+
+    result = analyzer.analyze_file(path)
+    created: list[int] | None = None
+
+    if database_path and case_id:
+        store = EvidenceStore(database_path)
+        try:
+            if store.get_case(case_id) is None:
+                raise KeyError(f"Case not found: {case_id}")
+            created = ingest_pcap_finding(store, case_id, result)
+        finally:
+            store.close()
+    elif database_path or case_id:
+        raise ValueError("Both --database and --case are required to ingest findings.")
+
+    if as_json:
+        output_str = json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+    else:
+        output_str = _format_pcap_summary(result)
+    print(output_str)
+    if created is not None and not as_json:
+        print(f"\n[+] PCAP findings ingested into case {case_id}: {len(created)} finding(s) {created}")
+
+    if export_path:
+        export_content = (
+            json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+            if as_json or Path(export_path).suffix.lower() == ".json"
+            else output_str
+        )
+        _export_report_no_overwrite(Path(export_path), export_content)
+        if not as_json:
+            print(f"\n[+] Report exported to: {export_path}")
+
+    return 0
+
+
+def _format_pcap_summary(result) -> str:
+    lines = [
+        "=" * 72,
+        "  RANSOMEYE PCAP NETWORK ANALYSIS",
+        "=" * 72,
+        f"  Capture        : {result.file_name}",
+        f"  Path           : {result.file_path}",
+        f"  SHA-256        : {result.sha256}",
+        f"  File size      : {result.file_size} bytes",
+        f"  Link type      : {result.link_type_name} (type {result.link_type})",
+        f"  Status         : {result.analysis_status}",
+        f"  Total packets  : {result.total_packets}",
+        f"  Parsed packets : {result.parsed_packets}",
+        f"  Malformed      : {result.malformed_packets}",
+        f"  TCP / UDP      : {result.tcp_count} / {result.udp_count}",
+        f"  DNS / HTTP     : {result.dns_count} / {result.http_count}",
+        f"  Flows          : {len(result.flows)}",
+        f"  Indicators     : {len(result.indicators)}",
+        "-" * 72,
+    ]
+    if result.indicators:
+        lines.append("  Indicators:")
+        for ind in result.indicators[:50]:
+            lines.append(
+                f"    [{ind.rule_id}] {ind.title} "
+                f"({ind.severity}, conf={ind.confidence:.2f}): {ind.excerpt[:100]}"
+            )
+    if result.warnings:
+        lines.append("-" * 72)
+        lines.append("  Warnings:")
+        for w in result.warnings[:20]:
+            lines.append(f"    - {w}")
+    lines.append("=" * 72)
+    return "\n".join(lines)
 
 
 def main() -> None:
@@ -1136,7 +1618,13 @@ def main() -> None:
         "--output",
         required=True,
         type=Path,
-        help="Path to write the report text file.",
+        help="Path to write the report file (supports .pdf or .txt).",
+    )
+    report_parser.add_argument(
+        "--format",
+        choices=["text", "txt", "pdf"],
+        default="text",
+        help="Report format: text or pdf (default: text). Inferred from .pdf output path if provided.",
     )
 
     case_parser = subparsers.add_parser(
@@ -1273,6 +1761,23 @@ def main() -> None:
         required=True,
         dest="case_id",
         help="Case identifier.",
+    )
+
+    case_seed_parser = case_subparsers.add_parser(
+        "seed",
+        help="Seed the prepared competition ransomware incident case.",
+    )
+    case_seed_parser.add_argument(
+        "--database",
+        type=Path,
+        default=Path("data") / "ransomeye.db",
+        help="Path to the RansomEye SQLite database (default: data/ransomeye.db).",
+    )
+    case_seed_parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=Path("samples") / "prepared_case",
+        help="Directory to store synthetic evidence artifacts (default: samples/prepared_case).",
     )
 
     custody_parser = subparsers.add_parser(
@@ -1865,6 +2370,200 @@ def main() -> None:
         help="Event identifier.",
     )
 
+    phishing_parser = subparsers.add_parser(
+        "phishing",
+        help="Analyze messages, emails, or SMS for phishing and financial fraud indicators.",
+    )
+    phishing_parser.add_argument(
+        "--text",
+        help="Raw text or SMS message body to analyze.",
+    )
+    phishing_parser.add_argument(
+        "--file",
+        type=Path,
+        help="Path to an email (.eml, .txt) or JSON message payload file.",
+    )
+    phishing_parser.add_argument(
+        "--sender",
+        default="",
+        help="Optional sender address or caller ID for text analysis.",
+    )
+    phishing_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output analysis verdict in JSON format.",
+    )
+    phishing_parser.add_argument(
+        "--database",
+        type=Path,
+        help="Optional path to RansomEye database to ingest findings into a case.",
+    )
+    phishing_parser.add_argument(
+        "--case",
+        dest="case_id",
+        help="Optional case ID to link phishing findings with endpoint investigation.",
+    )
+    phishing_parser.add_argument(
+        "--export",
+        type=Path,
+        help="Optional file path to export analysis report.",
+    )
+
+    dashboard_parser = subparsers.add_parser(
+        "dashboard",
+        help="Launch the local RansomEye analyst console HTTP server.",
+    )
+    dashboard_parser.add_argument(
+        "--database",
+        type=Path,
+        default=Path("data/ransomeye.db"),
+        help="Path to the RansomEye SQLite database (default: data/ransomeye.db).",
+    )
+    dashboard_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host address to bind dashboard server (default: 127.0.0.1).",
+    )
+    dashboard_parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Port to serve the analyst console (default: 8080).",
+    )
+    dashboard_parser.add_argument(
+        "--allowed-origin",
+        dest="allowed_origins",
+        action="append",
+        help="Explicitly trusted Origin for CORS (e.g. http://localhost:3000). Can be repeated.",
+    )
+
+    static_parser = subparsers.add_parser(
+        "static",
+        help="Perform non-executing static analysis and PE inspection on a file.",
+    )
+    static_parser.add_argument(
+        "--file",
+        required=True,
+        dest="file_path",
+        type=Path,
+        help="Path to executable, script, or suspicious file to analyze.",
+    )
+    static_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output static analysis findings in JSON format.",
+    )
+    static_parser.add_argument(
+        "--database",
+        type=Path,
+        help="Optional path to RansomEye database to ingest findings into a case.",
+    )
+    static_parser.add_argument(
+        "--case",
+        dest="case_id",
+        help="Optional case ID to link static findings with endpoint case.",
+    )
+    static_parser.add_argument(
+        "--export",
+        type=Path,
+        help="Optional file path to export analysis report.",
+    )
+
+    script_parser = subparsers.add_parser(
+        "script",
+        help="Statically analyze a script, command line, or stored event without executing it.",
+    )
+    script_input_group = script_parser.add_mutually_exclusive_group(required=True)
+    script_input_group.add_argument(
+        "--file",
+        dest="file_path",
+        type=Path,
+        help="Path to a script file (.ps1, .vbs, .js, .hta, .wsf, .bat, exported VBA, etc.).",
+    )
+    script_input_group.add_argument(
+        "--text",
+        help="Inline script or command-line text to analyze (never persisted).",
+    )
+    script_input_group.add_argument(
+        "--event",
+        dest="event_id",
+        help="Analyze the command line of a stored event (requires --database and --case).",
+    )
+    script_parser.add_argument(
+        "--language",
+        default="auto",
+        choices=["auto", "powershell", "vbscript", "vba", "jscript", "hta", "wsf", "batch", "command_line"],
+        help="Force the script language instead of auto-detecting it.",
+    )
+    script_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output script analysis findings in JSON format.",
+    )
+    script_parser.add_argument(
+        "--database",
+        type=Path,
+        help="Optional path to RansomEye database to ingest findings into a case.",
+    )
+    script_parser.add_argument(
+        "--case",
+        dest="case_id",
+        help="Optional case ID to link script findings with endpoint investigation.",
+    )
+    script_parser.add_argument(
+        "--export",
+        type=Path,
+        help="Optional file path to export the analysis report (will not overwrite an existing file).",
+    )
+
+    ioc_parser = subparsers.add_parser(
+        "ioc",
+        help="Extract normalized IOC observations (IP, domain, URL, hash, email, crypto, LOLBIN) from a file.",
+    )
+    ioc_parser.add_argument(
+        "--file", dest="file_path", type=Path, required=True,
+        help="Path to a text or binary artifact to scan for IOCs.",
+    )
+    ioc_parser.add_argument("--json", action="store_true", help="Output in JSON format.")
+    ioc_parser.add_argument("--database", type=Path,
+        help="Optional path to RansomEye database to ingest findings into a case.")
+    ioc_parser.add_argument("--case", dest="case_id",
+        help="Optional case ID to link IOC findings with investigation.")
+    ioc_parser.add_argument("--export", type=Path,
+        help="Optional file path to export the analysis report (will not overwrite).")
+
+    pcap_parser = subparsers.add_parser(
+        "pcap",
+        help="Statically analyze a PCAP network capture (classic libpcap).",
+    )
+    pcap_parser.add_argument(
+        "--file",
+        dest="file_path",
+        type=Path,
+        required=True,
+        help="Path to a classic libpcap (.pcap) capture file.",
+    )
+    pcap_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output PCAP analysis results in JSON format.",
+    )
+    pcap_parser.add_argument(
+        "--database",
+        type=Path,
+        help="Optional path to RansomEye database to ingest findings into a case.",
+    )
+    pcap_parser.add_argument(
+        "--case",
+        dest="case_id",
+        help="Optional case ID to link PCAP findings with investigation.",
+    )
+    pcap_parser.add_argument(
+        "--export",
+        type=Path,
+        help="Optional file path to export the analysis report (will not overwrite an existing file).",
+    )
+
     args = parser.parse_args()
 
     if args.command == "collect":
@@ -1978,12 +2677,18 @@ def main() -> None:
             case_id=args.case_id,
         )
     elif args.command == "report":
-        output_path = write_case_report(
-            database_path=args.database,
-            case_id=args.case_id,
-            output_path=args.output,
-        )
-        print(f"Report written to {output_path}")
+        try:
+            output_path = write_case_report(
+                database_path=args.database,
+                case_id=args.case_id,
+                output_path=args.output,
+                format=args.format,
+            )
+            print(f"Report written to {output_path}")
+        except Exception as exc:
+            if exc.__class__.__name__ == "PdfDependencyError":
+                parser.exit(1, f"Error: {exc}\n")
+            raise
     elif args.command == "case":
         if args.case_command == "create":
             try:
@@ -2045,6 +2750,14 @@ def main() -> None:
                 )
             except (KeyError, ValueError, sqlite3.Error) as exc:
                 parser.exit(1, f"{exc}\n")
+        elif args.case_command == "seed":
+            try:
+                from ransomeye.prepared_case import seed_prepared_case
+                res = seed_prepared_case(args.database, args.artifacts_dir)
+                print(f"Prepared case seeded successfully: {res['case_id']} — {res['case_name']}")
+                print(f"Events: {res['events_count']}, Findings: {res['findings_count']}, Score: {res['score']} ({res['severity']})")
+            except Exception as exc:
+                parser.exit(1, f"Failed to seed prepared case: {exc}\n")
     elif args.command == "custody":
         if args.custody_command == "record":
             try:
@@ -2394,6 +3107,78 @@ def main() -> None:
             parser.exit(1, f"{exc}\n")
         finally:
             store.close()
+    elif args.command == "phishing":
+        try:
+            run_phishing_command(
+                text=args.text,
+                file_path=args.file,
+                sender=args.sender,
+                as_json=args.json,
+                database_path=args.database,
+                case_id=args.case_id,
+                export_path=args.export,
+            )
+        except (FileNotFoundError, ValueError, KeyError, sqlite3.Error, OSError) as exc:
+            parser.exit(1, f"Phishing analysis failed: {exc}\n")
+    elif args.command == "dashboard":
+        try:
+            run_dashboard_command(
+                database_path=args.database,
+                host=args.host,
+                port=args.port,
+                allowed_origins=getattr(args, "allowed_origins", None),
+            )
+        except Exception as exc:
+            parser.exit(1, f"Dashboard server error: {exc}\n")
+    elif args.command == "static":
+        try:
+            run_static_analysis_command(
+                file_path=args.file_path,
+                as_json=args.json,
+                database_path=args.database,
+                case_id=args.case_id,
+                export_path=args.export,
+            )
+        except (FileNotFoundError, ValueError, KeyError, sqlite3.Error, OSError) as exc:
+            parser.exit(1, f"Static analysis failed: {exc}\n")
+    elif args.command == "script":
+        try:
+            ret = run_script_analysis_command(
+                file_path=args.file_path,
+                text=args.text,
+                event_id=args.event_id,
+                language=args.language,
+                as_json=args.json,
+                database_path=args.database,
+                case_id=args.case_id,
+                export_path=args.export,
+            )
+            if ret != 0:
+                sys.exit(ret)
+        except (FileNotFoundError, FileExistsError, ValueError, KeyError, sqlite3.Error, OSError) as exc:
+            parser.exit(1, f"Script analysis failed: {exc}\n")
+    elif args.command == "ioc":
+        try:
+            run_ioc_analysis_command(
+                file_path=args.file_path,
+                as_json=args.json,
+                database_path=args.database,
+                case_id=args.case_id,
+                export_path=args.export,
+            )
+        except (FileNotFoundError, FileExistsError, ValueError, KeyError, sqlite3.Error, OSError) as exc:
+            parser.exit(1, f"IOC extraction failed: {exc}\n")
+    elif args.command == "pcap":
+        try:
+            run_pcap_analysis_command(
+                file_path=args.file_path,
+                as_json=args.json,
+                database_path=args.database,
+                case_id=args.case_id,
+                export_path=args.export,
+            )
+        except (FileNotFoundError, FileExistsError, ValueError, KeyError, sqlite3.Error, OSError) as exc:
+            parser.exit(1, f"PCAP analysis failed: {exc}\n")
 
 if __name__ == "__main__":
     main()
