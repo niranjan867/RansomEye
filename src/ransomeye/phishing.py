@@ -1227,4 +1227,7 @@ def ingest_phishing_finding(
         note=f"Ingested phishing verdict (Score={result.score}, Level={result.risk_level})",
     )
 
+    from ransomeye.threat_assessment import assess_case
+    assess_case(store, case_id)
+
     return finding_id

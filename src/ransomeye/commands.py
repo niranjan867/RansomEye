@@ -154,8 +154,8 @@ def ingest_evidence(
                 event_ids = [str(finding["event_id"])]
             store.save_finding(case_id, finding, event_ids=event_ids)
 
-        assessment = assess_threat(all_case_events)
-        store.save_assessment(case_id, assessment)
+        from ransomeye.threat_assessment import assess_case
+        assessment = assess_case(store, case_id)
 
         events_read = accepted_count + duplicate_count + rejected_count
 
@@ -1065,16 +1065,40 @@ def print_case_history(database_path: str | Path, case_id: str) -> None:
         store.close()
 
 
-def write_integrity_manifest(input_path: str | Path, output_path: str | Path) -> Path:
+def write_integrity_manifest(input_path: str | Path, output_path: str | Path | None = None) -> Path:
     input_file = Path(input_path)
-    output_file = Path(output_path)
+    if not input_file.exists():
+        raise FileNotFoundError(f"Input path not found: {input_path}")
+
+    if output_path is None:
+        if input_file.is_dir():
+            output_file = input_file / "MANIFEST.sha256"
+        else:
+            output_file = input_file.with_name(f"{input_file.name}.sha256")
+    else:
+        output_file = Path(output_path)
+        if output_file.is_dir() or str(output_path).endswith(("/", "\\")):
+            if input_file.is_dir():
+                output_file = output_file / "MANIFEST.sha256"
+            else:
+                output_file = output_file / f"{input_file.name}.sha256"
+
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    digest = sha256_file(input_file)
-    output_file.write_text(
-        f"SHA256  {input_file.name}\n{digest}\n",
-        encoding="utf-8",
-    )
+    if input_file.is_dir():
+        manifest_lines: list[str] = []
+        for file_item in sorted(input_file.rglob("*")):
+            if file_item.is_file() and file_item.resolve() != output_file.resolve():
+                rel_path = file_item.relative_to(input_file)
+                digest = sha256_file(file_item)
+                manifest_lines.append(f"{digest}  {rel_path}")
+        output_file.write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
+    else:
+        digest = sha256_file(input_file)
+        output_file.write_text(
+            f"SHA256  {input_file.name}\n{digest}\n",
+            encoding="utf-8",
+        )
     return output_file
 
 
@@ -1167,6 +1191,7 @@ def run_dashboard_command(
     database_path: Path | None = None,
     host: str = "127.0.0.1",
     port: int = 8080,
+    allowed_origins: list[str] | None = None,
 ) -> int:
     """Launch the RansomEye HTTP Analyst Dashboard server."""
     import ransomeye.dashboard_server as ds
@@ -1177,6 +1202,9 @@ def run_dashboard_command(
         ds.DB_PATH = Path(os.environ["RANSOMEYE_DB"])
     elif Path("data/ransomeye.db").is_file():
         ds.DB_PATH = Path("data/ransomeye.db")
+
+    if allowed_origins:
+        ds.set_allowed_origins(allowed_origins)
 
     ds.run_server(host=host, port=port)
     return 0
@@ -1590,7 +1618,13 @@ def main() -> None:
         "--output",
         required=True,
         type=Path,
-        help="Path to write the report text file.",
+        help="Path to write the report file (supports .pdf or .txt).",
+    )
+    report_parser.add_argument(
+        "--format",
+        choices=["text", "txt", "pdf"],
+        default="text",
+        help="Report format: text or pdf (default: text). Inferred from .pdf output path if provided.",
     )
 
     case_parser = subparsers.add_parser(
@@ -1727,6 +1761,23 @@ def main() -> None:
         required=True,
         dest="case_id",
         help="Case identifier.",
+    )
+
+    case_seed_parser = case_subparsers.add_parser(
+        "seed",
+        help="Seed the prepared competition ransomware incident case.",
+    )
+    case_seed_parser.add_argument(
+        "--database",
+        type=Path,
+        default=Path("data") / "ransomeye.db",
+        help="Path to the RansomEye SQLite database (default: data/ransomeye.db).",
+    )
+    case_seed_parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=Path("samples") / "prepared_case",
+        help="Directory to store synthetic evidence artifacts (default: samples/prepared_case).",
     )
 
     custody_parser = subparsers.add_parser(
@@ -2379,6 +2430,12 @@ def main() -> None:
         default=8080,
         help="Port to serve the analyst console (default: 8080).",
     )
+    dashboard_parser.add_argument(
+        "--allowed-origin",
+        dest="allowed_origins",
+        action="append",
+        help="Explicitly trusted Origin for CORS (e.g. http://localhost:3000). Can be repeated.",
+    )
 
     static_parser = subparsers.add_parser(
         "static",
@@ -2620,12 +2677,18 @@ def main() -> None:
             case_id=args.case_id,
         )
     elif args.command == "report":
-        output_path = write_case_report(
-            database_path=args.database,
-            case_id=args.case_id,
-            output_path=args.output,
-        )
-        print(f"Report written to {output_path}")
+        try:
+            output_path = write_case_report(
+                database_path=args.database,
+                case_id=args.case_id,
+                output_path=args.output,
+                format=args.format,
+            )
+            print(f"Report written to {output_path}")
+        except Exception as exc:
+            if exc.__class__.__name__ == "PdfDependencyError":
+                parser.exit(1, f"Error: {exc}\n")
+            raise
     elif args.command == "case":
         if args.case_command == "create":
             try:
@@ -2687,6 +2750,14 @@ def main() -> None:
                 )
             except (KeyError, ValueError, sqlite3.Error) as exc:
                 parser.exit(1, f"{exc}\n")
+        elif args.case_command == "seed":
+            try:
+                from ransomeye.prepared_case import seed_prepared_case
+                res = seed_prepared_case(args.database, args.artifacts_dir)
+                print(f"Prepared case seeded successfully: {res['case_id']} — {res['case_name']}")
+                print(f"Events: {res['events_count']}, Findings: {res['findings_count']}, Score: {res['score']} ({res['severity']})")
+            except Exception as exc:
+                parser.exit(1, f"Failed to seed prepared case: {exc}\n")
     elif args.command == "custody":
         if args.custody_command == "record":
             try:
@@ -3055,6 +3126,7 @@ def main() -> None:
                 database_path=args.database,
                 host=args.host,
                 port=args.port,
+                allowed_origins=getattr(args, "allowed_origins", None),
             )
         except Exception as exc:
             parser.exit(1, f"Dashboard server error: {exc}\n")

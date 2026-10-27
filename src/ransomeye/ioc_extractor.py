@@ -735,4 +735,8 @@ def ingest_ioc_finding(
             f"binary={result.is_binary}"
         ),
     )
+
+    from ransomeye.threat_assessment import assess_case
+    assess_case(store, case_id)
+
     return created

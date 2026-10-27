@@ -25,9 +25,46 @@ def _severity_from_score(score: int) -> str:
     return "CRITICAL"
 
 
+def _coerce_confidence(val: Any) -> float:
+    """Coerce numeric or qualitative confidence strings into [0.0, 1.0] float."""
+    if val is None:
+        return 0.50
+    if isinstance(val, (int, float)):
+        return max(0.0, min(1.0, float(val)))
+    s = str(val).strip().lower()
+    return {"low": 0.50, "medium": 0.75, "high": 0.90}.get(s, 0.50)
+
+
+def _is_informational_ioc_finding(finding: dict[str, Any]) -> bool:
+    """Return True if finding is an ordinary informational IOC observation."""
+    ftype = str(finding.get("finding_type") or finding.get("type", "")).lower()
+    if ftype.startswith("ioc_observation_"):
+        return True
+    reason = str(finding.get("reason", "")).lower()
+    if "[ioc-obs-" in reason and "[ioc-obs-lolbin]" not in reason:
+        return True
+    return False
+
+
+def _is_forensic_finding(finding: dict[str, Any]) -> bool:
+    """Return True if finding is an authorized forensic analyzer finding."""
+    ftype = str(finding.get("finding_type") or finding.get("type", "")).lower()
+    if ftype.startswith("script_"):
+        return True
+    if ftype.startswith("phishing_") or ftype == "phishing_detection":
+        return True
+    if ftype.startswith("pcap_"):
+        return True
+    if ftype in ("static_file_analysis", "static_binary_analysis") or ftype.startswith("static_"):
+        return True
+    if ftype in ("ioc_contextual_lolbin", "ioc_lolbin") or "ioc-obs-lolbin" in str(finding.get("reason", "")).lower():
+        return True
+    return False
+
+
 def _combine_confidence(
     base_result: dict[str, Any],
-    behavior_findings: list[dict[str, Any]],
+    contributing_findings: list[dict[str, Any]],
     score: int,
 ) -> float:
     if score == 0:
@@ -35,14 +72,12 @@ def _combine_confidence(
 
     values: list[float] = []
 
-    if base_result["score"] > 0:
+    if base_result.get("score", 0) > 0:
         values.append(float(base_result["confidence"]))
 
-    values.extend(
-        float(finding["confidence"])
-        for finding in behavior_findings
-        if finding.get("confidence") is not None
-    )
+    for finding in contributing_findings:
+        if finding.get("confidence") is not None:
+            values.append(_coerce_confidence(finding["confidence"]))
 
     if not values:
         return 0.50
@@ -58,24 +93,31 @@ def _ensure_finding_ids(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not f_copy.get("event_ids") and f_copy.get("event_id"):
             f_copy["event_ids"] = [str(f_copy["event_id"])]
 
-        if not f_copy.get("finding_id"):
-            fid = f_copy.get("id")
-            if not fid:
-                ftype = str(f_copy.get("type", "finding"))
-                sorted_eids = sorted(list(set(str(e) for e in (f_copy.get("event_ids") or []))))
-                technique = str(f_copy.get("technique") or "")
-                reason = str(f_copy.get("reason") or "")
+        ftype = str(f_copy.get("type") or f_copy.get("finding_type", "finding"))
+        f_copy["type"] = ftype
+        if "finding_type" not in f_copy:
+            f_copy["finding_type"] = ftype
 
-                payload = {
-                    "event_ids": sorted_eids,
-                    "reason": reason,
-                    "technique": technique,
-                    "type": ftype,
-                }
-                canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-                digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()[:16]
-                fid = f"F-{digest}"
-            f_copy["finding_id"] = str(fid)
+        if not f_copy.get("finding_id") and f_copy.get("id"):
+            f_copy["finding_id"] = str(f_copy["id"])
+
+        if not f_copy.get("finding_id"):
+            sorted_eids = sorted(list(set(str(e) for e in (f_copy.get("event_ids") or []))))
+            technique = str(f_copy.get("technique") or "")
+            reason = str(f_copy.get("reason") or "")
+
+            payload = {
+                "event_ids": sorted_eids,
+                "reason": reason,
+                "technique": technique,
+                "type": ftype,
+            }
+            canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()[:16]
+            f_copy["finding_id"] = f"F-{digest}"
+        else:
+            f_copy["finding_id"] = str(f_copy["finding_id"])
+
         normalized.append(f_copy)
     return normalized
 
@@ -83,22 +125,23 @@ def _ensure_finding_ids(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def assess_threat(
     events: list[Any],
     processes: dict[str, Any] | list[dict[str, Any]] | None = None,
+    findings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Combine all current findings into one explainable assessment."""
     base_result = analyze_events(events)
-    behavior_findings = analyze_behavior(events)
-    file_behavior_findings = analyze_file_behavior(events)
+    dyn_behavior_findings = analyze_behavior(events)
+    dyn_file_behavior_findings = analyze_file_behavior(events)
 
     # Prevent double counting: if file_behavior detected the same pattern
     # that rules.py scored, subtract the legacy contribution using the
     # structured trigger flags rather than fragile reason-string matching.
     has_mass_mod = any(
         f.get("type") == "mass_file_modification"
-        for f in file_behavior_findings
+        for f in dyn_file_behavior_findings
     )
     has_ransom_note = any(
         f.get("type") == "ransom_note"
-        for f in file_behavior_findings
+        for f in dyn_file_behavior_findings
     )
 
     if has_mass_mod and base_result.get("mass_modify_triggered"):
@@ -107,7 +150,62 @@ def assess_threat(
     if has_ransom_note and base_result.get("ransom_note_triggered"):
         base_result["score"] = max(0, base_result["score"] - RANSOM_NOTE_SCORE)
 
-    raw_all_findings = behavior_findings + file_behavior_findings
+    # Initialize finding categories
+    behavior_findings: list[dict[str, Any]] = list(dyn_behavior_findings)
+    file_behavior_findings: list[dict[str, Any]] = list(dyn_file_behavior_findings)
+    forensic_findings: list[dict[str, Any]] = []
+    informational_findings: list[dict[str, Any]] = []
+
+    # Process and deduplicate any supplied stored findings
+    if findings:
+        def _finding_sig(f: dict[str, Any]) -> tuple[str, tuple[str, ...], str]:
+            ftype = str(f.get("type") or f.get("finding_type", ""))
+            eids = tuple(sorted(str(e) for e in (f.get("event_ids") or ([] if not f.get("event_id") else [f["event_id"]]))))
+            reason = str(f.get("reason", ""))
+            return (ftype, eids, reason)
+
+        seen_sigs = {_finding_sig(f) for f in behavior_findings + file_behavior_findings}
+        seen_finding_ids = {str(f.get("finding_id")) for f in behavior_findings + file_behavior_findings if f.get("finding_id")}
+
+        for f in findings:
+            fid = str(f.get("finding_id")) if f.get("finding_id") is not None else None
+            sig = _finding_sig(f)
+
+            if fid and fid in seen_finding_ids:
+                continue
+            if sig in seen_sigs:
+                continue
+
+            if _is_informational_ioc_finding(f):
+                informational_findings.append(f)
+                seen_sigs.add(sig)
+                if fid:
+                    seen_finding_ids.add(fid)
+            elif _is_forensic_finding(f):
+                forensic_findings.append(f)
+                seen_sigs.add(sig)
+                if fid:
+                    seen_finding_ids.add(fid)
+            else:
+                ftype = str(f.get("type") or f.get("finding_type", ""))
+                if ftype in ("suspicious_powershell", "suspicious_certutil", "recovery_inhibition"):
+                    behavior_findings.append(f)
+                    seen_sigs.add(sig)
+                    if fid:
+                        seen_finding_ids.add(fid)
+                elif ftype in ("mass_file_modification", "ransom_note", "mass_file_creation", "mass_file_deletion", "file_churn", "suspicious_extension"):
+                    file_behavior_findings.append(f)
+                    seen_sigs.add(sig)
+                    if fid:
+                        seen_finding_ids.add(fid)
+                else:
+                    forensic_findings.append(f)
+                    seen_sigs.add(sig)
+                    if fid:
+                        seen_finding_ids.add(fid)
+
+    contributing_findings = behavior_findings + file_behavior_findings + forensic_findings
+    raw_all_findings = contributing_findings + informational_findings
     all_findings = _ensure_finding_ids(raw_all_findings)
 
     if all_findings:
@@ -121,13 +219,14 @@ def assess_threat(
 
     file_behavior_score = sum(int(f.get("score", 0)) for f in file_behavior_findings)
     behavior_score = sum(int(f.get("score", 0)) for f in behavior_findings)
+    forensic_score = sum(int(f.get("score", 0)) for f in forensic_findings)
 
     correlation_bonus = 0
     # Use (base_result + file_behavior_score) to see if we have baseline suspicious activity
     if (base_result["score"] + file_behavior_score) > 0 and behavior_findings:
         correlation_bonus = 10
 
-    total_score = min(base_result["score"] + file_behavior_score + behavior_score + correlation_bonus, 100)
+    total_score = min(base_result["score"] + file_behavior_score + behavior_score + forensic_score + correlation_bonus, 100)
 
     # Apply aggressive behavior floor ONLY to the original behavior findings (powershell, certutil, etc.)
     if behavior_findings:
@@ -144,12 +243,13 @@ def assess_threat(
 
     reasons.extend(
         f"{finding['reason']} (+{finding.get('score', 0)})"
-        for finding in all_findings
+        for finding in contributing_findings
+        if int(finding.get("score", 0)) > 0
     )
 
     techniques = sorted({
         finding["technique"]
-        for finding in all_findings
+        for finding in contributing_findings
         if finding.get("technique")
     })
 
@@ -191,7 +291,7 @@ def assess_threat(
         "severity": _severity_from_score(total_score),
         "confidence": _combine_confidence(
             base_result,
-            all_findings,
+            contributing_findings,
             total_score,
         ),
         "reasons": reasons,
@@ -200,3 +300,12 @@ def assess_threat(
         "correlation_count": len(correlations_data),
         "correlations": correlations_data,
     }
+
+
+def assess_case(store: Any, case_id: str) -> dict[str, Any]:
+    """Authoritative case assessment lifecycle: load events and findings, assess, and persist."""
+    events = store.get_case_events(case_id)
+    findings = store.get_case_findings(case_id)
+    assessment = assess_threat(events=events, findings=findings)
+    store.save_assessment(case_id, assessment)
+    return assessment

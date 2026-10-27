@@ -11,6 +11,7 @@ const state = {
     currentCaseId: '',
     currentCase: null,
     assessment: null,
+    timelineAssessment: null,
     stats: null,
     incidents: [],
     findings: [],
@@ -196,6 +197,9 @@ function populateCaseSelector(selectEl, options = {}) {
 async function init() {
     setupListeners();
     await fetchCases();
+    if (!state.currentCaseId && state.cases && state.cases.length > 0) {
+        await loadCase(state.cases[0].case_id);
+    }
     switchView('overview');
 }
 
@@ -293,6 +297,7 @@ async function loadCase(caseId) {
         state.findings = [];
         state.activity = [];
         state.timeline = [];
+        state.timelineAssessment = null;
         state.reconstruction = [];
         dom.selectCase.value = '';
         updateTopbar();
@@ -321,6 +326,7 @@ async function loadCase(caseId) {
 
     const tlData = await api(`/timeline/${encodeURIComponent(caseId)}`);
     state.timeline = (tlData && !tlData._error) ? tlData.timeline : [];
+    state.timelineAssessment = (tlData && !tlData._error && tlData.assessment) ? tlData.assessment : null;
 
     const recData = await api(`/reconstruction/${encodeURIComponent(caseId)}`);
     state.reconstruction = (recData && !recData._error) ? recData.stages : [];
@@ -488,7 +494,7 @@ async function initCases() {
             const statusBadge = badge(c.status, c.status === 'OPEN' ? 'critical' : 'low');
             const sevBadge = badge(c.severity || 'LOW', (c.severity || 'low').toLowerCase());
             const created = el('span', { className: 'mono', text: c.created_at ? c.created_at.slice(0, 19) : '-', style: 'font-size: 11px;' });
-            const actions = el('div', { style: 'display: flex; gap: 6px;' }, [
+            const actions = el('div', { style: 'display: flex; gap: 6px; white-space: nowrap; min-width: 175px;' }, [
                 el('button', { className: 'btn btn-sm btn-primary', text: 'Open',
                     onclick: (e) => { e.stopPropagation(); loadCase(c.case_id).then(() => switchView('overview')); } }),
                 el('button', { className: 'btn btn-sm', text: 'Status',
@@ -956,32 +962,264 @@ async function initTree() {
 // ==========================================
 // 9. Timeline
 // ==========================================
+function formatTimelineTime(isoString) {
+    if (!isoString) {
+        return { display: 'Timestamp Unavailable', utc: 'N/A', iso: '' };
+    }
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) {
+        return { display: String(isoString), utc: String(isoString), iso: String(isoString) };
+    }
+
+    // Format to IST (Asia/Kolkata, UTC + 05:30) for presentation
+    const istOffsetMs = 5.5 * 60 * 60 * 1000;
+    const istDate = new Date(d.getTime() + istOffsetMs);
+    const pad = (n, len = 2) => String(n).padStart(len, '0');
+
+    const h = pad(istDate.getUTCHours());
+    const m = pad(istDate.getUTCMinutes());
+    const s = pad(istDate.getUTCSeconds());
+    const ms = pad(d.getUTCMilliseconds(), 3);
+    const display = `${h}:${m}:${s}.${ms} IST`;
+
+    // Preserved forensic UTC timestamp
+    const utcYear = d.getUTCFullYear();
+    const utcMonth = pad(d.getUTCMonth() + 1);
+    const utcDay = pad(d.getUTCDate());
+    const utcH = pad(d.getUTCHours());
+    const utcM = pad(d.getUTCMinutes());
+    const utcS = pad(d.getUTCSeconds());
+    const utc = `${utcYear}-${utcMonth}-${utcDay} ${utcH}:${utcM}:${utcS}.${ms} UTC`;
+
+    return { display, utc, iso: isoString };
+}
+
+function getTimelineCategoryMeta(entryType) {
+    const et = String(entryType || '').toUpperCase();
+    if (et.includes('COMMAND') || et.includes('POWERSHELL') || et.includes('LOLBIN')) {
+        return { label: 'COMMAND', badgeClass: 'badge critical', itemClass: 'item-critical', cardClass: 'card-critical' };
+    }
+    if (et.includes('MASS') || et.includes('ENCRYPTION') || et.includes('RANSOM')) {
+        return { label: et.includes('NOTE') ? 'RANSOM NOTE' : 'MASS MODIFICATION', badgeClass: 'badge critical', itemClass: 'item-critical', cardClass: 'card-critical' };
+    }
+    if (et.includes('SUSPICIOUS_EXECUTABLE') || et.includes('STATIC')) {
+        return { label: 'SUSPICIOUS PE', badgeClass: 'badge critical', itemClass: 'item-critical', cardClass: 'card-critical' };
+    }
+    if (et.includes('PROCESS')) {
+        return { label: 'PROCESS', badgeClass: 'badge info', itemClass: 'item-info', cardClass: 'card-info' };
+    }
+    if (et.includes('NETWORK') || et.includes('DNS') || et.includes('CONNECT')) {
+        return { label: 'NETWORK', badgeClass: 'badge warning', itemClass: 'item-warning', cardClass: 'card-warning' };
+    }
+    if (et.includes('PHISH')) {
+        return { label: 'PHISHING', badgeClass: 'badge warning', itemClass: 'item-warning', cardClass: 'card-warning' };
+    }
+    if (et.includes('SCRIPT')) {
+        return { label: 'SCRIPT', badgeClass: 'badge warning', itemClass: 'item-warning', cardClass: 'card-warning' };
+    }
+    if (et.includes('CORRELATION')) {
+        return { label: 'CORRELATION', badgeClass: 'badge correlation', itemClass: 'item-correlation', cardClass: 'card-correlation' };
+    }
+    if (et.includes('FILE')) {
+        return { label: 'FILE ACTIVITY', badgeClass: 'badge low', itemClass: 'item-info', cardClass: 'card-info' };
+    }
+    return { label: (entryType || 'EVENT').replace(/_/g, ' ').toUpperCase(), badgeClass: 'badge low', itemClass: '', cardClass: '' };
+}
+
 function initTimeline() {
     const container = document.getElementById('timeline-container');
-    if (state.timeline.length === 0) {
-        container.replaceChildren(el('div', { className: 'empty-state', text: 'No timeline events available for this case. Ingest evidence to build the timeline.' }));
+    if (!container) return;
+
+    if (!state.timeline || state.timeline.length === 0) {
+        container.replaceChildren(el('div', {
+            className: 'empty-state',
+            text: 'No timeline events available for this case. Ingest evidence to build the timeline.'
+        }));
         return;
     }
 
-    const items = state.timeline.map(t => {
-        const content = el('div', { className: 'timeline-content' }, [
-            el('strong', { text: t.description }),
-        ]);
+    const frag = [];
 
-        if (t.process_name) {
-            const procLink = el('span', { className: 'clickable-id mono mt-sm', text: `Process: ${t.process_name} (PID: ${t.pid})`,
-                style: 'display: inline-block; cursor: pointer;',
-                onclick: () => inspectProcess(t.process_guid || t.pid) });
-            content.appendChild(procLink);
+    // 1. Case Assessment & Timeline Header Summary Bar
+    const assessment = state.timelineAssessment || state.assessment;
+    if (assessment) {
+        const summaryBar = el('div', { className: 'timeline-summary-bar' }, [
+            el('div', { className: 'timeline-summary-col' }, [
+                el('span', { className: 'prop-key', text: 'Case Assessment: ' }),
+                badge(`${assessment.severity || 'UNKNOWN'} (${assessment.score != null ? assessment.score + '/100' : '-'})`, (assessment.severity || 'low').toLowerCase()),
+            ]),
+            el('div', { className: 'timeline-summary-col' }, [
+                el('span', { className: 'prop-key', text: 'Host: ' }),
+                el('span', { className: 'prop-val mono', text: assessment.host || (state.currentCase ? state.currentCase.host : 'Unknown') }),
+            ]),
+            el('div', { className: 'timeline-summary-col' }, [
+                el('span', { className: 'prop-key', text: 'Events: ' }),
+                el('span', { className: 'prop-val mono', text: String(state.timeline.filter(t => t.entry_type !== 'ASSESSMENT').length) }),
+            ]),
+            el('div', { className: 'timeline-summary-col timeline-tz-indicator' }, [
+                el('span', { className: 'prop-key', text: 'Timezone: ' }),
+                el('span', { className: 'prop-val', text: 'IST (UTC+05:30) | Tooltips: UTC' }),
+            ]),
+        ]);
+        frag.push(summaryBar);
+    }
+
+    // 2. Timeline items list (chronological security events)
+    const timelineEvents = state.timeline.filter(t => t.entry_type !== 'ASSESSMENT');
+    const items = timelineEvents.map(t => {
+        const timeInfo = formatTimelineTime(t.timestamp);
+        const catMeta = getTimelineCategoryMeta(t.entry_type);
+
+        // Header row: Time badge, category badge, title, and incident correlation pills
+        const headerChildren = [
+            el('span', {
+                className: 'timeline-time-badge mono',
+                text: timeInfo.display,
+                title: `Forensic UTC: ${timeInfo.utc} (Raw: ${timeInfo.iso || '-'})`,
+            }),
+            el('span', {
+                className: catMeta.badgeClass,
+                text: catMeta.label,
+            }),
+            el('span', {
+                className: 'timeline-item-title',
+                text: t.title || 'Security Event',
+            }),
+        ];
+
+        // Compact annotation for correlations attached to this event
+        if (Array.isArray(t.correlation_ids) && t.correlation_ids.length > 0) {
+            t.correlation_ids.forEach(cid => {
+                headerChildren.push(el('span', {
+                    className: 'mono timeline-corr-pill clickable-id',
+                    text: cid,
+                    title: `Associated Incident: ${cid}. Click to inspect incident.`,
+                    onclick: (e) => {
+                        e.stopPropagation();
+                        inspectIncident(cid);
+                    }
+                }));
+            });
         }
 
-        return el('div', { className: 'timeline-item' }, [
-            el('div', { className: 'timeline-time', text: t.timestamp || 'Unknown Time' }),
-            content,
-        ]);
+        const headerRow = el('div', { className: 'timeline-header-row' }, headerChildren);
+
+        // Card body
+        const cardChildren = [headerRow];
+
+        // Description / summary (avoid redundant title repetition)
+        if (t.description && t.description !== t.title) {
+            cardChildren.push(el('div', { className: 'timeline-desc', text: t.description }));
+        }
+
+        // Meta row: Process / Parent / Evidence / Findings
+        const metaChildren = [];
+
+        if (t.process_name) {
+            const pidStr = t.pid != null ? ` (PID: ${t.pid})` : '';
+            metaChildren.push(el('span', {
+                className: 'timeline-meta-tag clickable-id mono',
+                text: `Process: ${t.process_name}${pidStr}`,
+                title: 'Click to inspect process lineage',
+                onclick: () => inspectProcess(t.process_guid || t.pid || t.process_name),
+            }));
+        }
+
+        if (t.parent_process_name) {
+            metaChildren.push(el('span', {
+                className: 'timeline-meta-tag',
+                text: `Parent: ${t.parent_process_name}`,
+            }));
+        }
+
+        if (Array.isArray(t.evidence_ids) && t.evidence_ids.length > 0) {
+            if (t.evidence_ids.length === 1) {
+                const eid = t.evidence_ids[0];
+                metaChildren.push(el('span', {
+                    className: 'timeline-meta-tag clickable-id mono',
+                    text: `EVID:${eid}`,
+                    title: 'Click to inspect raw evidence event',
+                    onclick: () => inspectEvent(eid),
+                }));
+            } else {
+                metaChildren.push(el('span', {
+                    className: 'timeline-meta-tag mono',
+                    text: `Evidence: ${t.evidence_ids.length} events`,
+                    title: t.evidence_ids.join(', '),
+                }));
+            }
+        }
+
+        if (Array.isArray(t.finding_ids) && t.finding_ids.length > 0) {
+            t.finding_ids.forEach(fid => {
+                const fObj = state.findings.find(f => String(f.finding_id) === String(fid) || String(f.id) === String(fid));
+                const targetEid = (fObj && fObj.event_ids && fObj.event_ids.length) ? fObj.event_ids[0] : (t.evidence_ids && t.evidence_ids[0]);
+                metaChildren.push(el('span', {
+                    className: 'timeline-meta-tag clickable-id mono',
+                    text: `FINDING:${fid}`,
+                    style: 'color: var(--re-critical); border-color: rgba(255, 77, 95, 0.3);',
+                    title: 'Click to inspect finding evidence',
+                    onclick: () => { if (targetEid) inspectEvent(targetEid); },
+                }));
+            });
+        }
+
+        if (metaChildren.length > 0) {
+            cardChildren.push(el('div', { className: 'timeline-meta-row mt-sm' }, metaChildren));
+        }
+
+        // Expandable details area for long command line, raw finding reason, or attributes
+        const hasCmd = Boolean(t.command_line && t.command_line.trim());
+        const hasReason = Boolean(t.finding_reason && t.finding_reason.trim() && t.finding_reason !== t.description);
+        const hasFilePath = Boolean(t.file_path && t.file_path.trim() && !(t.description && t.description.includes(t.file_path)));
+        const attrs = (t.attributes && typeof t.attributes === 'object') ? t.attributes : {};
+        const hasNetwork = Boolean(attrs.destination_ip || attrs.destination_port || attrs.query_name);
+
+        if (hasCmd || hasReason || hasFilePath || hasNetwork) {
+            const details = el('details', { className: 'timeline-details' });
+            details.appendChild(el('summary', { text: 'Telemetry Details & Parameters' }));
+
+            const detailBody = el('div', { className: 'timeline-details-body' });
+
+            if (hasCmd) {
+                detailBody.appendChild(el('div', { className: 'prop-key mt-sm', text: 'Command Line Execution:' }));
+                detailBody.appendChild(el('div', { className: 'timeline-code-block', text: t.command_line }));
+            }
+
+            if (hasReason) {
+                detailBody.appendChild(el('div', { className: 'prop-key mt-sm', text: 'Forensic Detection Reason:' }));
+                detailBody.appendChild(el('div', { className: 'timeline-reason-box', text: t.finding_reason }));
+            }
+
+            if (hasFilePath) {
+                detailBody.appendChild(kv('Target Path', t.file_path, { mono: true }));
+            }
+
+            if (hasNetwork) {
+                if (attrs.destination_ip) {
+                    const dest = attrs.destination_port ? `${attrs.destination_ip}:${attrs.destination_port}` : attrs.destination_ip;
+                    detailBody.appendChild(kv('Network Target', dest, { mono: true }));
+                }
+                if (attrs.query_name) {
+                    detailBody.appendChild(kv('DNS Query Domain', attrs.query_name, { mono: true }));
+                }
+                if (attrs.query_results) {
+                    detailBody.appendChild(kv('DNS Results', attrs.query_results, { mono: true }));
+                }
+            }
+
+            details.appendChild(detailBody);
+            cardChildren.push(details);
+        }
+
+        const card = el('div', { className: `timeline-card ${catMeta.cardClass}` }, cardChildren);
+        return el('div', { className: `timeline-item ${catMeta.itemClass}` }, [card]);
     });
 
-    container.replaceChildren(...items);
+    const listContainer = el('div', { className: 'timeline-list' }, items);
+    frag.push(listContainer);
+
+    container.replaceChildren(...frag);
 }
 
 // ==========================================
@@ -1026,7 +1264,14 @@ function initReconstruction() {
                 el('span', { className: 'prop-key', text: `Findings (${stage.finding_ids.length}): ` }),
             ]);
             stage.finding_ids.forEach(fid => {
-                fnRow.appendChild(el('span', { className: 'mono', text: `FINDING:${fid}`, style: 'margin-right: 6px; font-size: 11px; color: var(--re-critical);' }));
+                const fObj = state.findings.find(fn => String(fn.finding_id) === String(fid) || String(fn.id) === String(fid));
+                const targetEid = (fObj && fObj.event_ids && fObj.event_ids.length) ? fObj.event_ids[0] : (stage.evidence_ids && stage.evidence_ids[0]);
+                fnRow.appendChild(el('span', {
+                    className: 'mono clickable-id',
+                    text: `FINDING:${fid}`,
+                    style: 'margin-right: 6px; font-size: 11px; color: var(--re-critical); cursor: pointer;',
+                    onclick: () => { if (targetEid) inspectEvent(targetEid); }
+                }));
             });
             content.appendChild(fnRow);
         }
@@ -1044,37 +1289,102 @@ function initReconstruction() {
 // 11. Reports
 // ==========================================
 function initReports() {
-    const btn = document.getElementById('btn-gen-report');
-    if (!btn) return;
+    const btnText = document.getElementById('btn-gen-report');
+    const btnPdf = document.getElementById('btn-export-pdf');
+    const pdfFb = document.getElementById('pdf-report-feedback');
+    const resultDiv = document.getElementById('report-result');
+    const pathEl = document.getElementById('report-path');
+    const contentEl = document.getElementById('report-content');
 
-    btn.addEventListener('click', async () => {
-        if (!state.currentCaseId) return;
-        btn.textContent = 'Generating...';
-        btn.disabled = true;
+    if (btnPdf) {
+        btnPdf.addEventListener('click', async () => {
+            if (!state.currentCaseId) {
+                if (pdfFb) {
+                    pdfFb.className = 'alert alert-error';
+                    pdfFb.textContent = 'Please select an active case first.';
+                    pdfFb.classList.remove('hidden');
+                }
+                return;
+            }
 
-        const data = await api(`/report/${encodeURIComponent(state.currentCaseId)}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: '{}'
+            btnPdf.textContent = 'Generating PDF...';
+            btnPdf.disabled = true;
+            if (pdfFb) {
+                pdfFb.className = 'alert alert-info';
+                pdfFb.textContent = 'Compiling professional DFIR PDF report with case findings, timeline, and chain of custody...';
+                pdfFb.classList.remove('hidden');
+            }
+
+            try {
+                const response = await fetch(`/api/report/${encodeURIComponent(state.currentCaseId)}/pdf`);
+                if (!response.ok) {
+                    let errMsg = `Server returned HTTP ${response.status}`;
+                    try {
+                        const errJson = await response.json();
+                        if (errJson && errJson.message) errMsg = errJson.message;
+                    } catch (_) {}
+                    throw new Error(errMsg);
+                }
+
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const downloadLink = document.createElement('a');
+                const filename = `RansomEye_${state.currentCaseId}_Report.pdf`;
+                downloadLink.href = url;
+                downloadLink.download = filename;
+                document.body.appendChild(downloadLink);
+                downloadLink.click();
+                document.body.removeChild(downloadLink);
+                window.URL.revokeObjectURL(url);
+
+                if (pdfFb) {
+                    pdfFb.className = 'alert alert-success';
+                    pdfFb.replaceChildren(
+                        el('strong', { text: 'PDF Forensic Report Downloaded' }),
+                        el('br'),
+                        document.createTextNode(`File: ${filename} (${Math.round(blob.size / 1024)} KB). Embeds official RansomEye header logo on every page, complete 10-section DFIR findings, and cryptographic integrity ledger.`)
+                    );
+                    pdfFb.classList.remove('hidden');
+                }
+            } catch (err) {
+                if (pdfFb) {
+                    pdfFb.className = 'alert alert-error';
+                    pdfFb.textContent = `PDF generation failed: ${err.message || err}`;
+                    pdfFb.classList.remove('hidden');
+                }
+            } finally {
+                btnPdf.textContent = 'EXPORT AS PDF';
+                btnPdf.disabled = false;
+            }
         });
+    }
 
-        const resultDiv = document.getElementById('report-result');
-        const pathEl = document.getElementById('report-path');
-        const contentEl = document.getElementById('report-content');
+    if (btnText) {
+        btnText.addEventListener('click', async () => {
+            if (!state.currentCaseId) return;
+            btnText.textContent = 'Generating Text...';
+            btnText.disabled = true;
 
-        if (data && !data._error && data.content) {
-            resultDiv.classList.remove('hidden');
-            pathEl.textContent = data.path || 'Generated';
-            contentEl.value = data.content;
-        } else {
-            resultDiv.classList.remove('hidden');
-            pathEl.textContent = 'Report Generation Error';
-            contentEl.value = `Unable to generate report: ${(data && data.message) ? data.message : 'Server error'}`;
-        }
+            const data = await api(`/report/${encodeURIComponent(state.currentCaseId)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: '{}'
+            });
 
-        btn.textContent = 'GENERATE CASE REPORT';
-        btn.disabled = false;
-    });
+            if (data && !data._error && data.content) {
+                resultDiv.classList.remove('hidden');
+                pathEl.textContent = data.path || 'Generated';
+                contentEl.value = data.content;
+            } else {
+                resultDiv.classList.remove('hidden');
+                pathEl.textContent = 'Report Generation Error';
+                contentEl.value = `Unable to generate report: ${(data && data.message) ? data.message : 'Server error'}`;
+            }
+
+            btnText.textContent = 'GENERATE TEXT REPORT';
+            btnText.disabled = false;
+        });
+    }
 }
 
 // ==========================================
@@ -1146,7 +1456,7 @@ async function initCollection() {
     const refreshCollectStatus = async () => {
         const res = await api('/collect/status');
         if (res && !res._error) {
-            statusVal.textContent = res.status || 'READY';
+            statusVal.textContent = (typeof res.status === 'object' ? (res.status.pipeline_state || 'READY') : res.status) || 'READY';
             nameVal.textContent = res.collector || 'Windows Endpoint Collector';
             detailsVal.textContent = res.details || 'Awaiting live endpoint hook';
         }
@@ -1289,13 +1599,18 @@ async function initCustody() {
 
         const rows = res.entries.map(e => {
             const tr = el('tr');
+            const ts = e.timestamp || e.recorded_at;
+            const art = e.artifact || e.artifact_path;
+            const nts = e.notes || e.note;
+            const act = e.action || 'created';
+            const isHigh = act === 'COLLECTED' || act === 'created' || act === 'EXPORTED';
             const cells = [
-                el('td', { className: 'mono', text: e.timestamp ? e.timestamp.slice(0, 19) : '-', style: 'font-size: 11px;' }),
-                el('td', { className: 'mono' }, [el('strong', { text: e.artifact || '-' })]),
-                el('td', {}, [badge(e.action, e.action === 'COLLECTED' ? 'high' : 'low')]),
+                el('td', { className: 'mono', text: ts ? String(ts).slice(0, 19) : '-', style: 'font-size: 11px;' }),
+                el('td', { className: 'mono' }, [el('strong', { text: art || '-' })]),
+                el('td', {}, [badge(act, isHigh ? 'high' : 'low')]),
                 el('td', { text: e.analyst || '-' }),
                 el('td', { className: 'mono', text: e.sha256 ? e.sha256.slice(0, 16) + '...' : '-', style: 'font-size: 10px;' }),
-                el('td', { text: e.notes || '-', style: 'font-size: 12px;' }),
+                el('td', { text: nts || '-', style: 'font-size: 12px;' }),
             ];
             cells.forEach(td => tr.appendChild(td));
             return tr;
@@ -1380,10 +1695,13 @@ async function initExport() {
         btnUnlock.textContent = 'Releasing...';
         btnUnlock.disabled = true;
 
+        // The checkbox above ("confirm-unlock") is the operator's explicit authorization
+        // to force a lock removal, including breaking another process's active lock —
+        // the server no longer assumes this by default.
         const res = await api('/export/unlock', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ case_id: state.currentCaseId })
+            body: JSON.stringify({ case_id: state.currentCaseId, force: true, break_lock: true })
         });
 
         btnUnlock.textContent = 'Release Lock';
@@ -1520,10 +1838,23 @@ function initDatabase() {
         btnRestore.textContent = 'Restoring...';
         btnRestore.disabled = true;
 
+        // The restore target is no longer implicit server-side — resolve the live
+        // database path explicitly so the operator's confirmation (the checkbox above)
+        // corresponds to a known, named target rather than a silent default.
+        const dbInfo = await api('/database/check', { method: 'POST' });
+        if (!dbInfo || dbInfo._error || !dbInfo.database) {
+            btnRestore.textContent = 'Restore Database';
+            btnRestore.disabled = false;
+            resRestore.className = 'alert alert-error mt-md';
+            resRestore.textContent = 'Could not resolve the live database path; restore aborted.';
+            resRestore.classList.remove('hidden');
+            return;
+        }
+
         const res = await api('/database/restore', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ backup_path: src })
+            body: JSON.stringify({ backup_path: src, target_path: dbInfo.database, confirm: true })
         });
 
         btnRestore.textContent = 'Restore Database';
@@ -1990,6 +2321,11 @@ function renderPhishingResult(container, a) {
 }
 
 function initPhishing() {
+    const tabFile = document.getElementById('phishing-tab-file');
+    const tabPaste = document.getElementById('phishing-tab-paste');
+    const paneFile = document.getElementById('phishing-pane-file');
+    const panePaste = document.getElementById('phishing-pane-paste');
+    const filePathInp = document.getElementById('phishing-file-path');
     const subjInp = document.getElementById('phishing-subject');
     const sendInp = document.getElementById('phishing-sender');
     const bodyInp = document.getElementById('phishing-body');
@@ -1999,22 +2335,51 @@ function initPhishing() {
     const fbPhish = document.getElementById('phishing-feedback');
     const resBox = document.getElementById('phishing-results');
 
+    let mode = 'file';
+
     populateCaseSelector(caseSel, { required: true, statusEl: caseStatus });
 
+    function selectMode(next) {
+        mode = next;
+        if (tabFile) tabFile.classList.toggle('active', next === 'file');
+        if (tabPaste) tabPaste.classList.toggle('active', next === 'paste');
+        if (paneFile) paneFile.classList.toggle('active', next === 'file');
+        if (panePaste) panePaste.classList.toggle('active', next === 'paste');
+    }
+    if (tabFile) tabFile.addEventListener('click', () => selectMode('file'));
+    if (tabPaste) tabPaste.addEventListener('click', () => selectMode('paste'));
+
     btnRun.addEventListener('click', async () => {
-        const bodyText = bodyInp.value.trim();
+        fbPhish.classList.add('hidden');
         const cid = (caseSel.value || '').trim();
-        if (!bodyText) {
-            fbPhish.className = 'alert alert-error mt-md';
-            fbPhish.textContent = 'Message body or headers content is required.';
-            fbPhish.classList.remove('hidden');
-            return;
-        }
         if (!cid) {
             fbPhish.className = 'alert alert-error mt-md';
             fbPhish.textContent = 'Select a case before running analysis.';
             fbPhish.classList.remove('hidden');
             return;
+        }
+
+        const payload = { case_id: cid };
+        if (mode === 'file') {
+            const fpath = filePathInp ? filePathInp.value.trim() : '';
+            if (!fpath) {
+                fbPhish.className = 'alert alert-error mt-md';
+                fbPhish.textContent = 'Email artifact file path is required.';
+                fbPhish.classList.remove('hidden');
+                return;
+            }
+            payload.file_path = fpath;
+        } else {
+            const bodyText = bodyInp ? bodyInp.value.trim() : '';
+            if (!bodyText) {
+                fbPhish.className = 'alert alert-error mt-md';
+                fbPhish.textContent = 'Message body or headers content is required.';
+                fbPhish.classList.remove('hidden');
+                return;
+            }
+            payload.body = bodyText;
+            if (subjInp && subjInp.value.trim()) payload.subject = subjInp.value.trim();
+            if (sendInp && sendInp.value.trim()) payload.sender = sendInp.value.trim();
         }
 
         btnRun.textContent = 'Analyzing...';
@@ -2023,12 +2388,7 @@ function initPhishing() {
         const res = await api('/phishing/analyze', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                subject: subjInp.value.trim(),
-                sender: sendInp.value.trim(),
-                body: bodyText,
-                case_id: cid
-            })
+            body: JSON.stringify(payload)
         });
 
         btnRun.textContent = 'Analyze Message';
@@ -2077,8 +2437,17 @@ async function inspectIncident(incId) {
         style: 'margin-bottom: 12px; font-size: 11px; text-transform: uppercase; color: var(--re-text-muted);' }));
     const findingList = el('div', { className: 'prop-list' });
     findingIds.forEach(f => {
-        findingList.appendChild(el('div', { className: 'prop-val mono', text: `FINDING:${f}`,
-            style: 'color: var(--re-critical); border-left: 3px solid var(--re-critical);' }));
+        const fObj = state.findings.find(fn => String(fn.finding_id) === String(f) || String(fn.id) === String(f));
+        const evIds = fObj ? (fObj.event_ids || []) : [];
+        const item = el('div', {
+            className: 'prop-val mono' + (evIds.length > 0 ? ' clickable-id' : ''),
+            text: `FINDING:${f}` + (fObj ? ` — ${fObj.finding_type || fObj.type || ''}` : ''),
+            style: 'color: var(--re-critical); border-left: 3px solid var(--re-critical);' + (evIds.length > 0 ? ' cursor: pointer;' : ''),
+            onclick: () => {
+                if (evIds.length > 0) inspectEvent(evIds[0]);
+            }
+        });
+        findingList.appendChild(item);
     });
     if (findingIds.length === 0) findingList.appendChild(el('div', { className: 'prop-val', text: 'No findings associated.', style: 'color: var(--re-text-muted);' }));
     content.appendChild(findingList);

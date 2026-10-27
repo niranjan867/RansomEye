@@ -345,15 +345,24 @@
     <!-- 9. Reports -->
     <template id="tpl-reports">
         <div class="view-header">
-            <h2 class="view-title">Case Report Generation</h2>
-            <p class="view-subtitle">Generate a comprehensive text report of the attack sequence and evidence.</p>
+            <h2 class="view-title">Case Forensic Reports</h2>
+            <p class="view-subtitle">Generate comprehensive digital forensics & incident response (DFIR) reports in publication-ready PDF or text formats.</p>
         </div>
         <div class="panel">
             <div class="panel-body" style="text-align: center; padding: 48px 24px;">
-                <button class="btn btn-primary" id="btn-gen-report"
-                    style="font-size: 16px; padding: 12px 32px;">GENERATE CASE REPORT</button>
+                <div style="display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; margin-bottom: 24px;">
+                    <button class="btn btn-primary" id="btn-export-pdf"
+                        style="font-size: 15px; padding: 12px 28px; background: var(--re-cyan-bright); color: #030712; font-weight: 700;">
+                        EXPORT AS PDF
+                    </button>
+                    <button class="btn btn-secondary" id="btn-gen-report"
+                        style="font-size: 15px; padding: 12px 28px;">
+                        GENERATE TEXT REPORT
+                    </button>
+                </div>
+                <div id="pdf-report-feedback" class="mt-md hidden" style="max-width: 600px; margin-left: auto; margin-right: auto; text-align: left;"></div>
                 <div id="report-result" class="mt-xl hidden" style="text-align: left;">
-                    <p style="margin-bottom: 12px; font-weight: 600;">Report Generated: <span id="report-path"
+                    <p style="margin-bottom: 12px; font-weight: 600;">Text Report Generated: <span id="report-path"
                             class="mono text-cyan"></span></p>
                     <textarea id="report-content" class="code-block" rows="20" readonly></textarea>
                 </div>
@@ -367,10 +376,10 @@
             <h2 class="view-title">Case Management</h2>
             <p class="view-subtitle">Create, list, inspect, and update investigation cases.</p>
         </div>
-        <div class="sub-toolbar">
-            <div style="display: flex; gap: var(--spacing-md); flex: 1;">
-                <input type="text" id="cases-search" class="input" placeholder="Search cases by ID, name, host..." style="max-width: 320px;">
-                <select id="cases-filter-status" class="input" style="max-width: 180px;">
+        <div class="sub-toolbar" style="display: flex; justify-content: space-between; align-items: center; gap: var(--spacing-md); flex-wrap: wrap; margin-bottom: var(--spacing-lg);">
+            <div style="display: flex; gap: var(--spacing-md); flex: 1; flex-wrap: wrap; min-width: 0;">
+                <input type="text" id="cases-search" class="input" placeholder="Search cases by ID, name, host..." style="max-width: 320px; min-width: 200px;">
+                <select id="cases-filter-status" class="input" style="max-width: 180px; min-width: 140px;">
                     <option value="">All Statuses</option>
                     <option value="OPEN">OPEN</option>
                     <option value="IN_PROGRESS">IN_PROGRESS</option>
@@ -381,7 +390,7 @@
             <button class="btn btn-primary" id="btn-create-case-modal">+ New Case</button>
         </div>
         <div class="panel">
-            <div class="panel-body no-padding">
+            <div class="panel-body no-padding table-responsive">
                 <table class="data-table">
                     <thead>
                         <tr>
@@ -394,7 +403,7 @@
                             <th>Events</th>
                             <th>Findings</th>
                             <th>Incidents</th>
-                            <th>Actions</th>
+                            <th style="min-width: 180px;">Actions</th>
                         </tr>
                     </thead>
                     <tbody id="cases-tbody">
@@ -568,7 +577,7 @@
             <h2 class="view-title">Chain of Custody</h2>
             <p class="view-subtitle">Append-only cryptographic chain of custody records for case artifacts.</p>
         </div>
-        <div style="display: grid; grid-template-columns: 1fr 2fr; gap: var(--spacing-xl);">
+        <div class="custody-grid">
             <div class="panel">
                 <div class="panel-header">
                     <span class="panel-title">Record Custody Entry</span>
@@ -604,7 +613,7 @@
                 <div class="panel-header">
                     <span class="panel-title">Custody Ledger</span>
                 </div>
-                <div class="panel-body no-padding">
+                <div class="panel-body no-padding table-responsive">
                     <table class="data-table">
                         <thead>
                             <tr>
@@ -872,17 +881,29 @@
                         <select id="phishing-case" class="form-control" data-case-selector="required"></select>
                         <div id="phishing-case-status" class="mt-sm" style="font-size: 12px; color: var(--re-text-muted);"></div>
                     </div>
-                    <div class="form-group">
-                        <label class="form-label">Subject (Optional)</label>
-                        <input type="text" id="phishing-subject" class="form-control" placeholder="e.g. Urgent: Account Verification Required">
+                    <div class="tabs">
+                        <div class="tab active" id="phishing-tab-file" role="button" tabindex="0">Email File (.eml)</div>
+                        <div class="tab" id="phishing-tab-paste" role="button" tabindex="0">Paste Text / Headers</div>
                     </div>
-                    <div class="form-group">
-                        <label class="form-label">Sender / From (Optional)</label>
-                        <input type="text" id="phishing-sender" class="form-control" placeholder="e.g. security-team@fake-domain.com">
+                    <div class="tab-content active" id="phishing-pane-file">
+                        <div class="form-group">
+                            <label class="form-label">Email artifact file path (.eml)</label>
+                            <input type="text" id="phishing-file-path" class="form-control mono" placeholder="e.g. samples/prepared_case/suspicious_notice.eml">
+                        </div>
                     </div>
-                    <div class="form-group">
-                        <label class="form-label">Message Body / Headers</label>
-                        <textarea id="phishing-body" class="form-control" rows="8" placeholder="Paste email content, raw headers, or suspicious text here..."></textarea>
+                    <div class="tab-content" id="phishing-pane-paste">
+                        <div class="form-group">
+                            <label class="form-label">Subject (Optional)</label>
+                            <input type="text" id="phishing-subject" class="form-control" placeholder="e.g. Urgent: Account Verification Required">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Sender / From (Optional)</label>
+                            <input type="text" id="phishing-sender" class="form-control" placeholder="e.g. security-team@fake-domain.com">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Message Body / Headers</label>
+                            <textarea id="phishing-body" class="form-control" rows="7" placeholder="Paste email content, raw headers, or suspicious text here..."></textarea>
+                        </div>
                     </div>
                     <button class="btn btn-primary" id="btn-run-phishing">Analyze Message</button>
                     <div id="phishing-feedback" class="mt-md hidden"></div>

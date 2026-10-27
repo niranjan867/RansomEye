@@ -8,6 +8,22 @@ version = "0.1.0"
 description = "RansomEye case evidence and lifecycle management CLI"
 readme = "README.md"
 requires-python = ">=3.13"
+dependencies = [
+    "reportlab>=4.0.0",
+    "pillow>=9.0.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pypdf>=4.0.0",
+]
+collectors = [
+    "watchdog>=4.0.0",
+]
+full = [
+    "ransomeye[collectors,test]",
+]
 
 [project.scripts]
 ransomeye = "ransomeye.commands:main"

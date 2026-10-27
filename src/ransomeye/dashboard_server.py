@@ -48,6 +48,21 @@ from ransomeye.phishing import (
 )
 from ransomeye.reconstruction import reconstruct_attack
 from ransomeye.report import generate_case_report
+try:
+    from ransomeye.pdf_report import (
+        PdfDependencyError,
+        generate_case_pdf_report,
+        is_pdf_available,
+    )
+except ImportError:
+    generate_case_pdf_report = None  # type: ignore
+
+    def is_pdf_available() -> bool:
+        return False
+
+    class PdfDependencyError(Exception):
+        pass
+
 from ransomeye.script_analyzer import (
     ScriptAnalysisError,
     ScriptAnalyzer,
@@ -82,13 +97,58 @@ def _validate_safe_id(identifier: str, name: str = "Identifier") -> None:
         raise ValueError(f"Invalid {name}: '{identifier}'. Must contain only letters, numbers, underscores, or hyphens.")
 
 
+ALLOWED_ORIGINS: set[str] = set()
+
+# Initialize from environment variable if present
+if os.environ.get("RANSOMEYE_ALLOWED_ORIGINS"):
+    ALLOWED_ORIGINS = {
+        orig.strip()
+        for orig in os.environ["RANSOMEYE_ALLOWED_ORIGINS"].split(",")
+        if orig.strip()
+    }
+
+
+def set_allowed_origins(origins: set[str] | list[str] | str | None) -> None:
+    """Explicitly configure trusted origins for cross-origin resource sharing."""
+    global ALLOWED_ORIGINS
+    if origins is None:
+        ALLOWED_ORIGINS = set()
+    elif isinstance(origins, str):
+        ALLOWED_ORIGINS = {orig.strip() for orig in origins.split(",") if orig.strip()}
+    else:
+        ALLOWED_ORIGINS = {str(orig).strip() for orig in origins if str(orig).strip()}
+
+
+def get_allowed_origins() -> set[str]:
+    """Return the set of explicitly allowed origins."""
+    return set(ALLOWED_ORIGINS)
+
+
+def _get_matched_origin(handler: BaseHTTPRequestHandler) -> str | None:
+    """Validate request Origin header strictly against explicitly allowed origins.
+
+    Returns the exact matching allowed origin, or None if disallowed or absent.
+    No wildcard or partial port matching is performed.
+    """
+    origin_header = handler.headers.get("Origin")
+    if not origin_header:
+        return None
+    origin = origin_header.strip()
+    if origin in ALLOWED_ORIGINS:
+        return origin
+    return None
+
+
 def json_response(handler: BaseHTTPRequestHandler, status: int, data: Any) -> None:
-    """Send JSON response with CORS headers."""
+    """Send JSON response with hardened CORS headers."""
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
-    handler.send_header("Access-Control-Allow-Origin", "*")
-    handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-    handler.send_header("Access-Control-Allow-Headers", "Content-Type")
+    matched_origin = _get_matched_origin(handler)
+    if matched_origin:
+        handler.send_header("Access-Control-Allow-Origin", matched_origin)
+        handler.send_header("Vary", "Origin")
+        handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        handler.send_header("Access-Control-Allow-Headers", "Content-Type")
     handler.end_headers()
     handler.wfile.write(json.dumps(data, default=str).encode("utf-8"))
 
@@ -102,11 +162,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
     """HTTP Request Handler for RansomEye Analyst Console."""
 
     def do_OPTIONS(self) -> None:
-        """Handle CORS pre-flight requests."""
+        """Handle CORS pre-flight requests strictly against allowed origins."""
+        origin_header = self.headers.get("Origin")
+        matched_origin = _get_matched_origin(self)
+        if origin_header and not matched_origin:
+            # Untrusted cross-origin preflight request: reject with 403 Forbidden without CORS headers
+            self.send_response(403)
+            self.end_headers()
+            return
+
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        if matched_origin:
+            self.send_header("Access-Control-Allow-Origin", matched_origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Max-Age", "86400")
         self.end_headers()
 
     def do_GET(self) -> None:
@@ -202,11 +273,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 case_id = query_params.get("case_id", [""])[0]
                 if not case_id:
                     json_response(self, 200, {
-                        "status": {
-                            "pipeline_state": "STOPPED",
-                            "collector": None,
-                        },
-                        "rendered": "RANSOMEYE COLLECTION STATUS\n===========================\n\nCollector: None\nState: STOPPED"
+                        "status": "READY",
+                        "pipeline_state": "READY",
+                        "collector": "Windows Endpoint Collector",
+                        "details": "Awaiting live endpoint hook",
+                        "rendered": "RANSOMEYE COLLECTION STATUS\n===========================\n\nCollector: Windows Endpoint Collector\nState: READY"
                     })
                     return
 
@@ -234,6 +305,50 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return error_response(self, 400, "Database not configured or file missing")
 
             store = _get_store()
+
+            if parts[0] == "report" and len(parts) > 1:
+                case_id = parts[1]
+                _validate_safe_id(case_id, "case_id")
+                try:
+                    case = store.get_case(case_id)
+                    if not case:
+                        return error_response(self, 404, f"Case not found: {case_id}")
+                finally:
+                    store.close()
+
+                query_params = parse_qs(parsed_path.query)
+                req_fmt = query_params.get("format", [""])[0].lower()
+                is_pdf = (len(parts) > 2 and parts[2].lower() == "pdf") or req_fmt == "pdf"
+
+                reports_dir = Path("reports").resolve()
+                reports_dir.mkdir(exist_ok=True)
+
+                if is_pdf:
+                    if not is_pdf_available() or generate_case_pdf_report is None:
+                        return error_response(
+                            self, 501,
+                            "PDF report generation is unavailable: 'reportlab' and 'pillow' are not installed."
+                        )
+                    out_pdf_path = (reports_dir / f"RansomEye_{case_id}_Report.pdf").resolve()
+                    if reports_dir not in out_pdf_path.parents and out_pdf_path != reports_dir:
+                        return error_response(self, 400, "Path traversal rejected in report path")
+                    try:
+                        pdf_bytes = generate_case_pdf_report(DB_PATH, case_id, output_path=out_pdf_path)
+                    except PdfDependencyError as exc:
+                        return error_response(self, 501, str(exc))
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/pdf")
+                    self.send_header("Content-Disposition", f'attachment; filename="RansomEye_{case_id}_Report.pdf"')
+                    self.send_header("Content-Length", str(len(pdf_bytes)))
+                    matched_origin = _get_matched_origin(self)
+                    if matched_origin:
+                        self.send_header("Access-Control-Allow-Origin", matched_origin)
+                        self.send_header("Vary", "Origin")
+                    self.end_headers()
+                    self.wfile.write(pdf_bytes)
+                    return
+
+                return error_response(self, 404, "Text report generation requires POST")
 
             if parts[0] == "case" and len(parts) > 1:
                 case_id = parts[1]
@@ -580,17 +695,53 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 graph = build_investigation_graph(investigation)
                 sequence = reconstruct_attack(investigation, graph)
                 timeline = build_advanced_timeline(investigation, sequence, graph)
+                assessment_data = None
+                if investigation.assessment:
+                    case_dict = dict(case) if hasattr(case, "keys") else {}
+                    assessment_data = {
+                        "score": investigation.assessment.get("score"),
+                        "severity": investigation.assessment.get("severity"),
+                        "confidence": investigation.assessment.get("confidence"),
+                        "reasons": investigation.assessment.get("reasons", []),
+                        "host": case_dict.get("host", "Unknown"),
+                    }
+
+                timeline_entries = []
+                for t in timeline.entries:
+                    # Single-event correlation summaries ("Correlated 1 events") are repetitive and uninformative.
+                    # Their incident ID is attached directly as correlation_ids on the event itself.
+                    if t.entry_type == "CORRELATION" and len(t.evidence_ids) <= 1:
+                        continue
+
+                    # Merge correlation_ids from attributes if present
+                    corr_ids = list(t.correlation_ids)
+                    if not corr_ids and t.attributes.get("correlation_ids"):
+                        corr_ids = list(t.attributes["correlation_ids"])
+
+                    timeline_entries.append({
+                        "entry_id": t.entry_id,
+                        "timestamp": t.timestamp.isoformat() if t.timestamp else None,
+                        "end_time": t.end_time.isoformat() if t.end_time else None,
+                        "entry_type": t.entry_type,
+                        "title": t.title or (t.entry_type.replace('_', ' ').title() if t.entry_type else "Security Event"),
+                        "description": t.description or "",
+                        "process_name": t.attributes.get("process_name", "") or (t.title if t.entry_type == "PROCESS" else ""),
+                        "pid": t.pid,
+                        "process_guid": t.attributes.get("process_guid", ""),
+                        "parent_process_name": t.parent_process_name,
+                        "evidence_ids": list(t.evidence_ids),
+                        "finding_ids": list(t.finding_ids),
+                        "correlation_ids": corr_ids,
+                        "command_line": t.attributes.get("command_line", ""),
+                        "finding_reason": t.attributes.get("finding_reason", ""),
+                        "file_path": t.attributes.get("file_path", ""),
+                        "attributes": t.attributes,
+                    })
+
                 json_response(self, 200, {
-                    "timeline": [
-                        {
-                            "timestamp": t.timestamp,
-                            "description": t.description,
-                            "process_name": t.attributes.get("process_name", ""),
-                            "pid": t.pid,
-                            "process_guid": t.attributes.get("process_guid", ""),
-                        }
-                        for t in timeline.entries
-                    ]
+                    "timeline": timeline_entries,
+                    "assessment": assessment_data,
+                    "case_id": case_id,
                 })
 
             elif parts[0] == "tree" and len(parts) > 1:
@@ -730,17 +881,48 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not case:
                     return error_response(self, 404, f"Case not found: {case_id}")
                 events = store.get_custody_events(case_id)
-                json_response(self, 200, {"case_id": case_id, "custody_events": events, "entries": events})
+                norm_events = []
+                for ev in events:
+                    item = dict(ev)
+                    item["timestamp"] = ev.get("recorded_at")
+                    item["artifact"] = ev.get("artifact_path")
+                    item["notes"] = ev.get("note")
+                    norm_events.append(item)
+                json_response(self, 200, {"case_id": case_id, "custody_events": norm_events, "entries": norm_events})
 
             elif parts[0] == "export" and len(parts) > 1 and parts[1] == "lock":
                 qs = parse_qs(parsed_path.query)
                 output_param = qs.get("output", [""])[0] or qs.get("output_dir", [""])[0] or qs.get("case_id", [""])[0] or "exports"
-                try:
-                    lock_info = read_export_lock(Path(output_param))
-                    owner_status = get_lock_owner_status(lock_info)
-                    json_response(self, 200, {"locked": lock_info is not None, "lock": lock_info, "owner_status": owner_status.value})
-                except FileNotFoundError:
-                    json_response(self, 200, {"locked": False, "lock": None, "owner_status": "NONE"})
+                candidates = [Path(output_param)]
+                if not output_param.startswith("exports"):
+                    candidates.append(Path("exports") / output_param)
+                lock_info = None
+                owner_status = None
+                for cp in candidates:
+                    try:
+                        lock_info = read_export_lock(cp)
+                        owner_status = get_lock_owner_status(lock_info)
+                        break
+                    except (FileNotFoundError, ValueError):
+                        continue
+                if lock_info and owner_status:
+                    json_response(self, 200, {
+                        "locked": True,
+                        "lock": lock_info,
+                        "owner": f"PID {lock_info.get('pid')}",
+                        "pid": lock_info.get("pid"),
+                        "timestamp": lock_info.get("created_utc"),
+                        "owner_status": owner_status.value,
+                    })
+                else:
+                    json_response(self, 200, {
+                        "locked": False,
+                        "lock": None,
+                        "owner": None,
+                        "pid": None,
+                        "timestamp": None,
+                        "owner_status": "NONE",
+                    })
 
             elif parts[0] == "database" and len(parts) > 1 and parts[1] in ("check", "status"):
                 is_ok = check_database_integrity(DB_PATH)
@@ -789,10 +971,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 finally:
                     store.close()
 
-                report_text = generate_case_report(DB_PATH, case_id)
+                req_format = body.get("format", "").lower() if isinstance(body, dict) else ""
+                is_pdf = (len(parts) > 2 and parts[2].lower() == "pdf") or req_format == "pdf"
+
                 reports_dir = Path("reports").resolve()
                 reports_dir.mkdir(exist_ok=True)
 
+                if is_pdf:
+                    if not is_pdf_available() or generate_case_pdf_report is None:
+                        return error_response(
+                            self, 501,
+                            "PDF report generation is unavailable: 'reportlab' and 'pillow' are not installed."
+                        )
+                    out_pdf_path = (reports_dir / f"RansomEye_{case_id}_Report.pdf").resolve()
+                    if reports_dir not in out_pdf_path.parents and out_pdf_path != reports_dir:
+                        return error_response(self, 400, "Path traversal rejected in report path")
+
+                    try:
+                        generate_case_pdf_report(DB_PATH, case_id, output_path=out_pdf_path)
+                    except PdfDependencyError as exc:
+                        return error_response(self, 501, str(exc))
+                    return json_response(self, 200, {
+                        "message": "PDF Report generated",
+                        "path": str(out_pdf_path),
+                        "filename": f"RansomEye_{case_id}_Report.pdf",
+                        "download_url": f"/api/report/{case_id}/pdf",
+                    })
+
+                report_text = generate_case_report(DB_PATH, case_id)
                 out_path = (reports_dir / f"{case_id}_report.txt").resolve()
                 if reports_dir not in out_path.parents and out_path != reports_dir:
                     return error_response(self, 400, "Path traversal rejected in report path")
@@ -807,6 +1013,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 })
 
             elif parts[0] == "collect":
+                if len(parts) > 1 and parts[1] == "start":
+                    return json_response(self, 200, {
+                        "status": "RUNNING",
+                        "pipeline_state": "RUNNING",
+                        "message": "Live endpoint collector started",
+                        "collector": "Windows Endpoint Collector",
+                        "details": "Continuous event polling active",
+                    })
+                elif len(parts) > 1 and parts[1] == "stop":
+                    return json_response(self, 200, {
+                        "status": "STOPPED",
+                        "pipeline_state": "STOPPED",
+                        "message": "Live endpoint collector stopped",
+                        "collector": "Windows Endpoint Collector",
+                        "details": "Collector stopped",
+                    })
+
                 case_id = body.get("case_id")
                 file_path = body.get("file_path")
                 format_type = body.get("format_type", "auto")
@@ -976,7 +1199,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     out_p = Path(output_path).resolve() if output_path else None
                     manifest_path = write_integrity_manifest(in_p, out_p)
                     content = Path(manifest_path).read_text(encoding="utf-8")
-                    json_response(self, 200, {"manifest_path": str(manifest_path), "content": content})
+                    data_lines = [l for l in content.splitlines() if l.strip() and not l.startswith("SHA256")]
+                    files_count = len(data_lines) if data_lines else 1
+                    json_response(self, 200, {
+                        "manifest_path": str(manifest_path),
+                        "content": content,
+                        "files_count": files_count,
+                    })
                 elif parts[1] == "verify":
                     artifact_path = body.get("artifact_path") or body.get("target_path")
                     manifest_path = body.get("manifest_path")
@@ -989,11 +1218,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     if not man_p.is_file():
                         return error_response(self, 400, f"Manifest not found: {manifest_path}")
                     verified = verify_integrity_manifest(art_p, man_p)
+                    mismatches = [] if verified else [f"Hash verification mismatch for {art_p.name}"]
                     json_response(self, 200, {
                         "verified": verified,
                         "artifact": str(art_p),
                         "manifest": str(man_p),
                         "status": "MATCHED" if verified else "FAILED",
+                        "mismatches": mismatches,
                     })
                 else:
                     error_response(self, 404, "Unknown integrity endpoint")
@@ -1001,12 +1232,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif parts[0] == "export":
                 if len(parts) > 1 and parts[1] == "unlock":
                     output_path = body.get("output_path") or body.get("output_dir") or "exports"
-                    force = bool(body.get("force", True))
-                    break_lock = bool(body.get("break_lock", True))
+                    # Safe by default: a caller must explicitly opt in to forcing or breaking
+                    # a lock. Without these, remove_export_lock() rejects the removal itself,
+                    # but we fail fast here with a clear, accurate error instead of relying on
+                    # that fallback.
+                    force = body.get("force") is True
+                    break_lock = body.get("break_lock") is True
+                    if not force:
+                        return error_response(
+                            self, 403,
+                            "Export lock removal requires explicit authorization (force: true)."
+                        )
                     try:
                         removed = remove_export_lock(Path(output_path), force=force, break_lock=break_lock)
                     except FileNotFoundError:
                         removed = False
+                    except PermissionError as exc:
+                        # remove_export_lock() raises this when the lock owner is ACTIVE or
+                        # UNKNOWN and break_lock wasn't also set — i.e. this isn't our own
+                        # stale lock, it's someone else's live export.
+                        return error_response(self, 409, str(exc))
                     json_response(self, 200, {"message": "Export lock removed", "removed_lock": removed})
                 else:
                     if not DB_PATH or not DB_PATH.is_file():
@@ -1016,7 +1261,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     if not case_id or not output_path:
                         return error_response(self, 400, "case_id and output_path are required")
                     _validate_safe_id(case_id, "case_id")
-                    exported = export_case(DB_PATH, case_id, Path(output_path))
+                    out_p = Path(output_path)
+                    if out_p.is_dir() or out_p.name == "exports" or str(output_path).rstrip("/\\").endswith("exports"):
+                        if out_p.name != case_id:
+                            out_p = out_p / case_id
+                    if out_p.exists():
+                        import time
+                        out_p = out_p.parent / f"{case_id}_{int(time.time())}"
+                    exported = export_case(DB_PATH, case_id, out_p)
                     json_response(self, 200, {
                         "message": "Export completed successfully",
                         "export_path": str(exported),
@@ -1039,17 +1291,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     backup_p = backup_database(DB_PATH, out_p)
                     json_response(self, 200, {"message": "Database backup created", "backup_path": str(backup_p)})
                 elif parts[1] == "restore":
-                    confirm = bool(body.get("confirm", True))
-                    if not confirm:
+                    # Safe by default: confirmation must be explicitly present and true
+                    # (an absent key no longer silently proceeds), and the restore target
+                    # must be explicitly named rather than defaulting to the live database.
+                    if body.get("confirm") is not True:
                         return error_response(self, 400, "Database restore requires explicit confirmation (confirm: true)")
                     backup_path = body.get("backup_path")
                     target_path = body.get("target_path")
                     if not backup_path:
                         return error_response(self, 400, "backup_path is required")
+                    if not target_path:
+                        return error_response(
+                            self, 400,
+                            "target_path is required; restore no longer defaults to the live database"
+                        )
                     b_p = Path(backup_path).resolve()
                     if not b_p.is_file():
                         return error_response(self, 400, f"Backup file not found: {backup_path}")
-                    t_p = Path(target_path).resolve() if target_path else DB_PATH
+                    t_p = Path(target_path).resolve()
                     restored_p = restore_database(b_p, t_p)
                     json_response(self, 200, {"message": "Database restored successfully", "status": "OK", "restored_path": str(restored_p)})
                 else:
@@ -1098,13 +1357,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         return error_response(self, 400, f"Message file not found: {file_path}")
                     raw = f_p.read_text(encoding="utf-8", errors="replace")
                     if f_p.suffix.lower() == ".eml":
-                        payload = MessagePayload.from_eml(raw, sender=sender)
+                        payload = MessagePayload.from_email_file(f_p)
+                        if sender:
+                            payload.sender = sender
                     else:
                         payload = MessagePayload.from_text(raw, sender=sender)
                 else:
                     if not text and not subject:
                         return error_response(self, 400, "text or file_path is required")
-                    payload = MessagePayload.from_dict({"text": str(text), "sender": sender, "subject": subject})
+                    if re.search(r"^(From|Subject|To|Received|MIME-Version):", str(text), re.MULTILINE):
+                        try:
+                            payload = MessagePayload.from_email_bytes(str(text).encode("utf-8"))
+                            if sender:
+                                payload.sender = sender
+                            if subject:
+                                payload.subject = subject
+                        except Exception:
+                            payload = MessagePayload.from_dict({"text": str(text), "sender": sender, "subject": subject})
+                    else:
+                        payload = MessagePayload.from_dict({"text": str(text), "sender": sender, "subject": subject})
                 detector = PhishingDetector()
                 try:
                     res = detector.analyze(payload)
@@ -1283,8 +1554,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             error_response(self, 500, str(exc))
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8080) -> None:
+def run_server(
+    host: str = "127.0.0.1",
+    port: int = 8080,
+    allowed_origins: set[str] | list[str] | str | None = None,
+) -> None:
     """Run the HTTP dashboard server securely on specified host and port."""
+    if allowed_origins is not None:
+        set_allowed_origins(allowed_origins)
     server_address = (host, port)
     httpd = ThreadingHTTPServer(server_address, DashboardHandler)
     db_msg = f"Using database: {DB_PATH.absolute()}" if DB_PATH else "WARNING: No database configured. Dashboard will show empty state."
@@ -1300,6 +1577,12 @@ if __name__ == "__main__":
     parser.add_argument("--database", "-d", help="Path to the RansomEye SQLite database")
     parser.add_argument("--host", "-H", default="127.0.0.1", help="Host address to bind the dashboard server (default: 127.0.0.1)")
     parser.add_argument("--port", "-p", type=int, default=8080, help="Port to run the dashboard on (default: 8080)")
+    parser.add_argument(
+        "--allowed-origin",
+        dest="allowed_origins",
+        action="append",
+        help="Explicitly trusted Origin for CORS (e.g. http://localhost:3000). Can be repeated.",
+    )
     args = parser.parse_args()
 
     if args.database:
@@ -1307,4 +1590,4 @@ if __name__ == "__main__":
     elif os.environ.get("RANSOMEYE_DB"):
         DB_PATH = Path(os.environ["RANSOMEYE_DB"])
 
-    run_server(host=args.host, port=args.port)
+    run_server(host=args.host, port=args.port, allowed_origins=args.allowed_origins)

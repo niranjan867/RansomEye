@@ -19,6 +19,12 @@ datas = [
     (str(project_root / "THIRD_PARTY_NOTICES.md"), "."),
 ]
 
+# Collect ReportLab font and resource data if available
+try:
+    datas.extend(collect_data_files("reportlab"))
+except Exception:
+    pass
+
 hiddenimports = [
     "ransomeye",
     "ransomeye.behavior",
@@ -40,6 +46,10 @@ hiddenimports = [
     "ransomeye.sysmon_reader",
     "ransomeye.static_analyzer",
     "ransomeye.script_analyzer",
+    "ransomeye.pcap_analyzer",
+    "ransomeye.ioc_extractor",
+    "ransomeye.pdf_report",
+    "ransomeye.prepared_case",
     "ransomeye.entropy",
     "ransomeye.dashboard_server",
     "ransomeye.collection",
@@ -50,6 +60,17 @@ hiddenimports = [
     "ransomeye.collectors.live_network",
     "ransomeye.collectors.canary_collector",
     "ransomeye.phishing",
+    "reportlab",
+    "reportlab.platypus",
+    "reportlab.lib",
+    "reportlab.lib.colors",
+    "reportlab.lib.pagesizes",
+    "reportlab.lib.styles",
+    "reportlab.lib.units",
+    "reportlab.pdfgen",
+    "reportlab.pdfgen.canvas",
+    "PIL",
+    "PIL.Image",
 ]
 
 a = Analysis(

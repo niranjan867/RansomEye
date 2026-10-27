@@ -1031,6 +1031,10 @@ def ingest_pcap_finding(
             f"indicators={len(result.indicators)}"
         ),
     )
+
+    from ransomeye.threat_assessment import assess_case
+    assess_case(store, case_id)
+
     return created
 
 

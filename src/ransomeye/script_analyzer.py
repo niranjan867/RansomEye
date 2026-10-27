@@ -1265,4 +1265,8 @@ def ingest_script_finding(
             event_ids=[target_event_id],
         )
         created.append(finding_id)
+
+    from ransomeye.threat_assessment import assess_case
+    assess_case(store, case_id)
+
     return created

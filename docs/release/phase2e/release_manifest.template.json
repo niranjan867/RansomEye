@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "product": {
+    "name": "RansomEye",
+    "tagline": "From ransomware signal to forensic proof.",
+    "version": "0.1.0-rc1",
+    "architecture": "x86-64",
+    "os_target": "Windows 10 / Windows 11 (64-bit)"
+  },
+  "provenance": {
+    "source_repository": "https://github.com/niranjan867/RansomEye",
+    "git_branch": "integration/12x-capabilities",
+    "git_commit": "da617241d4e8a597b556869e5bf59575955935af",
+    "git_dirty": false,
+    "build_timestamp_utc": "2026-10-26T11:27:44Z",
+    "build_host_os": "Windows 11 (10.0.26300)"
+  },
+  "toolchain": {
+    "python_version": "3.13.15 (tags/v3.13.15:c2b186b, Oct 2026, MSC v.1944 64 bit (AMD64))",
+    "pyinstaller_version": "6.22.3",
+    "pyinstaller_hooks_contrib": "2026.9",
+    "setuptools_version": "84.2.1",
+    "build_spec": "scripts/ransomeye.spec"
+  },
+  "bundled_dependencies": [
+    { "package": "reportlab", "version": "5.0.1", "license": "BSD", "purpose": "High-fidelity forensic PDF generation" },
+    { "package": "pillow", "version": "12.3.0", "license": "HPND / PIL", "purpose": "Image processing in PDF canvas" },
+    { "package": "pefile", "version": "2024.8.26", "license": "MIT", "purpose": "Static PE header and entropy analysis" },
+    { "package": "altgraph", "version": "0.17.5", "license": "MIT", "purpose": "PyInstaller dependency graph analysis" },
+    { "package": "charset-normalizer", "version": "3.5.2", "license": "MIT", "purpose": "Text encoding normalization" },
+    { "package": "pywin32-ctypes", "version": "0.2.3", "license": "BSD-3-Clause", "purpose": "Windows ctypes API bindings" }
+  ],
+  "distribution_artifact": {
+    "file_name": "RansomEye.exe",
+    "relative_path": "dist_isolated/RansomEye.exe",
+    "file_size_bytes": 21095724,
+    "file_size_mb": 20.12,
+    "sha256": "49D2D87526F72E97FB284B1A683E0E10C50485890449F2C388E5369A8AA6653E",
+    "sha1": "<PLACEHOLDER_SHA1>",
+    "md5": "<PLACEHOLDER_MD5>"
+  },
+  "code_signing": {
+    "status": "UNSIGNED",
+    "signature_type": "None",
+    "signer_subject": "<PLACEHOLDER_SIGNER_SUBJECT>",
+    "issuer": "<PLACEHOLDER_ISSUER>",
+    "timestamp_authority": "<PLACEHOLDER_TIMESTAMP_URL>",
+    "post_signing_sha256": "<PLACEHOLDER_POST_SIGNING_SHA256>"
+  },
+  "binary_protections": {
+    "aslr_dynamic_base": true,
+    "aslr_high_entropy_va": true,
+    "dep_nx_compatible": true,
+    "control_flow_guard": true,
+    "subsystem": "IMAGE_SUBSYSTEM_WINDOWS_CUI"
+  },
+  "test_verification": {
+    "full_pytest_suite": {
+      "total_tests": 984,
+      "passed": 984,
+      "failed": 0,
+      "skipped": 0,
+      "duration_seconds": 156.47
+    },
+    "smoke_tests_passed": ["ST-01", "ST-02", "ST-03", "ST-04", "ST-05", "ST-06"],
+    "extended_capability_tests_passed": ["ET-01", "ET-02", "ET-03", "ET-04", "ET-05"],
+    "clean_machine_test_passed": ["CT-01"]
+  },
+  "known_limitations": [
+    "Database schema auto-migrates in-place when opening historical database versions (backup recommended before opening pre-v6 databases).",
+    "Analyst web console listens on loopback (127.0.0.1) by default with open CORS headers.",
+    "Binary is currently unsigned and will trigger SmartScreen prompt until signed with an enterprise/EV Authenticode certificate.",
+    "Raw command line events in reports are unredacted and may contain secrets if executed with plaintext credentials."
+  ]
+}

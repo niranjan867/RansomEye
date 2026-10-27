@@ -705,4 +705,7 @@ def ingest_static_finding(
         note=f"Static analysis performed (Entropy={result.total_entropy:.2f}, Type={result.file_type})",
     )
 
+    from ransomeye.threat_assessment import assess_case
+    assess_case(store, case_id)
+
     return finding_id

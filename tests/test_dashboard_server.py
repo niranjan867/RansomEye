@@ -1,6 +1,7 @@
 """Integration tests for RansomEye Dashboard HTTP Server (M23.9 Product Integration)."""
 
 import json
+import os
 import socket
 import threading
 import time
@@ -764,11 +765,67 @@ def test_dashboard_export_and_lock(running_server, test_db_path, tmp_path):
     lock_info = json.loads(req.read().decode("utf-8"))
     assert "locked" in lock_info
 
-    # Safe unlock
+    # Unlock without explicit authorization must be rejected (safe-by-default).
     code, res = _post_json(f"{running_server}/api/export/unlock", {
         "case_id": "CASE-EXPORT-01"
     })
+    assert code == 403
+
+    # Explicit authorization succeeds.
+    code, res = _post_json(f"{running_server}/api/export/unlock", {
+        "case_id": "CASE-EXPORT-01",
+        "force": True,
+        "break_lock": True,
+    })
     assert code == 200
+
+
+def test_dashboard_export_unlock_requires_explicit_force(running_server, test_db_path, tmp_path):
+    """Regression test: /api/export/unlock must not force-break a lock by default."""
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-UNLOCK-01", "Unlock Case")
+    store.close()
+
+    out_dir = tmp_path / "exports_unlock"
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = out_dir.parent / f".{out_dir.name}.lock"
+    # The dashboard server runs in a background thread of this SAME process (see the
+    # running_server fixture), so a lock stamped with this test's own pid is reported
+    # ACTIVE by get_lock_owner_status() inside the handler -- i.e. this simulates a
+    # live, currently-owned export lock, not a stale one.
+    lock_path.write_text(json.dumps({
+        "pid": os.getpid(),
+        "created_utc": "2026-01-01T00:00:00+00:00",
+        "database": str(test_db_path),
+        "case_id": "CASE-UNLOCK-01",
+        "output": str(out_dir),
+    }), encoding="utf-8")
+
+    # No force at all -> rejected before any lock inspection.
+    code, res = _post_json(f"{running_server}/api/export/unlock", {
+        "output_dir": str(out_dir)
+    })
+    assert code == 403
+    assert lock_path.is_file()
+
+    # force without break_lock, against an ACTIVE lock -> library-level rejection (409),
+    # proving "release" and "override" are genuinely distinguished, not just force-gated.
+    code, res = _post_json(f"{running_server}/api/export/unlock", {
+        "output_dir": str(out_dir),
+        "force": True
+    })
+    assert code == 409
+    assert lock_path.is_file()
+
+    # Explicit force + break_lock -> removal succeeds.
+    code, res = _post_json(f"{running_server}/api/export/unlock", {
+        "output_dir": str(out_dir),
+        "force": True,
+        "break_lock": True
+    })
+    assert code == 200
+    assert res["removed_lock"]  # truthy: the removed lock's path (not False)
+    assert not lock_path.is_file()
 
 
 def test_dashboard_database_maintenance(running_server, test_db_path, tmp_path):
@@ -794,6 +851,120 @@ def test_dashboard_database_maintenance(running_server, test_db_path, tmp_path):
     })
     assert code == 200
     assert res["status"] == "OK"
+
+
+def test_dashboard_database_restore_requires_explicit_confirm_and_target(running_server, test_db_path, tmp_path):
+    """Regression test: /api/database/restore must not default confirm=true or
+    silently target the live database when the caller omits either field."""
+    bkp_path = tmp_path / "backup_test2.db"
+    code, res = _post_json(f"{running_server}/api/database/backup", {
+        "backup_path": str(bkp_path)
+    })
+    assert code == 200
+    assert bkp_path.is_file()
+
+    restored_path = tmp_path / "restored_test2.db"
+
+    # Missing confirm entirely -> rejected (previously defaulted to confirm=True).
+    code, res = _post_json(f"{running_server}/api/database/restore", {
+        "backup_path": str(bkp_path),
+        "target_path": str(restored_path),
+    })
+    assert code == 400
+    assert not restored_path.exists()
+
+    # confirm explicitly false -> rejected.
+    code, res = _post_json(f"{running_server}/api/database/restore", {
+        "backup_path": str(bkp_path),
+        "target_path": str(restored_path),
+        "confirm": False,
+    })
+    assert code == 400
+    assert not restored_path.exists()
+
+    # confirm true but target_path omitted -> rejected (previously defaulted to the
+    # live DB_PATH, i.e. test_db_path).
+    live_db_mtime_before = test_db_path.stat().st_mtime if test_db_path.exists() else None
+    code, res = _post_json(f"{running_server}/api/database/restore", {
+        "backup_path": str(bkp_path),
+        "confirm": True,
+    })
+    assert code == 400
+    if live_db_mtime_before is not None:
+        assert test_db_path.stat().st_mtime == live_db_mtime_before
+
+    # Both present and correct -> succeeds.
+    code, res = _post_json(f"{running_server}/api/database/restore", {
+        "backup_path": str(bkp_path),
+        "target_path": str(restored_path),
+        "confirm": True,
+    })
+    assert code == 200
+    assert restored_path.is_file()
+
+
+def test_dashboard_case_assessment_correlations_match_incidents_route(running_server, test_db_path):
+    """Phase 2 regression test: GET /api/case/<id>'s assessment.correlations must be
+    exactly the data GET /api/incidents/<id> serves, for both a case with correlations
+    and one without. This is the equivalence the frontend's loadCase() now relies on
+    to stop issuing a separate /api/incidents/<id> request."""
+    store = EvidenceStore(test_db_path)
+    store.create_case("CASE-CORR-01", "Correlated Case")
+    store.create_case("CASE-CORR-02", "Uncorrelated Case")
+
+    correlations = [
+        {
+            "incident_id": "INC-0001",
+            "severity": "HIGH",
+            "start_time": "2026-01-01T00:00:00Z",
+            "duration": "PT5M",
+            "finding_ids": ["FIND-1", "FIND-2"],
+            "evidence_event_ids": ["EV-1", "EV-2", "EV-3"],
+        }
+    ]
+    store.save_assessment("CASE-CORR-01", {
+        "score": 90,
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "reasons": ["Multiple high-confidence findings correlated"],
+        "techniques": ["T1486"],
+        "correlations": correlations,
+    })
+    store.save_assessment("CASE-CORR-02", {
+        "score": 10,
+        "severity": "LOW",
+        "confidence": 0.5,
+        "reasons": [],
+        "techniques": [],
+        "correlations": [],
+    })
+    store.close()
+
+    # Case with correlations: /case's embedded assessment.correlations must equal
+    # /incidents' top-level incidents array, element for element.
+    case_resp = json.loads(urllib.request.urlopen(f"{running_server}/api/case/CASE-CORR-01").read())
+    inc_resp = json.loads(urllib.request.urlopen(f"{running_server}/api/incidents/CASE-CORR-01").read())
+    assert case_resp["assessment"]["correlations"] == inc_resp["incidents"]
+    assert case_resp["assessment"]["correlations"] == correlations
+    assert case_resp["assessment"]["correlations"][0]["incident_id"] == "INC-0001"
+
+    # Case with an assessment but no correlations: both routes must agree on an
+    # empty list, not null or a missing key.
+    case_resp2 = json.loads(urllib.request.urlopen(f"{running_server}/api/case/CASE-CORR-02").read())
+    inc_resp2 = json.loads(urllib.request.urlopen(f"{running_server}/api/incidents/CASE-CORR-02").read())
+    assert case_resp2["assessment"]["correlations"] == []
+    assert inc_resp2["incidents"] == []
+
+    # Case with no assessment row at all: /case returns assessment: null;
+    # /incidents still returns an empty list. The frontend's loadCase() must treat
+    # a null assessment the same as an assessment with no correlations.
+    store2 = EvidenceStore(test_db_path)
+    store2.create_case("CASE-CORR-03", "No Assessment Case")
+    store2.close()
+    case_resp3 = json.loads(urllib.request.urlopen(f"{running_server}/api/case/CASE-CORR-03").read())
+    inc_resp3 = json.loads(urllib.request.urlopen(f"{running_server}/api/incidents/CASE-CORR-03").read())
+    assert case_resp3["assessment"] is None
+    assert inc_resp3["incidents"] == []
 
 
 def test_dashboard_static_and_phishing_analysis(running_server, tmp_path):
